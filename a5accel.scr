@@ -1,0 +1,476 @@
+#include "ls.icl"                  // Standard functions
+#include "or.icl"                // A2 command names
+#cmdbuff 6
+
+#define VERSION        "1.02"
+
+// 1.01: Disables camera controls if tester is equipped with head cameras.
+// 1.02: Acceleration profile.
+
+#define WIDTH          493             // Full width of client area
+#define EXTRA          422             // Width of profile area
+#define NPARM          16              // Total number of parameters
+#define DY             24              // Height of single string
+
+handle           hmain                 // Main window
+handle           horig[NPARM]          // Display original parameters
+handle           hact[NPARM]           // Display actual parameters
+handle           hplus[NPARM]          // Add 5% and send
+handle           hminus[NPARM]         // Subtract 5% and send
+handle           hrestore[NPARM]       // Restore original and send
+handle           hshowaccel            // Show or hide acceleration profile
+handle           hrestoreall           // Restore all originals and send
+handle           hsend                 // Just send again
+handle           hquit                 // Basta!
+
+handle           hchild                // Placeholder for acceleration profile
+handle           hgraph                // Displays acceleration profile
+handle           haxis                 // Axis for acceleration profile
+handle           hzoom                 // Zoom acceleration profile
+handle           hrefresh              // Refresh acceleration profile
+int              showaccel             // Whether profile is displayed
+int              axis                  // Currently selected axis
+int              zoom                  // Zoom acceleration profile
+int              refresh               // Re-read profile
+int              repaint               // Redraw profile
+int              trefresh              // Time when profile request was sent
+
+float            orig[NPARM]           // Original parameters
+float            act[NPARM]            // Actual parameters
+
+float            a[400],amax           // Acceleration and its maximum
+float            v[400],vmax           // Gathered velocity and its maximum
+float            x[400],xmax           // Gathered distance and its maximum
+float            step                  // Step between points, seconds
+int              alength               // Length of acceleration profile
+int              cursor                // Cursor in acceleration profile
+
+char             title[NPARM][64] = { \
+  "Head X acceleration, m/s2",        \
+  "Head X velocity, m/s",             \
+  "Head X period of vibrations, ms",  \
+  "Reserved",                         \
+  "Head Y acceleration, m/s2",        \
+  "Head Y velocity, m/s",             \
+  "Head Y period of vibrations, ms",  \
+  "Reserved",                         \
+  "Camera X acceleration, m/s2",      \
+  "Camera X velocity, m/s",           \
+  "Camera X period of vibrations, ms",\
+  "Reserved",                         \
+  "Camera Y acceleration, m/s2",      \
+  "Camera Y velocity, m/s",           \
+  "Camera Y period of vibrations, ms",\
+  "Reserved" }
+
+// Service function, redraws original and actual parameters.
+function int Redraw()
+  int i
+  for i=0,i<NPARM,i++ do
+    if orig[i]==0.0 then
+      change horig[i] text=" - "
+    else
+      change horig[i] text=format(" %.4g",orig[i])
+    endif
+    if act[i]==0.0 then
+      change hact[i] color=GRAY
+      change hact[i] text=" -"
+    else if Abs(act[i]-orig[i])<orig[i]*0.001 then
+      act[i]=orig[i]                   // Kinda autorestoring
+      change hact[i] color=BLACK
+      change hact[i] text=format(" %.4g",act[i])
+    else
+      change hact[i] color=LIGHTRED
+      change hact[i] text=format(" %.4g",act[i])
+    endif
+  enddo
+end
+
+// Service function, requests original parameters from crate and updates actual.
+function int Getoriginals()
+  int i,t
+  char buf[128]
+  $A[0].length=0
+  buf[0]=S_DEBUG
+  buf[1]=0x23                          // Query A5 movement parameters
+  SYS.Sendimm(0,2,buf)
+  t=Time()+3000
+  while t>Time() do
+    if $A[0].length==0 continue
+    if $A[0].command==S_DEBUG then
+      for i=0,i<NPARM,i++ do
+        orig[i]=$float4($A[0]+5+i*4)
+        act[i]=orig[i]
+      enddo
+    endif
+    break
+  enddo
+  Redraw()
+end
+
+function int main()
+  int i,k,n,changed,setaxis,x0,y0,err
+  float r,scale
+  char s[256],buf[128]
+  hmain=control WINDOW
+    window=NULL
+    position=10,10,WIDTH,NPARM*DY+70
+    name=format("A5加速度版本%s",VERSION)
+    help=" "
+    bkcolor=LIGHTYELLOW
+    size=1024
+  endc
+  draw window=hmain mode=M_RIGHT font=INFOFONT
+  for i=0,i<NPARM,i++ do
+    draw at 210,i*DY+45 text=title[i]
+    horig[i]=control TEXT
+      window=hmain
+      position=220,i*DY+27,80,DY-4
+      help=format("'%s'的默认值",title[i])
+      color=DARKGRAY
+      bkcolor=WHITE
+      mode=M_BORDER
+      font=MEDIUMFONT
+    endc
+    hact[i]=control EDIT
+      window=hmain
+      position=315,i*DY+27,80,DY-4
+      help=format("'%s'的实际值",title[i])
+      color=BLACK
+      bkcolor=WHITE
+      font=MEDIUMFONT
+    endc
+    if i>=NPARM/2 && $LAY.cameras==0 && $LAY.headcameras!=0 disable hact[i]
+    hminus[i]=control BUTTON
+      window=hmain
+      position=410,i*DY+27,20,DY-4
+      name="?"
+      help=format("按下减小'%s' 5%%",title[i])
+      font=MEDIUMFONT
+      bkcolor=LIGHTGRAY
+    endc
+    if i>=NPARM/2 && $LAY.cameras==0 && $LAY.headcameras!=0 disable hminus[i]
+    hplus[i]=control BUTTON
+      window=hmain
+      position=435,i*DY+27,20,DY-4
+      name="+"
+      help=format("按下增加'%s' 5%%",title[i])
+      font=MEDIUMFONT
+      bkcolor=LIGHTGRAY
+    endc
+    if i>=NPARM/2 && $LAY.cameras==0 && $LAY.headcameras!=0 disable hplus[i]
+    hrestore[i]=control BUTTON
+      window=hmain
+      position=463,i*DY+27,20,DY-4
+      name="R"
+      help=format("按下即可还原 '%s'",title[i])
+      font=MEDIUMFONT
+      bkcolor=LIGHTGRAY
+    endc
+    if i>=NPARM/2 && $LAY.cameras==0 && $LAY.headcameras!=0 disable hrestore[i]
+  enddo
+  draw show
+  hshowaccel=control BUTTON
+    window=hmain
+    position=10,NPARM*DY+40,130,22
+    name="显示配置文件 >>"
+    help="按下可以显示或隐藏加速曲线"
+  endc
+  showaccel=0
+  hrestoreall=control BUTTON
+    window=hmain
+    position=WIDTH-273,NPARM*DY+40,81,22
+    name="恢复"
+    help="按下将所有参数恢复为默认值"
+  endc
+  hsend=control BUTTON
+    window=hmain
+    position=WIDTH-182,NPARM*DY+40,81,22
+    name="发送"
+    help="按下可将参数重新发送到测试机"
+  endc
+  hquit=control BUTTON
+    window=hmain
+    position=WIDTH-91,NPARM*DY+40,81,22
+    name="退出"
+    help="按下可以关闭此窗口"
+  endc
+  Getoriginals()
+  changed=0
+  setaxis=-1
+  axis=0
+  zoom=0
+  alength=0
+  refresh=0
+  repaint=1
+  while 1 do
+    for i=0,i<NPARM,i++ do
+      Text(hact[i],s); r=0.0; sscanf(s,"%f",&r);
+      if Pressed(hact[i]) then
+        act[i]=r
+        changed=1
+        setaxis=i
+      else if Pressed(hminus[i]) then
+        act[i]=r*0.95
+        changed=1
+        setaxis=i
+      else if Pressed(hplus[i]) then
+        act[i]=r/0.95                  // OK, a bit more than 5% but reversible
+        changed=1
+        setaxis=i
+      else if Pressed(hrestore[i]) then
+        act[i]=orig[i]
+        setaxis=i
+        changed=1
+      endif
+    enddo
+    if Pressed(hshowaccel) then
+      if showaccel==0 then
+        change hmain position=*,*,WIDTH+EXTRA,*
+        hchild=control CHILD
+          window=hmain
+          position=WIDTH,0,EXTRA,NPARM*DY+70
+          color=LIGHTYELLOW
+          bkcolor=LIGHTYELLOW
+        endc
+        hgraph=control GRAPH
+          window=hchild
+          position=1,10,EXTRA-10,NPARM*DY+20
+          color=BLACK
+          bkcolor=WHITE
+        endc
+        haxis=control COMBOLIST
+          window=hchild
+          position=1,NPARM*DY+38,116,200
+          help="选择要显示的轴"
+        endc
+        add haxis text="Head X"
+        add haxis text="Y (no camera)"
+        add haxis text="Y (camera)"
+        add haxis text="Video X"
+        add haxis text="Video Y"
+        change haxis select=axis
+        hzoom=control BUTTON
+          window=hchild
+          position=126,NPARM*DY+40,50,22
+          name="放大"
+          color=(zoom?LIGHTRED:BLACK)
+          bkcolor=(zoom?YELLOW:LIGHTGRAY)
+          help="按下可以缩放或压缩加速度曲线"
+        endc
+        hrefresh=control BUTTON
+          window=hchild
+          position=EXTRA-91,NPARM*DY+40,81,22
+          name="刷新"
+          help="按下可以刷新加速度曲线"
+        endc
+        change hshowaccel text="Hide profile <<"
+        showaccel=1
+        refresh=1
+      else
+        change hmain position=*,*,WIDTH,*
+        destroy hchild
+        hchild=NULL
+        change hshowaccel text="Show profile >>"
+        showaccel=0
+      endif
+    else if Pressed(hrestoreall) then
+      Getoriginals()
+      changed=1
+    else if Pressed(hsend) then
+      changed=1
+    else if Pressed(hquit) then
+      break
+    endif
+    if showaccel then
+      if Pressed(haxis) then
+        refresh=1
+      else if Pressed(hzoom) then
+        zoom=!zoom
+        change hzoom color=(zoom?LIGHTRED:BLACK)
+        change hzoom bkcolor=(zoom?YELLOW:LIGHTGRAY)
+        refresh=1
+      else if Pressed(hrefresh) then
+        refresh=1
+      endif
+    endif
+    if changed then
+      // Display new actual data.
+      Redraw()
+      $A[0].length=0
+      buf[0]=S_DEBUG
+      buf[1]=0x24                      // Change A5 movement parameters
+      for i=0,i<NPARM,i++ do
+        $float4(buf+2+i*4)=act[i]
+      enddo
+      SYS.Sendimm(1,2+NPARM*4,buf)
+      changed=0
+      if showaccel refresh=1
+    endif
+    if showaccel!=0 && setaxis>=0 then
+      // Automatically change displayed profile.
+      if setaxis<=2 && axis!=0 then
+        axis=0; refresh=1              // Head X
+      else if (setaxis==4 || setaxis==5) && axis!=1 && axis!=2 then
+        axis=1; refresh=1              // Head Y (no camera)
+      else if setaxis==6 && axis!=1 then
+        axis=1; refresh=1              // Head Y (no camera)
+      else if setaxis==7 && axis!=2 then
+        axis=2; refresh=1              // Head Y (with camera)
+      else if setaxis>=8 && setaxis<=10 && axis!=3 then
+        axis=3; refresh=1              // Video X
+      else if setaxis>=12 && setaxis<=14 && axis!=4 then
+        axis=4; refresh=1              // Video Y
+      endif
+      change haxis select=axis
+      setaxis=-1
+    endif
+    if showaccel!=0 && refresh==1 then
+      // Ask for new acceleration profile (400 points).
+      for i=0,i<4,i++ do
+        SYS.Killimm(2+i)
+        buf[0]=S_DEBUG
+        buf[1]=0x54                    // Get acceleration profile
+        axis=Status(haxis)
+        if axis==1 then                // Head Y (no camera)
+          buf[2]=0x01
+        else if axis==2 then           // Head Y (with camera)
+          buf[2]=0x03
+        else if axis==3 then           // Video X
+          buf[2]=0x04
+        else if axis==4 then           // Video Y
+          buf[2]=0x05
+        else                           // Head X
+          buf[2]=0x00
+        endif
+        buf[3]=0                       // Table (always full acceleration)
+        $int2(buf+4)=(zoom?1:10)       // Step
+        $int2(buf+6)=(zoom?1:10)*i*100 // Offset in table
+        $int2(buf+8)=100               // Number of data points
+        $int4(buf+10)=0                // Must be zero
+        $int4(buf+14)=0
+        SYS.Sendimm(2+i,18,buf)
+      enddo
+      refresh=2
+      trefresh=Time()
+    else if refresh==2 then
+      err=0
+      for i=0,i<4,i++ do
+        if $A[2+i].length==0 break
+        if $A[2+i].answer!=S_DEBUG then
+          err=1
+        else if $A[2+i].length==5 then
+          err=2
+        endif
+      enddo
+      if i<4 && Time()-trefresh>1500                                           \
+        err=3                          // Timeout
+      if i<4 && err==0                                                         \
+        continue                       // Some data is still missing
+      alength=0
+      vmax=0.001
+      xmax=0.000001
+      amax=0.001
+      if err!=0 then
+        // Error.
+        draw window=hgraph color=BLACK bkcolor=WHITE clear
+        draw font=LARGEFONT color=LIGHTRED mode=M_CENTERED
+        draw at (EXTRA-10)/2,100
+        if err==1 then
+          draw text="Invalid answer"
+        else if err==2 then
+          draw text="Internal error"
+        else
+          draw text="Timeout!"
+        endif
+        draw show
+      else
+        // Gather data.
+        for i=0,i<4,i++ do
+          step=$float4($A[2+i]+5)*$uint2($A[2+i]+13)
+          n=($A[2+i].length-37)/8
+          for k=0,k<n && alength<400,k++ do
+            v[alength]=$float4($A[2+i]+37+k*8)
+            vmax=Max(vmax,v[alength])
+            x[alength]=$float4($A[2+i]+41+k*8)
+            xmax=Max(xmax,x[alength])
+            alength++
+          enddo
+          if n<100 break
+        enddo
+        if step==0.0 step=(zoom?0.0001:0.001)
+        // Calculate accelerations.
+        for i=0,i<alength-1,i++ do
+          a[i]=(v[i+1]-v[i])/step
+          amax=Max(amax,a[i])
+        enddo
+        if i==0 then
+          a[i]=0.0
+        else
+          a[i]=a[i-1]
+        endif
+        repaint=1
+      endif
+      refresh=0
+    endif
+    // Check for cursor movement.
+    if showaccel!=0 && alength>0 then
+      k=Mousexy(hgraph,&x0,&y0,&i)
+      k=Max(0,Min(x0-10,399))
+      if (i & 0x8000)==0 && k!=cursor then
+        cursor=k
+        repaint=1
+      endif
+    endif
+    if repaint!=0 && showaccel!=0 then
+      // Repaint acceleration profile.
+      vmax=Max(vmax,0.001)
+      xmax=Max(xmax,0.000001)
+      amax=Max(amax,0.001)
+      x0=10
+      y0=NPARM*DY-30
+      draw window=hgraph color=BLACK bkcolor=WHITE clear
+      // Draw axii.
+      draw color=GRAY at x0,10 to x0,y0 to x0+400,y0
+      // Draw cursor.
+      if alength>0 then
+        draw color=STRANGE at x0+cursor,10 to x0+cursor,y0
+      endif
+      // Acceleration.
+      draw color=LIGHTRED
+      scale=(y0-10)/amax
+      draw at x0,y0-a[0]*scale
+      for i=1,i<alength,i++ do
+        draw to i+x0,y0-a[i]*scale
+      enddo
+      // Velocity.
+      draw color=BLACK
+      scale=(y0-10)/vmax
+      draw at x0,y0-v[0]*scale
+      for i=1,i<alength,i++ do
+        draw to i+x0,y0-v[i]*scale
+      enddo
+      // Distance.
+      draw color=GREEN
+      scale=(y0-10)/xmax
+      draw at x0,y0-x[0]*scale
+      for i=1,i<alength,i++ do
+        draw to i+x0,y0-x[i]*scale
+      enddo
+      // Legend.
+      draw font=MAINFONT mode=M_LEFT
+      draw at x0,y0+22 color=BLACK
+      draw text=format("Time %.2f ms",cursor*step*1000.0)
+      draw at x0,y0+40 color=LIGHTRED
+      draw text=format("Accel %.2f m/s2",a[cursor])
+      draw at EXTRA/2,y0+22 color=BLACK
+      draw text=format("Velocity %.3f m/s",v[cursor])
+      draw at EXTRA/2,y0+40 color=GREEN
+      draw text=format("Distance %.3f mm",x[cursor]*1000.0)
+      draw show
+      repaint=0
+    endif
+    wait
+  enddo
+end
+

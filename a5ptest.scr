@@ -1,0 +1,1497 @@
+#include "ls.icl"                  // Standard functions
+#include "or.icl"                // A2 command names
+#cmdbuff 4                             // Answer buffers
+
+#define VERSION        "1.00"
+#define DESCRIPTION    "Pressure test with prepared needle"
+
+
+// Used resources.
+#bitmap "logo"<"guoke.bmp"               // All bitmaps are compressed
+#bitmap "bkground"<"aluminum.bmp"      // Alternative: "pcb1.bmp"
+#bitmap "unknown"<"unknown.bmp"
+#bitmap "a2"<"a2.bmp"
+#bitmap "a3"<"a3.bmp"
+#bitmap "a4"<"a4.bmp"
+#bitmap "a5"<"a5.bmp"
+#bitmap "a6"<"a6.bmp"
+
+// Dimensions of test window.
+#define MAINX          600
+#define MAINY          400
+#define SPLIT          330
+#define SERVY          25
+#define LEFTX          320             // (SPLIT-10)
+#define LEFTY          365             // (MAINY-SERVY-10)
+#define RIGHTX         265             // (MAINX-SPLIT-5)
+#define RIGHTY         335             // (MAINY-SERVY-SERVY-15)
+#define USERY          280             // Non-standard value
+
+// Constants determining tester type.
+#define TT_WRONG       (-1)
+#define TT_UNDEF       0
+#define TT_A1          1
+#define TT_A2          2
+#define TT_A2L         3
+#define TT_A2H         4
+#define TT_A3          5
+#define TT_A3L         6
+#define TT_A4          7
+#define TT_A5          8
+#define TT_A5L         9
+#define TT_A6          10
+#define TT_S1          11
+#define TT_S2          12
+#define TT_A7          13
+#define TT_A8          14
+#define TT_M2          15
+
+// Layout configuration bits in $LAY.config.
+#define LC_SMASK2      0x20000000      // Extention of LC_SMASK
+#define LC_AUTOPROBE   0x10000000      // Autodetect probes (Kelvin or standard)
+#define LC_TYPEMASK    0x0B000000      // General type of machine
+#define   LC_STD       0x00000000      // LC_TYPEMASK: standard A5/A6 tester
+#define   LC_NEWA1     0x01000000      // LC_TYPEMASK: new A1 (slow A5) tester
+#define   LC_S1        0x02000000      // LC_TYPEMASK: S1/S2
+#define   LC_A8        0x03000000      // LC_TYPEMASK: A7/A8
+#define LC_VACUUMBOX   0x04000000      // Disable movements on bottom side
+#define LC_MOREMASK    0x00C00000      // Mask for more space bits
+#define   LC_MOREBOT   0x00800000      // Give more space on bottom
+#define   LC_MORETOP   0x00400000      // Give more space on the top
+#define LC_DEADLOCKS   0x00200000      // Autoresolve deadlocks
+#define LC_ILLUM       0x00100000      // Auto switch video illumination on/off
+#define LC_HARDZ       0x00040000      // Hard Z contacting (A2/A4/A5 only)
+#define LC_QUAKE       0x00020000      // Earthquake protection on (M2 only)
+#define LC_SMASK1      0x0001C000      // Mask for type of loading system
+#define LC_RELAYS      0x00002000      // Slow (LATEST-compatible) relays
+#define LC_OHTYPE      0x00001C00      // Mask to extract on-head type
+#define   LC_NOFIELD   0x00001000      // On-heads without field amplifier
+#define   LC_PHADJ     0x00000C00      // On-heads with adjustable field phase
+#define   LC_ACTIVE    0x00000400      // Active on-heads (with Dallas/R1-R4)
+#define   LC_PASSIVE   0x00000000      // Passive on-heads (manual C adjust)
+#define LC_TRAFFICS    0x00000200      // Hitachi-style traffic lights
+#define LC_ZSENSORS    0x00000100      // A series: Z pressure sensors active
+#define LC_LOWBAUD     0x00000100      // M2: low AFMCU I/O baud rate
+#define LC_ISM2        0x00000080      // M2 tester
+#define LC_A2LOADER    0x00000040      // A2-style loader, enables LC_SMASK
+#define LC_ENCODERS    0x00000020      // Tester with encoders
+#define LC_COVER       0x00000010      // I have forgotten what it means
+#define LC_HIGHZ       0x00000008      // Z always moves with full hub (B1)
+#define LC_LDELAY      0x00000004      // Wait after light off (obsolete)
+#define LC_AMASK       0x00000003      // Mask for type of antennae
+#define   LC_EXTANT    0x00000000      // LC_AMASK: external (A1) antennae
+#define   LC_INTANT    0x00000001      // LC_AMASK: internal antennae (void)
+#define   LC_FINGANT   0x00000002      // LC_AMASK: finger antennae
+// Alternative (old) interpretation of LC_OHTYPE bits.
+#define LC_PHASEADJ    0x00000800      // On-heads with adjustable field phase
+#define LC_ACTIVEONHD  0x00000400      // Active on-heads (with Dallas/R1-R4)
+// Tester types in LC_SMASK=(LC_SMASK2|LC_SMASK1).
+#define LC_LMMAN       0x0001C000      // L&M manual tester
+#define LC_LMS2        0x00018000      // L&M for S2a
+#define LC_EPCOS       0x00014000      // L&M for EPCOS tester
+#define LC_LM          0x00010000      // L&M for A5a
+#define LC_A5WIDE      0x0000C000      // A5 wide shuttle
+#define LC_AUTOMATE    0x00008000      // Automatical shuttle
+#define LC_A2XSHUT     0x00004000      // A2X shuttle
+#define LC_A2SHUT      0x00000000      // A2 standard shuttle
+// Useful shortcuts and substitutions.
+#define LC_SMASK       (LC_SMASK2|LC_SMASK1)
+#define LC_LDMASK      (LC_SMASK2|LC_SMASK1|LC_A2LOADER)
+#define LC_LMAUTO      (LC_LM|LC_A2LOADER)
+#define LC_LMS2AUTO    (LC_LMS2|LC_A2LOADER)
+#define LC_EPCOSAUTO   (LC_EPCOS|LC_A2LOADER)
+
+handle hmain                           // Main window
+handle hexit                           // Button "Close"
+handle hserv,hleft,hright              // Left and right subwindows
+handle hinfo                           // Current status of test
+
+char   crateversion[128]               // Version of loaded crate software
+char   layoutversion[128]              // Version of loaded layout
+char   headversion[128]                // Version of loaded head software
+int    loadchanged                     // Loader is closed
+
+int    testertype                      // Type of tester (TT_xxx)
+int    testersides                     // Bit 0x1: top, 0x2: bottom rails
+float  headcamradius                   // Radius of head cameras, millimeters
+
+int    psensor                         // Head with pressure sensor
+float  xsensor                         // X coordiate of pressure sensor
+float  ysensor                         // Y coordiate of pressure sensor
+float  xoffset                         // X offset between sensor and needle
+float  yoffset                         // Y offset between sensor and needle
+
+char   saveexcel[260]                  // File in Excel-compatible format
+
+// Display modal "dialog box" with error message.
+function int Error(char *s1,char *s2)
+  handle herr,hdummy,hok
+  herr=control WINDOW
+    window=hmain
+    position=0,0,250,135
+    name="错误"
+    mode=M_MODAL
+    bkcolor=YELLOW
+  endc
+  hok=control BUTTON
+    window=herr
+    position=85,100,80,24
+    name="确定"
+    help="按下可以确认错误消息"
+  endc
+  hdummy=control ICON
+    window=herr
+    position=5,30,36,36
+    name="EXCLAM"
+    bkcolor=YELLOW
+  endc
+  hdummy=control TEXT
+    window=herr
+    position=41,20,200,24
+    name=s1
+    bkcolor=YELLOW
+    mode=M_CENTERED
+  endc
+  hdummy=control TEXT
+    window=herr
+    position=41,45,200,54
+    name=s2
+    bkcolor=YELLOW
+    mode=M_CENTERED
+  endc
+  while Pressed(hok)==0 do; enddo
+  destroy herr
+end
+
+// Assure that tester is loaded and that debug mode does not make test void.
+function int Loadtester()
+  int i,j,t,err,nframes
+  handle hload,hretry
+repeat:
+  clear hright
+  change hinfo limits=0,0
+  change hinfo text="软件复位"
+  draw window=hright font=TIMESFONT wrap=RIGHTX-5 color=BLACK
+  draw at 6,30 text="载入测试机,请稍等... "
+  draw show
+  delay 500
+  SYS.Softimm(0)
+  t=Time(); i=0
+  while $A[0].length==0 do
+    if Pressed(hexit) return -1        // Button "Exit" works as an interrupt
+    j=(Time()-t)/1000
+    if i!=j then
+      change hinfo text=format("等待软件复位 - %i s",j)
+      i=j
+    endif
+    if j>15 break
+    wait
+  enddo
+  clear hright
+  draw window=hright font=TIMESFONT
+  if $A[0].length==0 then
+    change hinfo name="机箱无应答"
+    draw at 6,30 wrap=RIGHTX-5 color=BLACK
+    draw text="No answer from the Flying Probe Tester. There is a variety of "
+    draw text="possible reasons. The most probable are:\n" color=LIGHTRED
+    draw text="- Tester is off\n"
+    draw text="- Flying Debugger or Test Player is running\n"
+    draw text="- Crash in embedded software\n"
+    draw text="- Optocable is pulled out\n"
+    draw color=BLACK text="Please correct the problem and try again."
+    draw show
+    hretry=control BUTTON
+      window=hright
+      position=(RIGHTX-120)/2,USERY,120,24
+      name="重试"
+      help="按下可以重新尝试连接"
+    endc
+    while 1 do
+      if Pressed(hretry) goto repeat
+      if Pressed(hexit) return -1
+      wait
+    enddo
+  else if $A[0].answer==S_ERROR &&                                             \
+    ($A[0].subcmd==E_NOCRATDATA || $A[0].subcmd==E_NOFINGDATA) then
+    change hinfo name="测试器未加载"
+    draw at 6,30 wrap=RIGHTX-5 color=BLACK
+    draw text="The Flying Probe Tester is not loaded. Of course, it "
+    draw color=LIGHTRED text="must " color=BLACK
+    draw text="be loaded before you can start test. Typically, all you "
+    draw text="need is to press 'Load all' in the appearing window. "
+    if $GLOBAL.disabledrails!=0 then
+      draw text="Please check for rails disabled in the Debug mode. "
+    endif
+    if ($GLOBAL.debugmode & 0x20BF)!=0 || ($GLOBAL.videomode & 0x20BF)!=0 ||   \
+      $uint4($GLOBAL+280)!=0 then
+      draw color=LIGHTRED
+      draw text="Please also check that current Debug mode really allows you "
+      draw text="to adjust capacity!"
+    endif
+    err=SYS.Videosize(0,&i,&j,&nframes);
+    if err!=0 || nframes==0 then
+      draw color=BLACK
+      draw text="\nNote also that frame grabber in your system is not "
+      draw text="accessible. Either it is absent, or not installed, or "
+      draw text="OllyTest was unable to locate support DLLs."
+    else if nframes<4 then
+      draw color=BLACK
+      draw text="\nNote also that amount of memory allocated to frame grabber "
+      draw text="is too low which may cause problems during the test. We "
+      draw text="recommend that you set frame buffer to 2 Mb."
+    endif
+    draw show
+    hload=control BUTTON
+      window=hright
+      position=RIGHTX/2-124,USERY,120,24
+      name="呼叫加载器"
+      help="按下可以加载飞针测试机程序"
+    endc
+    hretry=control BUTTON
+      window=hright
+      position=RIGHTX/2+5,USERY,120,24
+      name="重试"
+      help="按下可以重新尝试连接"
+    endc
+    loadchanged=0
+    while 1 do
+      if Pressed(hload) SYS.Start("LOADER",0,"")
+      if Pressed(hretry) goto repeat
+      if Pressed(hexit) return -1
+      if loadchanged!=0 && $GLOBAL.headloaded==1 break
+      wait
+    enddo
+  else if $A[0].answer!=S_RESET then
+    change hinfo name="软重置错误"
+    draw at 6,30 wrap=RIGHTX-5 color=BLACK
+    draw text="Flying Probe Tester returned some unexpected answer. Normally, "
+    draw text="this never happens. All I may suggest is to press Hard Reset "
+    draw text="and then reboot the tester. "
+    draw show
+    hload=control BUTTON
+      window=hright
+      position=RIGHTX/2-124,USERY,120,24
+      name="呼叫加载器"
+      help="按下可以加载飞针测试机程序"
+    endc
+    hretry=control BUTTON
+      window=hright
+      position=RIGHTX/2+5,USERY,120,24
+      name="重试"
+      help="按下可以重新尝试连接"
+    endc
+    loadchanged=0
+    while 1 do
+      if Pressed(hload) SYS.Start("LOADER",0,"")
+      if Pressed(hretry) goto repeat
+      if Pressed(hexit) return -1
+      if loadchanged!=0 && $GLOBAL.headloaded==1 break
+      wait
+    enddo
+  endif
+  return 0
+end
+
+function int Getlayout()
+  int i,j,t,ident,err
+  char buf[16]
+  handle hload,hretry
+repeat:
+  clear hright
+  change hinfo limits=0,0
+  change hinfo text="获取布局"
+  delay 300
+  buf[0]=S_LAYOUT
+  buf[1]=0x03                          // Read layout with corrected phases
+  ident=SYS.Sendimm(0,2,buf)
+  t=Time(); i=0; err=0
+  while $A[0].length==0 do
+    if Pressed(hexit) return -1        // Button "Exit" works as an interrupt
+    j=(Time()-t)/1000
+    if i!=j then
+      change hinfo text=format("等待布局 - %i s",j)
+      i=j
+    endif
+    if j>15 break
+    wait
+  enddo
+  if $A[0].length==0 then
+    err=2
+  else if $A[0].answer!=S_LAYOUT || $A[0].length!=774 then
+    err=1
+  else
+    // Layout received. Get layout extentions.
+    Memcpy($LAY,$A[0]+6,768)
+    for i=0,i<16,i++                   // Same offsets in tester & inner copy
+      $LAYCORR.leftzerox[i]=$LAY.leftzerox[i]
+      $LAYCORR.leftzeroy[i]=$LAY.leftzeroy[i]
+      $LAYCORR.rightzerox[i]=$LAY.rightzerox[i]
+      $LAYCORR.rightzeroy[i]=$LAY.rightzeroy[i]
+    enddo
+    if $LAY.extlay>=1 then
+      buf[0]=S_LAYOUT
+      buf[1]=15                        // Read main layout extention
+      SYS.Sendimm(0,2,buf)
+    endif
+    for j=1,j<$LAY.extlay && j<5,j++ do
+      buf[0]=S_LAYOUT
+      buf[1]=20                        // Read additional layout extention
+      $int4(buf+2)=j-1                 // Index
+      SYS.Sendimm(j,6,buf)
+    enddo
+    i=-1
+    while 1 do
+      for j=0,j<$LAY.extlay && j<5,j++ do
+        if $A[j].length==0 break
+        if $A[j].answer!=S_LAYOUT || $A[j].length!=(j==0?774:778) then
+          err=1; break                 // Invalid answer
+        endif
+      enddo
+      if err!=0 || j>=$LAY.extlay break
+      if Pressed(hexit) return -1
+      j=(Time()-t)/1000
+      if i!=j then
+        change hinfo text=format("等待布局 - %i s",j)
+        i=j
+      endif
+      if j>15 then
+        err=2; break                   // Timeout!
+      endif
+      wait
+    enddo
+    if err==0 then
+      Memcpy($EXTLAY,$A[0]+6,768)
+      if $LAY.extlay>=2 then
+        Memcpy($EXT0,$A[1]+10,768)
+      else
+        Memset($EXT0,0,768)
+      endif
+      if $LAY.extlay>=3 then
+        Memcpy($EXT1,$A[2]+10,768)
+      else
+        Memset($EXT1,0,768)
+      endif
+      if $LAY.extlay>=4 then
+        Memcpy($EXT2,$A[3]+10,768)
+      else
+        Memset($EXT2,0,768)
+      endif
+      if $LAY.extlay>=5 then
+        Memcpy($EXT3,$A[4]+10,768)
+      else
+        Memset($EXT3,0,768)
+      endif
+    endif
+    SYS.Broadcast(8,"CHG LAY")         // Inform others that layout changed
+  endif
+  if err==0 then
+    buf[0]=S_DUMP                      // Get version of embedded software
+    buf[1]=255                         // Request to crate controller
+    buf[2]=0x14                        // Get software version
+    $uint2(buf+3)=0                    // Number of items
+    $uint2(buf+5)=0                    // Start item
+    ident=SYS.Sendimm(0,7,buf)
+    change hinfo text="获取软件版本"
+    delay 300
+    t=Time(); i=0; err=0
+    while $A[0].length==0 do
+      if Pressed(hexit) return -1      // Button "Exit" works as an interrupt
+      if (Time()-t)>5000 break         // Timeout 5 seconds
+      wait
+    enddo
+    if $A[0].length==0 then
+      err=2
+    else if $A[0].answer==S_DUMP then  // Correct answer, extract subfields
+      j=5
+      for i=j,i<$A[0].length,i++
+        if $A[0].rawdata[i]==0x0A then
+          $A[0].rawdata[i]='\0'; i++
+          break
+        endif
+      enddo
+      Strcpy(crateversion,$A[0]+j)
+      j=i
+      for i=j,i<$A[0].length,i++
+        if $A[0].rawdata[i]==0x0A then
+          $A[0].rawdata[i]='\0'; i++
+          break
+        endif
+      enddo
+      Strcpy(layoutversion,$A[0]+j)
+      j=i
+      for i=j,i<$A[0].length,i++
+        if $A[0].rawdata[i]==0x0A then
+          $A[0].rawdata[i]='\0'; i++
+          break
+        endif
+      enddo
+      Strcpy(headversion,$A[0]+j)
+    else
+      err=3
+    endif
+  endif
+  draw window=hright color=BLACK font=TIMESFONT
+  draw at 6,30 wrap=RIGHTX-5
+  if err==1 || err==3 then
+    if err==1 then
+      change hinfo text="Error getting layout"
+      draw text="The script was unable to get layout correctly. "
+    else
+      change hinfo text="Error getting version"
+      draw text="The script was unable to get version of loaded software. "
+    endif
+    draw text="This error is absolutely unexpected here. Perharps, the best "
+    draw text="way to recover is to reboot the tester. If you select this "
+    draw text="option, then in the appearing window first press 'Hard reset', "
+    draw text="then 'Load all'. After the tester is loaded, try again."
+    draw show
+    hload=control BUTTON
+      window=hright
+      position=RIGHTX/2-124,USERY,120,24
+      name="呼叫加载器"
+      help="按下可以重新加载飞针测试机程序"
+    endc
+    hretry=control BUTTON
+      window=hright
+      position=RIGHTX/2+5,USERY,120,24
+      name="重试"
+      help="按下可以重新尝试获取布局或读取软件版本"
+    endc
+    loadchanged=0
+    while 1 do
+      if Pressed(hload) SYS.Start("LOADER",0,"")
+      if Pressed(hretry) goto repeat
+      if Pressed(hexit) return -1
+      if loadchanged!=0 && $GLOBAL.headloaded==1 break
+      wait
+    enddo
+  else if err==2 then
+    change hinfo text="No answer from crate"
+    draw text="No answer from the Flying Probe Tester. There is a variety of "
+    draw text="possible reasons. The most probable are:\n" color=LIGHTRED
+    draw text="- Tester is off\n"
+    draw text="- Flying Debugger or Test Player is running\n"
+    draw text="- Crash in embedded software\n"
+    draw text="- Optocable is pulled out\n"
+    draw color=BLACK text="Please correct the problem and try again."
+    draw show
+    hretry=control BUTTON
+      window=hright
+      position=(RIGHTX-120)/2,USERY,120,24
+      name="重试"
+      help="按下可以重新尝试连接"
+    endc
+    while 1 do
+      if Pressed(hretry) break
+      if Pressed(hexit) return -1
+      wait
+    enddo
+  endif
+  return err
+end
+
+// Checks layout and sets global variables testertype and testersides. If
+// tester is not recognized or not supported, function displays corresponding
+// message. Returns 0 on success and -1 if pressure test is not possible.
+function int Recognizetester()
+  int i,w,h
+  float ymin,ymax
+  handle hok
+  clear hright
+  draw window=hright color=LIGHTRED font=TIMESFONT
+  draw at 6,60 wrap=RIGHTX-5
+  w=($LAY.rightlimit-$LAY.leftlimit)/1000
+  h=Min($LAY.top[0]-$LAY.yoffset[0],$LAY.yoffset[0]-$LAY.bottom[0])/500
+  testersides=0
+  ymin=9.9e99
+  ymax=-9.9e99
+  for i=0,i<$LAY.nfing,i++
+    if $LAY.side[i]==0 then
+      testersides=testersides|1
+    else
+      testersides=testersides|2
+    endif
+    ymin=Min(ymin,$LAY.top[i]/1000.0)
+    ymax=Max(ymax,$LAY.bottom[i]/1000.0)
+  enddo
+  if ($LAY.config & LC_VACUUMBOX) testersides=testersides & 0x01
+  if $LAY.nfing<=0 || $LAY.nfing>=16 then
+    testertype=TT_WRONG                // Wrong layout
+    draw text=format("Number of rails specified in the layout (%i) ",$LAY.nfing)
+    draw text="is wrong. "
+  else if w<=0 || h<=0 then
+    testertype=TT_WRONG                // Wrong layout
+    draw text="The size of the working area is wrong. "
+  else if $LAY.cameras==0 && $LAY.headcameras==0 then
+    testertype=TT_WRONG                // At least one camera must be present
+    draw text="There are no video cameras on the tester. "
+  else if testersides!=0x3 then
+    testertype=TT_WRONG                // Two-sided tester is required
+    draw text="This is a single-sided tester, or bottom side is disabled. "
+  else if ($LAY.config & 0x80)!=0 then
+    if h==45 then
+      testertype=TT_WRONG;             // M2 - not supported
+      draw text="M2 tester is not supported by this script. "
+    else
+      testertype=TT_WRONG;             // Contradiction in layout
+      draw text="The tester is declared as M2 in the layout, but the height "
+      draw text=format("of the rail is %i millimeters instead of 45. ",h)
+    endif
+  else if h==155 && ($LAY.config & 3)==2 then
+    if w==600 && $LAY.software==0x84 then
+      testertype=TT_A2;                // A1 or A2 with linear motors
+    else if w==600 && $LAY.software==0x86 then
+      testertype=TT_A2;                // A1 or A2 with belts
+    else if w==600 && $LAY.software==0x8A then
+      testertype=TT_A2H;               // A2 (MCM modification)
+    else if w==600 && $LAY.software==0x8E then
+      testertype=TT_A4;                // A4
+    else if w==600 && testersides==0x01 &&                                     \
+      ($LAY.software==0xA7 || ($LAY.config & LC_TYPEMASK)==LC_S1) then
+      testertype=TT_S1;                // S1 (A7) tester
+    else if w>=310 && w<=600 && testersides==0x03 &&                           \
+      ($LAY.software==0xA7 || $LAY.software==0xA8 ||                           \
+      ($LAY.config & LC_TYPEMASK)==LC_S1) then
+      testertype=TT_S2;                // S2 tester
+    else if $LAY.software==0xB8 || ($LAY.config & LC_TYPEMASK)==LC_A8 then
+      testertype=TT_A8;                // A8 tester
+    else if w==600 && ($LAY.software==0xA5 || $LAY.software==0xA6) then
+      testertype=TT_A6;                // A6 tester
+    else if w==800 && $LAY.software==0x84 then
+      testertype=TT_A2L;               // A1L or A2L with linear motors
+    else if w==800 && $LAY.software==0x86 then
+      testertype=TT_A2L;               // A1L or A2L with belts
+    else
+      testertype=TT_WRONG;             // Unknown tester
+      draw text=format("The width of the test area is %i millimeters ",w)
+      draw text="instead of expected 600 or 800 for A2/A4/A6 tester. "
+    endif;
+  else if h==200 then
+    if w==520 && $LAY.software==0xA5 then
+      testertype=TT_A5;                // A5
+    else if w==450 then
+      testertype=TT_A3;                // A3
+    else if w==520 then
+      testertype=TT_A3L;               // A3L
+    else
+      testertype=TT_WRONG;             // Unknown tester
+      draw text=format("The width of the test area is %i millimeters ",w)
+      draw text="instead of expected 450 or 520 for A3/A5 testers. "
+    endif
+  else if h==225 || h==230 || h==240 then
+    if w==610 && $LAY.software==0xA5 then
+      testertype=TT_A5L;               // A5L
+    else if w>=610 && w<=625 && $LAY.software==0xA5 &&                         \
+      ($LAY.config & LC_LDMASK)==LC_LMAUTO then
+      testertype=TT_A5L;               // A5A (L&M automate)
+    else
+      testertype=TT_WRONG;             // Unknown tester
+      draw text=format("The width of the test area is %i millimeters ",w)
+      draw text="instead of expected 610 for A5L testers. "
+    endif
+  else if h>=250 && h<=260 then
+    if $LAY.software==0xB7 || ($LAY.config & LC_TYPEMASK)==LC_A8 then
+      testertype=TT_A7;                // A7
+    else
+      testertype=TT_WRONG;             // Unknown tester
+      draw text="Unable to recognize the type of the tester. "
+    endif
+  else
+    testertype=TT_WRONG;               // Tester not recognized
+    draw text="Unable to recognize the type of the tester. "
+    if h!=155 && h!=200 then
+      draw color=BLACK text="Strange height of the rail "
+      draw text=format("(%i millimeters instead of expected 155, ",h)
+      draw text="200, 230, 240 or 255) is encountered. "
+    endif
+  endif
+  if testertype==TT_WRONG || testertype==TT_UNDEF || testertype==TT_M2 then
+    draw color=BLACK
+    draw text="Therefore I don't know how to run the test. Please "
+    if testertype!=TT_M2 && $LAY.cameras!=0 then
+      draw text="check the settings in the layout and correct them, or "
+    endif
+    draw text="use different test procedure which supports given machine."
+    draw at 6,30 color=LIGHTRED text="Unrecoverable error detected!"
+    draw show
+    clear hleft
+    change hleft help="无法使用这种测试机"
+    draw window=hleft color=DARKGRAY font=LARGEFONT mode=M_CENTERED
+    draw at 95,70 bitmap=0,0,0,"unknown"
+    draw show
+    change hinfo limits=0,0
+    change hinfo text="Unable to test"
+    hok=control BUTTON
+      window=hright
+      position=(RIGHTX-120)/2,USERY,120,24
+      name="！！..."
+      help="按下可以终止测试"
+    endc
+    while Pressed(hok)==0 && Pressed(hexit)==0 do
+      wait
+    enddo
+    testertype=TT_WRONG
+  else if testertype==TT_A1 || testertype==TT_A2 || testertype==TT_A2L ||      \
+    testertype==TT_A2H || testertype==TT_A4 || testertype==TT_A6 ||            \
+    testertype==TT_S1 || (testertype==TT_S2 && $LAY.nfing>4) ||                \
+    (testertype==TT_A8 && $LAY.nfing>4)                                        \
+  then
+    if $EXTLAY.headcamradius!=0 then
+      headcamradius=$EXTLAY.headcamradius/1000.0
+    else
+      headcamradius=118.0
+    endif
+  else if testertype==TT_S2 || testertype==TT_A8 then
+    if $EXTLAY.headcamradius!=0 then
+      headcamradius=$EXTLAY.headcamradius/1000.0
+    else
+      headcamradius=118.0
+    endif
+  else                                 // A3/A5/A7 modifications
+    if $EXTLAY.headcamradius!=0 then
+      headcamradius=$EXTLAY.headcamradius/1000.0
+    else if testertype==TT_A7 then
+      headcamradius=183.0
+    else
+      headcamradius=153.0
+    endif
+  endif
+end
+
+function int Drawtesterview()
+  char s[80]
+  clear hleft
+  draw window=hleft color=DARKGRAY font=LARGEFONT mode=M_CENTERED
+  if testertype==TT_A1 then
+    draw at 70,40 bitmap=0,0,0,"logo"
+    sprintf(s,"A1/%i",$LAY.nfing*2)
+  else if testertype==TT_A2 then
+    draw at 32,15 bitmap=0,0,0,"a2"
+    sprintf(s,"%s/%i",(testersides==3?"A2":"A1"),$LAY.nfing*2)
+  else if testertype==TT_A2L then
+    draw at 32,15 bitmap=0,0,0,"a2"
+    sprintf(s,"%s/%i LARGE",(testersides==3?"A2":"A1"),$LAY.nfing*2)
+  else if testertype==TT_A2H then
+    draw at 32,15 bitmap=0,0,0,"a2"
+    sprintf(s,"%s/%iH",(testersides==3?"A2":"A1"),$LAY.nfing*2)
+  else if testertype==TT_A3 then
+    draw at 51,30 bitmap=0,0,0,"a3"
+    sprintf(s,"A3/%i",$LAY.nfing*2)
+  else if testertype==TT_A3L then
+    draw at 51,30 bitmap=0,0,0,"a3"
+    sprintf(s,"A3/%i LARGE",$LAY.nfing*2)
+  else if testertype==TT_A4 then
+    draw at 51,30 bitmap=0,0,0,"a4"
+    sprintf(s,"A4/%i",$LAY.nfing*2)
+  else if testertype==TT_A5 then
+    draw at 61,30 bitmap=0,0,0,"a5"
+    if ($LAY.config & LC_TYPEMASK)==LC_NEWA1 then
+      sprintf(s,"A1/%i",$LAY.nfing*2)  // New A1 (slower A5)
+    else
+      sprintf(s,"A5/%i",$LAY.nfing*2)  // Original A5 tester
+    endif
+  else if testertype==TT_A5L then
+    draw at 61,30 bitmap=0,0,0,"a5"
+    if ($LAY.config & LC_LDMASK)==LC_LMAUTO then
+      sprintf(s,"A5/%iA",$LAY.nfing*2) // A5 auto (L&M)
+    else if $LAY.top[0]-$LAY.bottom[0]>=240000 then
+      sprintf(s,"A5/%iYL",$LAY.nfing*2)
+    else
+      sprintf(s,"A5/%iL",$LAY.nfing*2)
+    endif
+  else if testertype==TT_A6 then
+    draw at 51,30 bitmap=0,0,0,"a6"
+    if ($LAY.config & LC_LDMASK)==LC_EPCOSAUTO then
+      sprintf(s,"A6/%i EPCOS",$LAY.nfing*2)
+    else
+      sprintf(s,"A6/%i",$LAY.nfing*2)
+    endif
+  else if testertype==TT_S1 then
+    draw at 51,30 bitmap=0,0,0,"a6"   //////////////////////////////////////////
+    sprintf(s,"S1/%i",$LAY.nfing*2)
+  else if testertype==TT_S2 then
+    draw at 51,30 bitmap=0,0,0,"a6"   //////////////////////////////////////////
+    sprintf(s,"S2/%i",$LAY.nfing*2)
+  else if testertype==TT_A7 then
+    draw at 51,30 bitmap=0,0,0,"a5"   //////////////////////////////////////////
+    if ($LAY.config & LC_LDMASK)==LC_LMAUTO then
+      sprintf(s,"A7/%iA",$LAY.nfing*2)
+    else
+      sprintf(s,"A7/%i",$LAY.nfing*2)
+    endif
+  else if testertype==TT_A8 then
+    draw at 51,30 bitmap=0,0,0,"a6"   //////////////////////////////////////////
+    sprintf(s,"A8/%i",$LAY.nfing*2)
+  else
+    draw at 95,30 bitmap=0,0,0,"unknown"
+    sprintf(s,"Unknown tester")
+  endif
+  draw show
+end
+
+// Given head, returns associated video channel, or -1 if head is invalid or
+// carries no camera.
+function int Channelfromhead(int head)
+  int i,channel
+  if $LAY.cameras!=0 then
+    if head==$LAY.nfing*2 return 0
+    if head==$LAY.nfing*2+1 return 1
+  else if ($LAY.headcameras & (1<<head))!=0 then
+    channel=0
+    for i=0,i<head,i++ do
+      if ($LAY.headcameras & (1<<i))!=0 channel++
+    enddo
+    return channel
+  endif
+  return -1
+end
+
+// Given expected Y coordinate of the object (in millimeters) and tester side
+// of the object, selects camera controller and corresponding video channel.
+// Points on the border can be scanned by both rails. Returns head on success,
+// and -1 on any error.
+function int Camerafromy(float y,int side,int *channel,float *angle)
+  int head
+  float h
+  side=(side==0?0:1)
+  if $LAY.cameras!=0 then
+    angle[0]=0.0
+    if side==0 then
+      if ($LAY.cameras & 0x2)==0 return -1
+      channel[0]=1
+      return $LAY.nfing*2+1
+    else
+      if ($LAY.cameras & 0x1)==0 return -1
+      channel[0]=0
+      return $LAY.nfing*2+0
+    endif
+  else if $LAY.headcameras!=0 then
+    for head=0,head<$LAY.nfing*2,head++ do
+      if $LAY.side[head/2]!=side continue
+      if ($LAY.headcameras & (1<<head))==0 continue
+      if ($LAY.excludedrails & (1<<(head/2)))!=0 continue
+      if $LAY.top[head/2]/1000.0<y continue
+      if $LAY.bottom[head/2]/1000.0>y continue
+      channel[0]=Channelfromhead(head)
+      if channel[0]<0 return -1
+      h=y-$LAY.yoffset[head/2]/1000.0
+      angle[0]=(Abs(h)>0.9*headcamradius?0.0:Asin(h/headcamradius))
+      if side==0 angle[0]=-angle[0]
+      if (head & 1)!=0 angle[0]=-angle[0]
+      return head
+    enddo
+  endif
+  return -1
+end
+
+// Given camera head and expected Y coordinate, calculates camera angle.
+function float Anglefromy(float y,int head)
+  float h,angle
+  if $LAY.cameras!=0 then
+    return 0.0
+  else if $LAY.headcameras!=0 then
+    h=y-$LAY.yoffset[head/2]/1000.0
+    angle=(Abs(h)>0.9*headcamradius?0.0:Asin(h/headcamradius))
+    if $LAY.side[head/2]!=0 angle=-angle
+    if (head & 1)!=0 angle=-angle
+    return angle
+  else
+    return 0.0
+  endif
+end
+
+// Selects head that carries the prepared needle. Returns needle on success and
+// -1 if operator decides to interrupt the script.
+function int Selectpsensor()
+  int i,j,x,y,dy,dist,extra
+  handle hhead[32],hquit
+  change hinfo limits=0,0
+  change hinfo text="Select sensor location"
+  clear hright
+  draw window=hright color=BLACK font=TIMESFONT
+  draw at 6,30 wrap=RIGHTX-5
+  draw text="Please select the head where specially prepared test needle is "
+  draw text="installed, or press " font=MAINFONT text="Quit " font=TIMESFONT
+  draw text="to close this script."
+  draw show
+  hquit=control BUTTON
+    window=hright
+    position=(RIGHTX-120)/2,USERY,120,24
+    name="放弃"
+    help="按下以关闭此脚本"
+  endc
+  clear hleft
+  draw window=hleft color=BLACK font=MEDIUMFONT mode=M_CENTERED
+  draw at LEFTX/2,40 text="Location of pressure sensor:"
+  extra=0
+  dy=($LAY.nfing<=8?22:18)
+  dist=($LAY.nfing<=8?28:20)
+  for i=0,i<$LAY.nfing,i++ do
+    if $LAY.side[i]!=0 extra=8
+    y=60+i*dist+extra
+    for j=0,j<2,j++ do
+      x=LEFTX/2+j*100-80
+      hhead[i*2+j]=control BUTTON
+        window=hleft
+        position=x,y,60,dy
+        text=format("%i%s",i,j==0?"L":"R")
+        help=format("如果测试头%i%s上安装了压力传感器，则按",      \
+          i,j==0?"L":"R")
+        font=MAINFONT
+      endc
+    enddo
+  enddo
+  draw show
+  while 1 do
+    if Pressed(hexit) return -1
+    if Pressed(hquit) return -1
+    for i=0,i<$LAY.nfing*2,i++ do
+      if Pressed(hhead[i]) return i
+    enddo
+    wait
+  enddo
+end
+
+// Selects needle for test. Returns needle on success (same as psensor if
+// this is a request to calibrate the sensor) and -1 if operator decides to
+// interrupt the script.
+function int Selectneedle()
+  int i,j,n,x,y
+  handle hhead[32],hquit
+  change hinfo limits=0,0
+  change hinfo text="Select needle to test"
+  clear hright
+  draw window=hright color=BLACK font=TIMESFONT
+  draw at 6,30 wrap=RIGHTX-5
+  draw text="Select needle which you are going to test. "
+  if $LAY.side[psensor/2]!=0 then
+    draw text="Press " font=MAINFONT text="Calibrate sensor " font=TIMESFONT
+    draw text="to calibrate the sensitivity of the pressure sensor and "
+  else
+    draw text="Press "
+  endif
+  draw font=MAINFONT text="Quit " font=TIMESFONT text="to close this script."
+  if $LAY.side[psensor/2]==0 then
+    draw text=" (Note that calibration of the pressure sensor itself is not "
+    draw text="possible when sensor is installed on the top head)."
+  endif
+  draw show
+  Drawtesterview()
+  y=120
+  // Note that one sensor can serve at most 6 heads on the opposite side.
+  for i=0,i<$LAY.nfing,i++ do
+    if $LAY.side[i]==$LAY.side[psensor/2] continue
+    if $LAY.top[i]<$LAY.bottom[psensor/2] continue
+    if $LAY.bottom[i]>$LAY.top[psensor/2] continue
+    for j=0,j<2,j++ do
+      x=RIGHTX/2+j*80-70
+      hhead[i*2+j]=control BUTTON
+        window=hright
+        position=x,y,60,22
+        text=format("%i%s",i,j==0?"L":"R")
+        help=format("按下测试针头%i%s",i,j==0?"L":"R")
+        font=MAINFONT
+      endc
+    enddo
+    y=y+28
+  enddo
+  if $LAY.side[psensor/2]!=0 then
+    hhead[psensor]=control BUTTON
+      window=hright
+      position=(RIGHTX-140)/2,y+16,140,22
+      text="Calibrate sensor"
+      help="按下开始校准压力传感器"
+      font=MAINFONT
+    endc
+  endif
+  hquit=control BUTTON
+    window=hright
+    position=(RIGHTX-120)/2,USERY,120,24
+    name="放弃"
+    help="按下完成脚本"
+  endc
+  while 1 do
+    if Pressed(hexit) return -1
+    if Pressed(hquit) return -1
+    for i=0,i<$LAY.nfing*2,i++ do
+      if hhead[i]==NULL continue
+      if Pressed(hhead[i]) return i
+    enddo
+    wait
+  enddo
+end
+
+// Selects position of the test point and lets user find exact position of the
+// sensor. Note that head that bears the sensor is not calibrated by definition.
+// Returns 0 on success, 1 on error and -1 when user cancels script.
+function int Findposition(int needle)
+  int i,ymin,ymax,head,side,channel,x,y,movecamera,setvideo
+  float r,angle,step
+  char s[256]
+  handle hlivevideo,hbrightness,hcontrast,hzoom,hu,hl,hr,hd,hok,hcancel
+  // Select position of pressure sensor.
+  xsensor=$LAY.xoffset/1000.0
+  ymin=Max($LAY.bottom[needle/2],$LAY.bottom[psensor/2])
+  ymax=Min($LAY.top[needle/2],$LAY.top[psensor/2])
+  ysensor=(ymin+ymax)/2000.0
+  // Determine which camera will scan the position of the sensor.
+  side=$LAY.side[needle/2]
+  head=Camerafromy(ysensor,side,&channel,&angle)
+  if head<0 then
+    clear hright
+    hok=control BUTTON
+      window=hright
+      position=(RIGHTX-120)/2,USERY,120,24
+      name="确定"
+      help="按下可选择另一个测试头进行测试"
+    endc
+    draw window=hright font=TIMESFONT wrap=RIGHTX-5
+    draw at 6,30 color=LIGHTRED text="No camera! "
+    draw at 6,60 color=BLACK
+    draw text="There is no video camera that is able to scan the location "
+    draw text="of the pressure sensor. Please select another head."
+    draw show
+    while 1 do
+      if Pressed(hok) return 1
+      if Pressed(hexit) return -1
+      wait
+    enddo
+  endif
+  // Scan point.
+  change hinfo text="Locate sensor position"
+  clear hleft
+  draw window=hleft font=INFOFONT
+  draw at 5,320 text="Brightness:"
+  draw at 5,345 text="Contrast:"
+  draw show
+  hlivevideo=control GRAPH
+    window=hleft
+    position=5,5,LEFTX-10,288
+    bkcolor=VIDEOFILL
+  endc
+  hbrightness=control HSCROLL
+    window=hleft
+    name="亮度"
+    help="调整图像的亮度"
+    position=75,303,150,21
+    limits=-100,100
+  endc
+  hcontrast=control HSCROLL
+    window=hleft
+    position=75,328,150,21
+    name="对比度"
+    help="调整图像的对比度"
+    limits=-100,100
+  endc
+  hzoom=control CUSTOMBOX
+    window=hleft
+    position=235,303,80,21
+    name="放大"
+    help="将放大倍数增加2倍"
+  endc
+  draw window=hlivevideo color=LIGHTRED
+  x=(LEFTX-10)/2; y=288/2
+  draw at x-20,y to x-5,y at x+6,y to x+21,y
+  draw at x,y-20 to x,y-5 at x,y+6 to x,y+21
+  draw show
+  clear hright
+  draw window=hright font=TIMESFONT wrap=RIGHTX-5
+  draw at 6,30 color=BLACK
+  draw text="Use cursor keys to locate the contact position. Note that head "
+  draw text="with sensor is not calibrated, so you may need several attempts. "
+  draw color=LIGHTRED text="ATTENTION! If sensor tip is not visible or may "
+  draw text="touch the shuttle, press " color=BLACK font=MAINFONT text="Cancel "
+  draw font=TIMESFONT color=LIGHTRED text="and move PCB holders away!"
+  draw show
+  hu=control BUTTON
+    window=hright
+    position=112,122,40,40
+    name="上"
+    help="按下可以向上移动相机"
+    font=MEDIUMFONT
+    mode=M_REPEAT
+  endc
+  hl=control BUTTON
+    window=hright
+    position=70,165,40,40
+    name="左"
+    help="按下可以向左移动相机"
+    font=MEDIUMFONT
+    mode=M_REPEAT
+  endc
+  hr=control BUTTON
+    window=hright
+    position=154,165,40,40
+    name="右"
+    help="按下可以向右移动相机"
+    font=MEDIUMFONT
+    mode=M_REPEAT
+  endc
+  hd=control BUTTON
+    window=hright
+    position=112,207,40,40
+    name="下"
+    help="按下可将相机向下移动"
+    font=MEDIUMFONT
+    mode=M_REPEAT
+  endc
+  hok=control BUTTON
+    window=hright
+    position=RIGHTX/2-124,USERY,120,24
+    name="确定"
+    help="按下开始压力测试"
+  endc
+  hcancel=control BUTTON
+    window=hright
+    position=RIGHTX/2+5,USERY,120,24
+    name="取消"
+    help="按下可选择另一个测试头进行测试"
+  endc
+  // Move all heads that do not participate in scanning into the home
+  // positions.
+  for i=0,i<$LAY.nfing*2,i++ do
+    if i==psensor || i==head continue
+    sprintf(s,"M %i(Z) NOP",i)
+    SERV.Cmdimm(3,s)
+  enddo
+  SYS.Killimm(0)
+  $A[0].length=1
+  movecamera=1
+  setvideo=1
+  step=0.05
+  // Main loop.
+  while 1 do
+    if Pressed(hexit) then
+      SERV.Cmdimm(3,"OUTPORT32 ALL 0x80000002,0")
+      return -1
+    else if Pressed(hcancel) then
+      SERV.Cmdimm(3,"OUTPORT32 ALL 0x80000002,0")
+      return 1
+    else if Pressed(hok) then
+      SERV.Cmdimm(3,"OUTPORT32 ALL 0x80000002,0")
+      return 0
+    else if Pressed(hu) then
+      r=Min(yoffset+(Status(hu)+1)*step,2.5)
+      if r!=yoffset then
+        yoffset=r
+        movecamera=1
+      endif
+    else if Pressed(hl) then
+      r=Max(-5.0,xoffset-(Status(hl)+1)*step)
+      if r!=xoffset then
+        xoffset=r
+        movecamera=1
+      endif
+    else if Pressed(hr) then
+      r=Min(xoffset+(Status(hr)+1)*step,5.0)
+      if r!=xoffset then
+        xoffset=r
+        movecamera=1
+      endif
+    else if Pressed(hd) then
+      r=Max(-2.5,yoffset-(Status(hd)+1)*step)
+      if r!=yoffset then
+        yoffset=r
+        movecamera=1
+      endif
+    else if Pressed(hbrightness) then
+      setvideo=1
+    else if Pressed(hcontrast) then
+      setvideo=1
+    else if Pressed(hzoom) then
+      setvideo=1
+    endif
+    if movecamera!=0 && $A[0].length>0 then
+      if $LAY.headcameras!=0 then
+        SERV.Cmdimm(3,"OUTPORT32 ALL 0x80000002,0")
+        sprintf(s,"OUTPORT32 HEAD(%i) 0x80000002,3",head)
+        SERV.Cmdimm(3,s)
+      endif
+      sprintf(s,"M %i[%g,%gA10] @%i[%g,%gA10] NOP",                            \
+        psensor,xsensor,ysensor,head,xsensor+xoffset,ysensor+yoffset)
+      SERV.Cmdimm(0,s)
+      movecamera=0
+      setvideo=1
+    endif
+    if setvideo then
+      angle=Anglefromy(ysensor+yoffset,head)
+      SYS.Videoangle(hlivevideo,channel,side,Status(hzoom)==0?0.5:1.0,         \
+        Status(hbrightness),Status(hcontrast),2,angle)
+      setvideo=0
+    endif
+    wait
+  enddo
+end
+
+#define STEP           10              // Step, micrometers
+#define NSTEP          120             // Maximal number of steps
+#define NMEAS          10              // No. of measurements for statistics
+#define PMIN           0               // Minimal displayed pressure, bits
+#define PMAX           65000           // Maximal displayed pressure, bits
+
+float  pref[NSTEP]                     // Reference pressure
+float  pneedle[NSTEP]                  // Needle pressure
+int    nstep                           // Length of pref and pneedle
+
+// Draws gathered data in graph window.
+function int Drawdata(handle hgraph,int needle)
+  int i,x0,y0,x,y
+  float scale
+  draw window=hgraph color=WHITE bkcolor=WHITE clear
+  draw color=BLACK font=MEDIUMFONT mode=M_CENTERED
+  draw at LEFTX/2,35 text=format("Pressure curve for head %i%s",               \
+    needle/2,needle & 1?"R":"L")
+  scale=(LEFTX-55.0)/(PMAX-PMIN)
+  x0=45
+  y0=scale*(PMAX-PMIN)+50
+  // Draw scales.
+  draw color=BLACK
+  draw at x0,y0 to x0,y0-scale*(PMAX-PMIN)-1
+  draw at x0,y0 to x0+scale*(PMAX-PMIN)+1,y0
+  draw font=SMALLFONT color=DARKGRAY
+  draw mode=M_LEFT at x0+3,y0-scale*(PMAX-PMIN)+2 text="Needle"
+  draw mode=M_RIGHT at x0+scale*(PMAX-PMIN),y0-3 text="Sensor"
+  draw color=BLACK
+  for i=0,i<65536,i=i+10000 do
+    if i<PMIN || i>PMAX continue
+    x=x0+i*scale
+    y=y0-i*scale
+    draw at x,y0 to x,y0+4
+    if x+30<LEFTX draw mode=M_CENTERED at x+1,y0+16 text=format("%i",i)
+    draw at x0,y to x0-4,y
+    draw mode=M_RIGHT at x0-5,y+6 text=format("%i",i)
+  enddo
+  for i=0,i<nstep,i++ do
+    x=x0+pref[i]*scale
+    y=y0-pneedle[i]*scale
+    if i==0 then
+      draw at x,y
+    else
+      draw to x,y
+    endif
+  enddo
+  draw show
+end
+
+// Makes pressure test.
+function int Maketest(int needle)
+  int i,j,t,z,zsenspos,npmax,err
+  float pr,pn
+  char s[256],drv[8],dir[260],name[260],ext[260]
+  handle hgraph,hsave,hok,hcancel
+  handle f
+  change hinfo text="Testing pressure..."
+  clear hleft
+  hgraph=control GRAPH
+    window=hleft
+    position=0,0,LEFTX,LEFTY
+    help="压力测试结果"
+    color=DARKGRAY
+    bkcolor=WHITE
+  endc
+  clear hright
+  draw window=hright font=TIMESFONT wrap=RIGHTX-5
+  draw at 6,30 color=BLACK
+  draw text="Test is running, please wait. In case of emergency, press "
+  draw font=MAINFONT text="Cancel" font=TIMESFONT text="."
+  draw show
+  hcancel=control BUTTON
+    window=hright
+    position=(RIGHTX-120)/2,USERY,120,24
+    name="取消"
+    help="停止压力测试并返回主屏幕"
+  endc
+  nstep=0
+  err=0
+  Drawdata(hgraph,needle)
+  // Move pressure sensor and test needle into the expected positions and home
+  // all other needles.
+  for i=0,i<$LAY.nfing*2,i++ do
+    if i==psensor then
+      sprintf(s,"M %i[%g,%gA10] NOP",psensor,xsensor,ysensor)
+      SERV.Cmdimm(0,s)
+    else if i==needle then
+      sprintf(s,"M %i[%g,%gA10V20P5] NOP",                                     \
+        needle,xsensor+xoffset,ysensor+yoffset)
+      SERV.Cmdimm(1,s)
+    else
+      sprintf(s,"M %i(Z) NOP",i)
+      SERV.Cmdimm(3,s)
+    endif
+  enddo
+  // Wait for answer from pressure sensor and needle under test.
+  t=Time()
+  while err==0 do
+    if $A[0].length>0 && $A[1].length>0 break
+    if Time()-t>5000 err=2
+    if Pressed(hexit) return -1
+    if Pressed(hcancel) err=1
+    wait
+  enddo
+  if err!=0 goto finish
+  // Set Z position of the pressure sensor.
+  sprintf(s,"OUTPORT32 HEAD(%i),0x10010018,%i",psensor,20000)
+  SERV.Cmdimm(3,s)
+  Delay(500)
+  // Contact sensor and get contact position.
+  sprintf(s,"M %i[%g,%gA10V20P5] Z(%i)",                                       \
+    needle,xsensor+xoffset,ysensor+yoffset,needle)
+  SERV.Cmdimm(1,s)
+  sprintf(s,"M %i[%g,%gA10V20P5] UP(%i) NOP",                                  \
+    needle,xsensor+xoffset,ysensor+yoffset,needle)
+  SERV.Cmdimm(2,s)
+  t=Time()
+  while err==0 do
+    if $A[1].length>0 && $A[2].length>0 then
+      if $A[1].answer!=S_INPORT err=3
+      break
+    endif
+    if Time()-t>5000 err=2
+    if Pressed(hexit) return -1
+    if Pressed(hcancel) err=1
+    wait
+  enddo
+  if err!=0 goto finish
+  zsenspos=$uint2($A[1]+5)
+  npmax=0
+  // Make test.
+  for i=0,i<NSTEP && err==0,i++ do
+    // Set Z coordinate.
+    z=zsenspos+STEP*(i-NSTEP/4)
+    if i<NSTEP/8 z=Max(5000,z-STEP*(NSTEP/8-i)*4)
+    sprintf(s,"OUTPORT32 HEAD(%i),0x10010018,%i",needle,z)
+    SERV.Cmdimm(1,s)
+    t=Time()
+    Drawdata(hgraph,needle)
+    while Time()-t<70 do
+      if Pressed(hexit) return -1
+      if Pressed(hcancel) then
+        err=1; goto finish
+      endif
+      wait
+    enddo
+    // Measure raw pressures.
+    pr=0.0; pn=0.0
+    for j=0,j<NMEAS,j++ do
+      sprintf(s,"INPORT32 HEAD(%i),0x10000107",psensor)
+      SERV.Cmdimm(0,s)
+      sprintf(s,"INPORT32 HEAD(%i),0x10000107",needle)
+      SERV.Cmdimm(1,s)
+      t=Time()
+      while err==0 do
+        if $A[0].length>0 && $A[1].length>0 then
+          if $A[0].answer!=S_INPORT32 || $A[1].answer!=S_INPORT32 err=3
+          break
+        endif
+        if Time()-t>2000 err=2
+        if Pressed(hexit) return -1
+        if Pressed(hcancel) err=1
+        wait
+      enddo
+      if err!=0 goto finish
+      pr=pr+$int4($A[0]+5)
+      pn=pn+$int4($A[1]+5)
+    enddo
+    pr=pr/NMEAS
+    pn=pn/NMEAS
+    pref[i]=pr
+    pneedle[i]=pn
+    nstep=i+1
+    if (pr<8000.0 || pn<8000.0) then
+      npmax++                          // Maximal pressure reached
+      if npmax>=5 break
+    endif
+  enddo
+  Drawdata(hgraph,needle)
+  // Test finished, wait till user analyses data.
+  change hinfo text="Pressure test finished"
+  clear hright
+  draw window=hright font=TIMESFONT wrap=RIGHTX-5
+  draw at 6,30 color=BLACK
+  draw text="Test is finished. Press " font=MAINFONT text="Save as table "
+  draw font=TIMESFONT text="to save data in Excel-compatible format and "
+  draw font=MAINFONT text="OK " font=TIMESFONT text="to return back to the "
+  draw text="main menu."
+  draw show
+  hsave=control BUTTON
+    window=hright
+    position=RIGHTX/2-124,USERY,120,24
+    name="另存为表"
+    help="以Excel兼容格式保存数据"
+  endc
+  hok=control BUTTON
+    window=hright
+    position=RIGHTX/2+5,USERY,120,24
+    name="确定"
+    help="按下可返回主屏幕"
+  endc
+  while 1 do
+    if Pressed(hsave) then
+      Fnsplit(saveexcel,drv,dir,name,ext)
+      sprintf(name,"Ptest%i%s",needle/2,needle & 1?"R":"L")
+      if ext[0]=='\0' Strcpy(ext,".txt")
+      Fnmerge(saveexcel,drv,dir,name,ext)
+      if SYS.Browse(hmain,saveexcel,"Specify name of protocol file",0)!=0 then
+        f=Fopen(saveexcel,"wt")
+        if f==NULL then
+          Error("Unable to create file",saveexcel)
+        else
+          fprintf(f,"Pressure data for head %i%s\n",needle/2,needle & 1?"R":"L")
+          fprintf(f,"Point\tPressure sensor\tNeedle sensor\n")
+          for i=0,i<nstep,i++ do
+            fprintf(f,"%i\t%i\t%i\n",i,pref[i],pneedle[i])
+          enddo
+          Fclose(f)
+        endif
+      endif
+    endif
+    if Pressed(hok) return 0
+    if Pressed(hexit) return -1
+    wait
+  enddo
+finish:
+  if err==1 then
+    // Emergency stop.
+    SYS.Softimm(0)
+    change hinfo text="稍等..."
+    clear hleft
+    disable hcancel
+    t=Time()
+    while 1 do
+      if $A[0].length!=0 return 1
+      if Pressed(hexit) return -1
+      if Time()-t>5000 break
+      wait
+    enddo
+    err=2
+  endif
+  // Report error.
+  clear hright
+  change hinfo text="侦测到错误"
+  draw window=hright font=TIMESFONT wrap=RIGHTX-5
+  draw at 6,30 color=LIGHTRED
+  if err==2 then
+    draw text="Timeout!"
+    draw at 6,60 color=BLACK
+    draw text="在规定时间内，测试机无应答。 "
+  else
+    draw text="Unexpected answer!"
+    draw at 6,60 color=BLACK
+    draw text="Answer received from crate is not a valid measurement. "
+    draw text="Please check the state of the tester. "
+  endif
+  draw text="Pressure test interrupted."
+  draw show
+  hok=control BUTTON
+    window=hright
+    position=(RIGHTX-120)/2,USERY,120,24
+    name="继续"
+    help="按下继续"
+  endc
+  while 1 do
+    if Pressed(hok) return 1
+    if Pressed(hexit) return -1
+    wait
+  enddo
+end
+
+// Main routine.
+function int main()
+  int i,needle
+  hmain=control WINDOW
+    window=NULL
+    position=10,10,MAINX,MAINY
+    name=format("专用针压力测试 v%s",VERSION)
+    help=" "
+    size=128
+  endc
+  hleft=control CHILD
+    window=hmain
+    position=5,5,LEFTX,LEFTY
+    help=" "
+    color=DARKGRAY
+    size=8192
+  endc
+  hserv=control CHILD
+    window=hmain
+    position=SPLIT,5,RIGHTX,SERVY
+    help=" "
+    color=DARKGRAY
+  endc
+  hright=control CHILD
+    window=hmain
+    position=SPLIT,10+SERVY,RIGHTX,RIGHTY
+    help=" "
+    color=DARKGRAY
+    size=1024
+  endc
+  hinfo=control PROGRESS
+    window=hserv
+    position=-1,-1,RIGHTX+2,SERVY+2
+    text="欢迎使用!"
+    help="当前针头压力测试状态"
+    mode=M_PERCENT
+    font=MEDIUMFONT
+    limits=0,0
+  endc
+  hexit=control BUTTON
+    window=hmain
+    position=MAINX-84,MAINY-SERVY,80,SERVY-3
+    name="关闭"
+    help="双击终止测试并关闭此窗口"
+    mode=M_DBLCLICK
+  endc
+  draw window=hmain bitmap=0,0,1,"bkground" show
+  // If this script is called directly from the Test Player, default parameters
+  // may be yet uninitialized.
+  if $GLOBAL.defstroke==0 then
+    $GLOBAL.defstroke=40
+    $GLOBAL.defpressure=30
+    $GLOBAL.defheight=5000
+    $GLOBAL.defaccuracy=250
+  endif
+  change hleft help="2019年HengCe版权所有(C)"
+  draw window=hleft
+  draw at 65,40 bitmap=0,0,0,"logo"
+  draw color=DARKGRAY font=MEDIUMFONT mode=M_CENTERED
+  draw at LEFTX/2,285 text="Needle pressure test"
+  draw at LEFTX/2,305 text=format("Version %s",VERSION)
+  draw show
+  delay 1000
+reload:
+  if Loadtester()!=0 goto quit         // Make sure that tester is loaded
+  if Embedded()!=0 then
+    SERV.Cmdimm(3,"$LIGHTS TESTING")   // Update state of traffic lights
+  endif
+  i=Getlayout()                        // Get actually loaded layout
+  if i<0 goto quit                     // Operator interrupted the test
+  if i>0 goto reload                   // Try to reload tester
+  i=Recognizetester()                  // Determine tester type
+  if i<0 goto quit                     // Test is not possible
+  psensor=Selectpsensor()              // Select location of test needle
+  if psensor<0 goto quit               // Operator interrupted the test
+  xoffset=0.0
+  yoffset=0.0
+  // Main loop.
+  while 1 do
+    needle=Selectneedle()              // Select needle to verify
+    if needle<0 goto quit              // Operator interrupted the test
+    if needle==psensor then            // Calibrate pressure sensor
+
+
+
+    else                               // Test needle
+      i=Findposition(needle)           // Find position of test point
+      if i<0 goto quit                 // Test is not possible
+      if i>0 continue                  // Select another needle
+      i=Maketest(needle)               // Make pressure test
+      if i<0 goto quit
+    endif
+  enddo
+quit:
+  if Embedded()!=0 then
+    SERV.Cmdimm(3,"$LIGHTS WAITING")   // Update state of traffic lights
+  endif
+  SYS.Softreset(0)
+end
+

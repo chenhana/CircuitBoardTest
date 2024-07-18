@@ -1,0 +1,1356 @@
+#include "ls.icl"                  // Standard functions
+#include "or.icl"                // Command names
+#stack   32768
+#cmdbuff 1
+#zeroid                                // Answerproc receives answers with id=0
+
+#define VERSION        ""
+#define DESCRIPTION    "A5 bus protocol"
+
+// 1.01: Added some new commands and responses.
+// 1.02: Support for raw Firewire protocol.
+// 1.03: Redesigned control.
+// 1.04: Automation support.
+// 1.05: Logging to file.
+// 1.06: Several new SPS commands.
+// 1.07: Added some new commands and responses.
+// 1.08: Extended log to file, some new commands and responses.
+// 1.09: Some new commands (mainly barcode support).
+// 1.10: Emulated head controllers.
+// 1.11: Encoder zero pulse test commands.
+// 1.12: Decoding of R_LOADCORR.
+// 1.13: Support for Firefire cameras.
+// 1.14: Bugfix in interrupt routine.
+// 1.15: Several new commands and responses.
+// 1.16: Support for slave measurement card.
+// 1.17: Support for L&M automation.
+// 1.18: Several new SPS commands.
+// 1.19: Corrected values of flags V_xxx.
+// 1.20: Multiple new commands, memory errors.
+// 1.21: Option to hide unimportant messages.
+// 1.22: Filter for Parameter Server messages.
+// 1.23: R_CMOVE/F_CMOVE.
+// 1.24: Shuttle protocol.
+
+#define DX             450             // Width of protocol
+#define DY             400             // Height of protocol
+
+// Commands supported both by flash loader and controller software.
+#define F_NOP          0x40            // Do nothing
+#define F_IDENTIFY     0x41            // Identify controller
+#define F_LEDS         0x42            // Set LEDs
+#define F_HARDRESET    0x43            // Restart flash loader
+#define F_LOAD         0x44            // Load block of data
+#define F_START        0x45            // Start loaded software
+#define F_ZEROCORR     0x47            // Zero correction tables
+#define F_LOADCORR     0x48            // Load column of correction data
+#define F_SHUTDOWN     0x49            // Safely park head
+#define F_SOFTRESET    0x4A            // Soft reset conroller
+#define F_CURRENTZ     0x4B            // Get Z relative to topmost position
+#define F_BUSTEST      0x4C            // Test Firewire bus
+#define F_COMM         0x4D            // Controller-to-controller request       
+#define F_DEBUG        0x4F            // Debug command, subcmd in low byte
+// Command that are supported by controller software only and have unique ID.
+#define F_INPORT       0x50            // Read from port or pseudoport
+#define F_OUTPORT      0x51            // Write to port or pseudoport
+#define F_ENCDATA      0x52            // Dump state of encoder
+#define F_DUMP         0x54            // Dump piece of SHARC memory
+#define F_INPARM       0x56            // Get individual movement parameter
+#define F_OUTPARM      0x57            // Set individual movement parameter
+#define F_MEASURE      0x58            // Post measurement
+#define F_UANT         0x59            // Set antennae voltages
+#define F_ONHEAD       0x5A            // Set on-head potentiometers
+#define F_GETVERS      0x5B            // Get version information
+#define F_STAT         0x5C            // Get statistical data
+#define F_CONVDATA     0x5D            // Convert data with help of FPGA
+#define F_WRITEPARMS   0x5F            // Write individual parameters to flash
+// ID-less commands supported by controller software.
+#define F_MOVE         0x60            // Next portion of coordinates
+#define F_GETPHASES    0x61            // Get actual and park phases
+#define F_INITSTEP     0x62            // Initialize specified axes
+#define F_MOVEDOWN     0x63            // Move finger down
+#define F_MOVEUP       0x64            // Move finger up
+#define F_WAITREST     0x65            // Wait for rest
+#define F_CONFIG       0x66            // Configure controller
+#define F_CHECKZERO    0x67            // Check phases on zero pulse
+#define F_OSCI         0x68            // Oscilloscope control
+#define F_PHASELOST    0x69            // OK to continue movements
+#define F_ZEROS        0x6B            // Correct zero pulses
+#define F_STOP         0x6C            // Stop measurements
+#define F_CONTDATA     0x6D            // Contact check data
+#define F_CHKCOM       0x6E            // Response to R_CHKCOM
+#define F_SETDIRECT    0x6F            // Assign heads to slave
+#define F_DATA         0x76            // Send block of data to controller
+#define F_CMOVE        0x77            // Intermediate movement confirmed
+
+// Responses from controllers.
+#define R_NOP          0x80            // Nothing was done
+#define R_IDENTIFY     0x81            // Controler identification
+#define R_HARDRESET    0x83            // Controller is restarting
+#define R_LOAD         0x84            // Block of data loaded
+#define R_START        0x85            // Loaded software is running
+#define R_LOADCORR     0x88            // Correction column loaded
+#define R_SHUTDOWN     0x89            // Head safely parked
+#define R_CURRENTZ     0x8B            // Actual Z coordinate relative to top
+#define R_BUSTEST      0x8C            // Firewire bus tested
+#define R_COMM         0x8D            // Controller-to-controller response
+#define R_DEBUG        0x8F            // Debug answer, subcmd in low byte
+#define R_INPORT       0x90            // Data from port or pseudoport
+#define R_ENCDATA      0x92            // State of encoder
+#define R_DUMP         0x94            // Piece of SHARC memory
+#define R_VIEW         0x95            // Analog of Dump() in crate
+#define R_INPARM       0x96            // Individual movement parameter
+#define R_MEASURE      0x98            // Results of measurement
+#define R_INITDATA     0x99            // Initialization data from meas card
+#define R_GETVERS      0x9B            // Version information
+#define R_STAT         0x9C            // Statistical data
+#define R_CONVDATA     0x9D            // Converted data
+#define R_WRITEPARMS   0x9F            // Individual parameters written to flash
+#define R_GETPHASES    0xA1            // Actual and park phases
+#define R_INITSTEP     0xA2            // Initialization step executed
+#define R_DOWN         0xA3            // Finger contacts PCB
+#define R_UP           0xA4            // Finger has reached safe Z coordinate
+#define R_ATREST       0xA5            // Head stays at point
+#define R_CHECKZERO    0xA7            // New phases on zero pulse
+#define R_OSCI         0xA8            // Oscilloscope data
+#define R_PHASELOST    0xA9            // Step-motor phase lost
+#define R_SURFACE      0xAA            // Contact over surface detected
+#define R_ZEROS        0xAB            // Zero pulses corrected
+#define R_STOP         0xAC            // Measurements stopped
+#define R_CHKCOM       0xAE            // Request to check communication
+#define R_SETDIRECT    0xAF            // Heads assigned to slave
+#define R_ERROR        0xB0            // Error detected by SHARC controller
+#define R_CRITICAL     0xB1            // Critical error detected by SHARC
+#define R_ALIVE        0xB2            // Long action, controller alive
+#define R_FEATURES     0xB3            // List of supported features
+#define R_EMERGENCY    0xB4            // Pre-emergency condition
+#define R_READY        0xB5            // Ready for external measurement
+#define R_CMOVE        0xB7            // Intermediate movement requested
+
+#define S2S_RIGHT      0x0000027F      // Mask to extract bits of left shuttle
+#define   S2S_ROUT     0x00000001      // S2 left shuttle out
+#define   S2S_RIN      0x00000002      // S2 left shuttle in
+#define   S2S_RLOCK    0x00000004      // S2 left shuttle locked
+#define   S2S_RBRD     0x00000008      // S2 left shuttle board inside
+#define   S2S_RBTN     0x00000010      // S2 left shuttle button pressed
+#define   S2S_RFIX     0x00000020      // S2 left shuttle board fixed
+#define   S2S_RBARRIER 0x00000040      // S2 left light barrier interrupted
+#define   S2S_RPULLEND 0x00000200      // A8 left shuttle pull sensor reached
+#define S2S_COVER      0x00000080      // S2 cover open
+#define S2S_COMBINED   0x00000400      // Split shuttle: halves move together
+#define S2S_DOORUNSAFE 0x00000100      // S3 door not safe for unlock
+#define S2S_LEFT       0x0027F000      // Mask to extract bits of right shuttle
+#define   S2S_LOUT     0x00001000      // S2 right shuttle out
+#define   S2S_LIN      0x00002000      // S2 right shuttle in
+#define   S2S_LLOCK    0x00004000      // S2 right shuttle locked
+#define   S2S_LBRD     0x00008000      // S2 right shuttle board inside
+#define   S2S_LBTN     0x00010000      // S2 right shuttle button pressed
+#define   S2S_LFIX     0x00020000      // S2 right shuttle board fixed
+#define   S2S_LBARRIER 0x00040000      // S2 right light barrier interrupted
+#define   S2S_LPULLEND 0x00200000      // A8 right shuttle pull sensor reached
+#define S2S_DEMOMODE   0x01000000      // S2 demo mode is active
+#define S2S_RESTACK    0x02000000      // S2 restacking mode is active
+#define S2S_RESTACKEND 0x04000000      // S2 restacking finished
+#define S2S_DEFINED    0x10000000      // s2shuttlestatus is defined
+
+int              filter[64]            // Filters that are currently set
+int              hardreset             // 1: hard reset
+int              loadchanged           // 1: load status changed
+handle           hmain                 // Main window
+handle           hlist                 // Bus protocol
+handle           hfilter[32]           // SHARC filter
+handle           hfwcam                // Firewire camera filter
+handle           hsps                  // SPS filter
+handle           hrawin                // Raw Firewire input data filter
+handle           hserial               // Show serial data
+handle           hextdata              // Show extended data
+handle           hosc                  // Show unimportant messages
+handle           herr                  // Show errors
+handle           hlookup               // Show lookups
+handle           hfile                 // handle of log file or NULL
+int              fwcamdata             // Show Firewire camera traffic
+int              spsdata               // Show SPS traffic
+int              rawin                 // Whether raw in Firewire filter set
+int              serial                // Whether to show serial data
+int              extdata               // Whether to show extended data
+int              showosc               // Whether to show unimportant messages
+
+char             tcode[16][24] = {    \// tCode meanings
+  "QUAD_WR_RQ", "BLOCK_WR_RQ", "WR_RESP",      "3",                            \
+  "QUAD_RD_RQ", "BLOCK_RD_RQ", "QUAD_RD_RESP", "BLOCK_RD_RESP",                \
+  "8",          "LOCK_WR_RQ",  "ASYNC_XMIT",   "LOCK_RD_RESP",                 \
+  "C",          "D",           "PHY_PACKET",   "F" }
+
+char             event[32][24] = {    \// ContextControl events
+  "NO_STATUS",  "1",           "LONG_PACKET",  "MISSING_ACK",                  \
+  "UNDERRUN",   "OVERRUN",     "DESCR_READ",   "DATA_READ",                    \
+  "DATA_WRITE", "BUS_RESET",   "TIMEOUT",      "TCODE_ERR",                    \
+  "12",         "13",          "UNKNOWN",      "FLUSHED",                      \
+  "16",         "COMPLETE",    "PENDING",      "19",                           \
+  "BUSY_X",     "BUSY_A",      "BUSY_B",       "23",                           \
+  "24",         "25",          "26",           "TARDY",                        \
+  "28",         "DATA_ERR",    "TYPE_ERR",     "31" }
+
+char             rcode[16][24] = {    \// rCode meanings
+  "COMPLETE",   "1",           "2",            "3",                            \
+  "CONFLICT",   "DATA_ERROR",  "TYPE_ERROR",   "ADDRESS_ERROR",                \
+  "8",          "9",           "A",            "B",                            \
+  "C",          "D",           "E",            "F" }
+
+external int SERV.Decodespsinfo(int code,char *s)
+external int SERV.Decodespserror(int code,char *s)
+external int SERV.Decodeanswer(char *answer,char *text,char *extra,int mask);
+
+// Service function, protocols single line data to file.
+function int Protocol(format s)
+  char t[32]
+  if hfile==NULL return
+  Strtime(t,"%H:%M:%S",0,0)
+  fprintf(hfile,"%s  %s\n",t,s)
+end
+
+function int Answerproc(char *answer,int info)
+  int i,j,k,n,ndata,head,cmd,subcmd,addr,data,size,error
+  int show,parm1,parm2,parm3,tc
+  char s[512],sharc[32],msg[80],extra[2048]
+  if answer[4]==0xF0 then              // Internal OLLYTEST message
+    if Stricmp(answer+5,"HARD RESET")==0 hardreset=1
+    if Stricmp(answer+5,"CHG LOAD")==0 loadchanged=1
+  else if answer[4]==S_ERROR then
+    if Status(herr)==0 return          // No request to protocol errors
+    SERV.Decodeanswer(answer,s,extra,0x7FFFFFFF)
+    change hlist color=LIGHTRED
+    add hlist text=s
+    Protocol("%s",s)
+  else if hlist==NULL || answer[4]!=S_SYSTEM then
+    return
+  else if answer[5]==101 then          // Extended memory test
+    head=$int4(answer+6) & 0x3F
+    if head<14 then
+      sprintf(sharc,"%i%c ",head/2,head & 1?'R':'L')
+    else if head>=16 && head<30 then
+      sprintf(sharc,"%i%c ",(head-16+$LAY.nfing)/2,head & 1?'R':'L')
+    else if head==14 then
+      Strcpy(sharc,"TOP")
+    else if head==15 then
+      Strcpy(sharc,"SLA")
+    else if head==30 then
+      Strcpy(sharc,"BOT")
+    else if head==31 then
+      Strcpy(sharc,"MEA")
+    else if head==63 then
+      Strcpy(sharc,"ALL")
+    else if head>=0x80 && head<0xBF then
+      sprintf(sharc,"N%02i",head & 0x3F)
+    else
+      Strcpy(sharc,"?? ")
+    endif
+    sharc[3]='\0'
+    n=sprintf(s,"Mem  %s: ",sharc)
+    sprintf(s+n,"Bad memory addr=%08X written %08X read %08X",                 \
+      $int4(answer+10),$int4(answer+14),$int4(answer+18))
+    change hlist color=LIGHTRED
+    add hlist text=s
+    Protocol("%s",s)
+  else if answer[5]==127 then
+    if Status(hlookup)==0 return       // No request to protocol lookups
+    SERV.Decodeanswer(answer,s,extra,0x7FFFFFFF)
+    change hlist color=GREEN
+    add hlist text=s
+    Protocol("%s",s)
+  else if answer[5]<=0x02 || answer[5]==0x04 then
+    head=answer[6]
+    if filter[head & 0x3F]==0 return   // Head excluded
+    // Answer should be protocolled.
+    if head<14 then
+      sprintf(sharc,"%i%c ",head/2,head & 1?'R':'L')
+    else if head>=16 && head<30 then
+      sprintf(sharc,"%i%c ",(head-16+$LAY.nfing)/2,head & 1?'R':'L')
+    else if head==14 then
+      Strcpy(sharc,"TOP")
+    else if head==15 then
+      Strcpy(sharc,"SLA")
+    else if head==30 then
+      Strcpy(sharc,"BOT")
+    else if head==31 then
+      Strcpy(sharc,"MEA")
+    else if head==63 then
+      Strcpy(sharc,"ALL")
+    else if head>=0x80 && head<0xBF then
+      sprintf(sharc,"N%02i",head & 0x3F)
+    else
+      Strcpy(sharc,"?? ")
+    endif
+    sharc[3]='\0'
+    cmd=answer[7]
+    subcmd=answer[8]
+    addr=$uint4(answer+9)
+    if (answer[5]==0x00 || answer[5]==0x04) then
+      // Command to SHARC controller.
+      if showosc==0 && cmd==F_OSCI then
+        return                         // Hide unimportant messages
+      endif
+      if answer[5]==0x00 then
+        n=sprintf(s,"To   %s: ",sharc) // Command to existing controller
+      else
+        n=sprintf(s,"Emul %s: ",sharc) // Command to emulated controller
+      endif
+      switch cmd
+      case F_NOP:                      // Do nothing
+        sprintf(s+n,"NOP")
+      case F_IDENTIFY:                 // Identify controller
+        sprintf(s+n,"IDENTIFY")
+      case F_LEDS:                     // Set LEDs
+        sprintf(s+n,"LEDS 0x%02X",answer[15])
+      case F_HARDRESET:                // Restart flash loader
+        n=n+sprintf(s+n,"HARD RESET")
+        if (subcmd & 1)!=0 sprintf(s+n," (if not shutdown)")
+      case F_LOAD:                     // Load block of data
+        sprintf(s+n,"LOAD cards=%i ofs=0x%06X",subcmd & 7,addr)
+      case F_START:                    // Start loaded software
+        sprintf(s+n,"START")
+      case F_ZEROCORR:                 // Zero correction tables
+        sprintf(s+n,"ZERO CORRECTIONS")
+      case F_LOADCORR:                 // Load column of correction data
+        sprintf(s+n,"LOAD CORRECTIONS %c column %i",subcmd & 1?'Y':'X',addr)
+      case F_SHUTDOWN:                 // Safely park head
+        sprintf(s+n,"SHUT DOWN")
+      case F_SOFTRESET:                // Soft reset conroller
+        sprintf(s+n,"SOFT RESET")
+      case F_CURRENTZ:                 // Get Z relative to topmost position
+        sprintf(s+n,"CURRENT Z")
+      case F_BUSTEST:                  // Test Firewire bus
+        sprintf(s+n,"BUSTEST")
+      case F_COMM:                     // Controller-to-controller request
+        sprintf(s+n,"COMM")
+      case F_DEBUG:                    // Debug command, subcmd in low byte
+        sprintf(s+n,"DEBUG subcmd=%i ID=%i",subcmd,addr)
+      case F_INPORT:                   // Read from port or pseudoport
+        sprintf(s+n,"INPORT 0x%X subcmd=%i ID=%i",$uint4(answer+15),subcmd,addr)
+      case F_OUTPORT:                  // Write to port or pseudoport
+        sprintf(s+n,"OUTPORT 0x%X data=%i (0x%08X) ID=%i",                     \
+        $uint4(answer+15),$uint4(answer+19),$uint4(answer+19),addr)
+      case F_ENCDATA:                  // Dump state of encoder
+        sprintf(s+n,"DUMP ENCODER")
+      case F_DUMP:                     // Dump piece of SHARC memory
+        sprintf(s+n,"DUMP at 0x%08X size=%i quads ID=%i",                      \
+        $uint4(answer+15),$uint4(answer+19),addr)
+      case F_INPARM:                   // Get individual movement parameter
+        sprintf(s+n,"INPARM")
+      case F_OUTPARM:                  // Set individual movement parameter
+        sprintf(s+n,"OUTPARM")
+      case F_MEASURE:                  // Post measurement
+        sprintf(s+n,"MEASURE 0x%02X.%02X ID=%i",subcmd,$uint4(answer+15),addr)
+      case F_UANT:                     // Set antennae voltages
+        sprintf(s+n,"SET UANT U(0)=%.1f V",$float4(answer+19))
+      case F_ONHEAD:                   // Set on-head potentiometers
+        sprintf(s+n,"SET POTENTIOMETERS")
+      case F_GETVERS:                  // Get version information
+        sprintf(s+n,"GET VERSION")
+      case F_STAT:                     // Get statistical data
+        sprintf(s+n,"STAT PAGE=0x%04X%s",$uint4(answer+15),                    \
+        (subcmd & 1?" RESET":""))
+      case F_CONVDATA:                 // Convert data with help of FPGA
+        sprintf(s+n,"CONVDATA")
+      case F_WRITEPARMS:               // Write individual parameters to flash
+        sprintf(s+n,"WRITEPARMS")
+      case F_MOVE:                     // Next coordinates - don't process!
+        return
+      case F_GETPHASES:                // Get actual and park phases
+        sprintf(s+n,"GET PHASES")
+      case F_INITSTEP:                 // Initialize specified axes
+        sprintf(s+n,"INIT cards=%i steps=0x%08X",subcmd & 7,$uint4(answer+15))
+      case F_MOVEDOWN:                 // Move finger down
+        n=n+sprintf(s+n,"MOVE DOWN V=%i P=%i%s",                               \
+          $uint4(answer+15),$uint4(answer+19),(subcmd & 1?" DRILL":""))
+        if $uint4(answer+23)!=0 sprintf(s+n," Z=%g",$uint4(answer+23)/1000.0)
+      case F_MOVEUP:                   // Move finger up
+        sprintf(s+n,"MOVE UP %i, report at %i",                                \
+        $uint4(answer+15),$uint4(answer+19))
+      case F_WAITREST:                 // Wait for rest
+        sprintf(s+n,"WAIT REST AccX=%i AccY=%i",                               \
+        $uint4(answer+15),$uint4(answer+19))
+      case F_CONFIG:                   // Configure controller
+        sprintf(s+n,"CONFIG")
+      case F_CHECKZERO:                // Check phases on zero pulse
+        sprintf(s+n,"CHECK ZERO OldX=%i OldY=%i",                              \
+        $uint4(answer+15),$uint4(answer+19))
+      case F_OSCI:                     // Oscilloscope control
+        sprintf(s+n,"SET OSCI ...")
+      case F_PHASELOST:                // OK to continue movements
+        sprintf(s+n,"LOST PHASE OK")
+      case F_ZEROS:                    // Correct zero pulses
+        sprintf(s+n,"ENC ZEROS %s",(subcmd & 1)==0?"START":"REPORT")
+      case F_STOP:                     // Stop measurements
+        sprintf(s+n,"STOP MEAS")
+      case F_CONTDATA:                 // Contact check data
+        sprintf(s+n,"CONTACT DATA")
+      case F_CHKCOM:                   // Response to R_CHKCOM, not shown
+        return
+      case F_SETDIRECT:                // Assign heads to slave
+        sprintf(s+n,"SETDIRECT %sheads=%08X",subcmd & 1?"STOPPER ":"",         \
+        $uint4(answer+15))
+      case F_DATA:                     // Send block of data to controller
+        sprintf(s+n,"DATA")
+      case F_CMOVE:                    // Intermediate movement confirmed
+        sprintf(s+n,"CMOVE step=%i UP=%08X DOWN=%08X",                         \
+        subcmd,$uint4(answer+15),$uint4(answer+19))
+      default:                         // Unrecognized command
+        sprintf(s+n,"UNRECOGNIZED COMMAND %02X:%02X.%08X",cmd,subcmd,addr)
+      endsw
+      change hlist color=(answer[5]==0x00?BLACK:DARKGRAY)
+      add hlist text=s
+      Protocol("%s",s)
+    else if (answer[5]==0x01) then
+      // Response from SHARC controller.
+      if showosc==0 && cmd==R_OSCI then
+        return                         // Hide unimportant messages
+      endif
+      n=sprintf(s,"From %s: ",sharc)
+      switch cmd
+      case R_NOP:                      // Nothing was done
+        sprintf(s+n,"NOP")
+      case R_IDENTIFY:                 // Controler identification
+        n=n+sprintf(s+n,"IDENTIFICATION")
+        if subcmd==0x82 then
+          sprintf(s+n,", lost phase=2")
+        else if subcmd==0x81 then
+          sprintf(s+n,", lost phase=1")
+        endif
+      case R_HARDRESET:                // Controller is restarting
+        n=n+sprintf(s+n,"HARD RESET DONE")
+        if (subcmd & 1)!=0 sprintf(s+n,", Shutdown=1")
+      case R_LOAD:                     // Block of data loaded
+        sprintf(s+n,"LOADED Err=%i",$uint4(answer+15))
+      case R_START:                    // Loaded software is running
+        sprintf(s+n,"START")
+      case R_LOADCORR:                 // Correction column loaded
+        sprintf(s+n,"CORRECTIONS LOADED %c column %i checksum %08X",           \
+        subcmd & 1?'Y':'X',addr,$uint4(answer+15))
+      case R_SHUTDOWN:                 // Head safely parked
+        sprintf(s+n,"SHUTDOWN OK")
+      case R_CURRENTZ:                 // Actual Z coordinate relative to top
+        sprintf(s+n,"CURRENT Z %i um",$uint4(answer+15))
+      case R_BUSTEST:                  // Firewire bus tested
+        sprintf(s+n,"BUSTEST")
+      case R_COMM:                     // Controller-to-controller response
+        sprintf(s+n,"COMM")
+      case R_DEBUG:                    // Debug answer, subcmd in low byte
+        sprintf(s+n,"DEBUG subcmd=%i ID=%i",subcmd,addr)
+      case R_INPORT:                   // Data from port or pseudoport
+        sprintf(s+n,"INPORT %i (0x%X) subcmd=%i ID=%i",                        \
+        $uint4(answer+15),$uint4(answer+15),subcmd,addr)
+      case R_ENCDATA:                  // State of encoder
+        sprintf(s+n,"ENCODER DATA")
+      case R_DUMP:                     // Piece of SHARC memory
+        sprintf(s+n,"DUMP ID=%i",addr)
+      case R_VIEW:                     // Analog of Dump() in crate
+        sprintf(s+n,"VIEW subcmd=%i",subcmd)
+      case R_INPARM:                   // Individual movement parameter
+        sprintf(s+n,"PARAMETERS")
+      case R_MEASURE:                  // Results of measurement
+        sprintf(s+n,"MEASURED %02X.%02X Status=%08X ID=%i",                    \
+        subcmd,$uint4(answer+15),$uint4(answer+19),addr)
+      case R_INITDATA:                 // Initialization data from meas card
+        sprintf(s+n,"SELF-TEST DATA %02X",subcmd)
+      case R_GETVERS:                  // Version information
+        sprintf(s+n,"VERSION ...")
+      case R_STAT:                     // Statistical data
+        sprintf(s+n,"STAT DATA ...")
+      case R_CONVDATA:                 // Converted data
+        sprintf(s+n,"CONVDATA ...")
+      case R_WRITEPARMS:               // Individual parameters written to flash
+        sprintf(s+n,"FLASHED")
+      case R_GETPHASES:                // Actual and park phases
+        sprintf(s+n,"PHASES ro=%i fi=%i",                                      \
+        $int4(answer+15)/256,$int4(answer+19)/256)
+      case R_INITSTEP:                 // Initialization step executed
+        sprintf(s+n,"INIT DONE steps=0x%08X",$uint4(answer+15))
+      case R_DOWN:                     // Finger contacts PCB
+        n=n+sprintf(s+n,"DOWN ")
+        if (subcmd & 0x01) n=n+sprintf(s+n,"NOCONTACT ")
+        if (subcmd & 0x02) n=n+sprintf(s+n,"BADACC ")
+        sprintf(s+n,"Z=%i",$uint4(answer+15))
+      case R_UP:                       // Finger has reached safe Z coordinate
+        sprintf(s+n,"UP")
+      case R_ATREST:                   // Head stays at point
+        sprintf(s+n,"AT REST problems=%02X",subcmd)
+      case R_CHECKZERO:                // New phases on zero pulse
+        sprintf(s+n,"ZERO CHECKED Valid=%i X=%i Y=%i",                         \
+        subcmd & 0x3,$uint4(answer+15),$uint4(answer+19))
+      case R_OSCI:                     // Oscilloscope data
+        sprintf(s+n,"OSCI DATA ...")
+      case R_PHASELOST:                // Step-motor phase lost
+        sprintf(s+n,"PHASE LOST Phase=%i Axis=0x%02X",                         \
+        subcmd,$uint4(answer+15)>>24)
+      case R_SURFACE:                  // Contact over surface detected
+        sprintf(s+n,"CONTACT OVER SURFACE")
+      case R_ZEROS:                    // Zero pulses corrected
+        sprintf(s+n,"ZEROS critical=%X dX=%i dY=%i",                           \
+        subcmd & 0x3,$int4(answer+15),$int4(answer+19))
+      case R_STOP:                     // Measurements stopped
+        sprintf(s+n,"MEAS STOP")
+      case R_CHKCOM:                   // Request to check communication
+        return
+      case R_SETDIRECT:                // Heads assigned to slave
+        sprintf(s+n,"DIRECT SET %08X",$int4(answer+15))
+      case R_ERROR:                    // Error detected by SHARC controller
+        sprintf(s+n,"ERROR %02X:%02X Index=%i ID=%i",                          \
+        subcmd,$uint4(answer+15) & 0xFF,$uint4(answer+23),addr)
+      case R_CRITICAL:                 // Critical error detected by SHARC
+        sprintf(s+n,"CRITICAL ERROR %02X:%02X Index=%i ID=%i",                 \
+        subcmd,$uint4(answer+15) & 0xFF,$uint4(answer+23),addr)
+      case R_ALIVE:                    // Long action, controller alive
+        sprintf(s+n,"CONTROLLER ALIVE")
+      case R_FEATURES:                 // List of supported features
+        sprintf(s+n,"FEATURES %08X",$uint4(answer+15))
+      case R_EMERGENCY:                // Pre-emergency condition
+        n=n+sprintf(s+n,"EMERGENCY ")
+        if $uint4(answer+15)==1 then
+          n=n+sprintf(s+n,"XLOST")
+        else if $uint4(answer+15)==2 then
+          n=n+sprintf(s+n,"YLOST")
+        else
+          n=n+sprintf(s+n,"code=%i",$uint4(answer+15))
+        endif
+        sprintf(s+n," value=%i",$uint4(answer+19))
+      case R_READY:                    // Ready for external measurement
+        sprintf(s+n,"EXTERNAL READY")
+      case R_CMOVE:                    // Intermediate movement requested
+        data=$uint4(answer+15)
+        n=n+sprintf(s+n,"CMOVE %s",(data & 0x00010000?"FINAL ":""))
+        if (data & 0xFF00)==0x8100 then
+          n=n+sprintf(s+n,"MOVE %i X=%g",                                      \
+            $uint4(answer+19),$int4(answer+23)/256000.0)
+          if $int4(answer+35)!=0                                               \
+            n=n+sprintf(s+n,":%g",$int4(answer+35)/256000.0)
+          n=n+sprintf(s+n," Y=%g",                                             \
+            $int4(answer+27)/256000.0)
+          if $int4(answer+39)!=0                                               \
+            n=n+sprintf(s+n,":%g",$int4(answer+39)/256000.0)
+          if $int4(answer+31)!=0                                               \
+            n=n+sprintf(s+n," R=%g",$int4(answer+31)/256000.0)
+          ;
+        else if (data & 0xFF00)==0x8200 then
+          sprintf(s+n,"UP %i",$uint4(answer+19))
+        else if (data & 0xFF00)==0x8300 then
+          sprintf(s+n,"DOWN %i",$uint4(answer+19))
+        else
+          sprintf(s+n,"REASON=%02X",(data>>8) &0xFF)
+        endif
+      default:                         // Unrecognized response
+        sprintf(s+n,"UNRECOGNIZED ANSWER %02X:%02X.%08X",cmd,subcmd,addr)
+      endsw
+      change hlist color=RED
+      add hlist text=s
+      Protocol("%s",s)
+    else if (answer[5]==0x02) then
+      // Notification from real-time driver.
+      change hlist color=GREEN
+      n=sprintf(s,"RT   %s: ",sharc)
+      switch cmd
+      case 0:
+        n=n+sprintf(s+n,"MOVEMENT 0x%08X",addr)
+        if addr & 0x0000E000 then      // V_MOVEXY|V_WAITREST|V_WAITINGREST
+          sprintf(s+n,"  ro=%i fi=%i  toro=%i tofi=%i",                        \
+          $uint4(answer+15),$uint4(answer+19),                                 \
+          $uint4(answer+23),$uint4(answer+27))
+        endif
+        add hlist text=s
+        Protocol("%s",s)
+        if extdata then
+          change hlist color=DARKGRAY
+          n=sprintf(s,"          State ")
+          if addr==0 n=n+sprintf(s+n,"NONE,")
+          if addr & 0x40000000 n=n+sprintf(s+n,"BUSDEAD,")
+          if addr & 0x20000000 n=n+sprintf(s+n,"PAUSE,")
+          if addr & 0x10000000 n=n+sprintf(s+n,"PHASELOST,")
+          if addr & 0x08000000 n=n+sprintf(s+n,"STOP,")
+          if addr & 0x04000000 n=n+sprintf(s+n,"HARDERR,")
+          if addr & 0x02000000 n=n+sprintf(s+n,"INIT,")
+          if addr & 0x01000000 n=n+sprintf(s+n,"INITING,")
+          if addr & 0x00800000 n=n+sprintf(s+n,"GETPHASES,")
+          if addr & 0x00400000 n=n+sprintf(s+n,"CLEARLOST,")
+          if addr & 0x00200000 n=n+sprintf(s+n,"MOVEUP,")
+          if addr & 0x00100000 n=n+sprintf(s+n,"MOVINGUP,")
+          if addr & 0x00080000 n=n+sprintf(s+n,"PARK,")
+          if addr & 0x00040000 n=n+sprintf(s+n,"UNPARK,")
+          if addr & 0x00020000 n=n+sprintf(s+n,"RESETPARK,")
+          if addr & 0x00008000 n=n+sprintf(s+n,"MOVEXY,")
+          if addr & 0x00004000 n=n+sprintf(s+n,"WAITREST,")
+          if addr & 0x00002000 n=n+sprintf(s+n,"WAITINGREST,")
+          if addr & 0x00001000 n=n+sprintf(s+n,"MOVEDOWN,")
+          if addr & 0x00000800 n=n+sprintf(s+n,"MOVINGDOWN,")
+          if addr & 0x00000010 n=n+sprintf(s+n,"PARKING,")
+          if addr & 0x00000008 n=n+sprintf(s+n,"ATPOINT,")
+          if addr & 0x00000001 n=n+sprintf(s+n,"DOWN,")
+          s[n-1]='\0'
+          add hlist text=s
+          Protocol("  %s",s)
+        endif
+      default:                         // Unrecognized notification
+        sprintf(s+n,"UNRECOGNIZED NOTIFICATION %02X:%02X.%08X",cmd,subcmd,addr)
+        add hlist text=s
+        Protocol("%s",s)
+      endsw
+    endif
+  else if answer[5]==0x03 then
+    // Raw Firewire protocol.
+    change hlist color=MAGENTA
+    ndata=$uint2(answer+13)/4
+    data=$uint2(answer+7)
+    n=sprintf(s,"FW   IN : Status=%04X (",data)
+    if (data & 0x8000)==0 n=n+sprintf(s+n,"norun,")
+    if (data & 0x0800) n=n+sprintf(s+n,"dead,")
+    n=n+sprintf(s+n,"%s",event[data & 0x1F])
+    data=(data>>5) & 0x07
+    if data==0 then                    // Speed 100 MBit/s
+      n=n+sprintf(s+n,",100)")
+    else if data==1 then               // Speed 200 MBit/s
+      n=n+sprintf(s+n,",200)")
+    else if data==2 then               // Speed 400 MBit/s
+      n=n+sprintf(s+n,",400)")
+    else                               // Something unsupported
+      n=n+sprintf(s+n,")")
+    endif
+    addr=$uint4(answer+9)
+    n=n+sprintf(s+n," Ints=%08X",addr)
+    if (addr & 0x02000000) n=n+sprintf(s+n,", cycleTooLong")
+    if (addr & 0x01000000) n=n+sprintf(s+n,", unrecErr")
+    if (addr & 0x00800000) n=n+sprintf(s+n,", cycleInconsistent")
+    if (addr & 0x00400000) n=n+sprintf(s+n,", cycleLost")
+    if (addr & 0x00020000) n=n+sprintf(s+n,", busReset")
+    if (addr & 0x00010000) n=n+sprintf(s+n,", selfID")
+    if (addr & 0x00008000) n=n+sprintf(s+n,", selfID2")
+    if (addr & 0x00000200) n=n+sprintf(s+n,", lockRespErr")
+    if (addr & 0x00000100) n=n+sprintf(s+n,", postedWriteErr")
+    add hlist text=s
+    Protocol("%s",s)
+    if extdata then
+      change hlist color=DARKGRAY
+      if ndata>=1 then
+        data=$uint4(answer+15)
+        add hlist text=format(                                                 \
+        "          %08X  dst=%03X.%02X tLbl=%02X rtr=%1X tCode=%s res=%1X",    \
+        data,(data>>22 & 0x3FF),(data>>16) & 0x3F,(data>>10) & 0x3F,           \
+        (data>>8) & 0x3,tcode[(data>>4) & 0xF],data & 0xF)
+        if hfile!=NULL then
+          fprintf(hfile,                                                       \
+          "  %08X  dst=%03X.%02X tLbl=%02X rtr=%1X tCode=%s res=%1X\n",        \
+          data,(data>>22 & 0x3FF),(data>>16) & 0x3F,(data>>10) & 0x3F,         \
+          (data>>8) & 0x3,tcode[(data>>4) & 0xF],data & 0xF)
+        endif
+      endif
+      if ndata>=2 then
+        data=$uint4(answer+19)
+        add hlist text=format(                                                 \
+        "          %08X  src=%03X.%02X offsHi=%04X",                           \
+        data,(data>>22 & 0x3FF),(data>>16) & 0x3F,data & 0xFFFF)
+        if hfile!=NULL then
+          fprintf(hfile,                                                       \
+          "  %08X  src=%03X.%02X offsHi=%04X\n",                               \
+          data,(data>>22 & 0x3FF),(data>>16) & 0x3F,data & 0xFFFF)
+        endif
+      endif
+      if ndata>=3 then
+        add hlist text=format("          %08X",$uint4(answer+23))
+        Protocol("  %08X",$uint4(answer+23))
+      endif
+    endif
+  else if answer[5]==0x05 then
+    // Command to SPS.
+    change hlist color=CYAN
+    cmd=$int4(answer+6)                // Command to SPS
+    ndata=answer[14]                   // Number of parameters
+    parm1=$int4(answer+15)             // First parameter
+    parm2=$int4(answer+19)             // Second parameter
+    parm3=$int4(answer+23)             // Third parameter
+    n=sprintf(s,"To SPS  : %3i ",cmd)
+    switch cmd
+    case 0:
+      sprintf(s+n,"NOP")
+    case 1:
+      sprintf(s+n,"RESET SPS")
+    case 3:
+      sprintf(s+n,"RESTART SPS")
+    case 6:
+      if parm1==0 then
+        n=n+sprintf(s+n,"CLOSE INFO BUTTON=")
+      else
+        n=n+sprintf(s+n,"CLOSE ERROR BUTTON=")
+      endif
+      if parm2==0 then
+        sprintf(s+n,"NONE")
+      else if parm2==1 then
+        sprintf(s+n,"[Cancel]")
+      else if parm2==2 then
+        sprintf(s+n,"[OK]")
+      else
+        sprintf(s+n,"%i",parm2)
+      endif
+    case 7:
+      sprintf(s+n,"LOAD %i BOARDS",parm1)
+    case 8:
+      sprintf(s+n,"UNLOAD %i BOARDS",parm1)
+    case 9:
+      sprintf(s+n,"STOP AUTOMATION")
+    case 12:
+      sprintf(s+n,"PRODUCT SETUP B=%.1f L=%.1f H=%.1f ...",                    \
+      parm1/1000.0,parm2/1000.0,parm3/1000.0)
+    case 13:
+      n=n+sprintf(s+n,"SHUTTLE MODE %i",parm1)
+      if parm1==0 sprintf(s+n," (STANDARD)")
+      if parm1==1 sprintf(s+n," (TRIPLECLICK)")
+      if parm1==2 sprintf(s+n," (STRETCH FRAME)")
+    case 14:
+      n=n+sprintf(s+n,"LIFTER MODE %i",parm1)
+      if parm1==0 sprintf(s+n," (VACUUM)")
+      if parm1==1 sprintf(s+n," (CLAMPS)")
+    case 15:
+      sprintf(s+n,"MARK X=%.2f, Y=%.2f, Len=%.2f mm",                          \
+      parm1/1000.0,parm2/1000.0,parm3/1000.0)
+    case 29:
+      n=n+sprintf(s+n,"HARDWARE MODE %i",parm1)
+      if parm1==0 sprintf(s+n," (HEADS MOVING)")
+      if parm1==1 sprintf(s+n," (HEADS SAFE)")
+    case 30:
+      n=n+sprintf(s+n,"BRAKE MODE %i",parm1)
+      if parm1==0 sprintf(s+n," (LOCKED)")
+      if parm1==1 sprintf(s+n," (UNLOCKED)")
+    case 31:
+      sprintf(s+n,"OPEN SHUTTLE")
+    case 32:
+      sprintf(s+n,"TRAFFIC LIGHTS %i",parm1)
+    case 33:
+      sprintf(s+n,"RESET AUTOMATION")
+    case 34:
+      sprintf(s+n,"TO GOOD")
+    case 35:
+      sprintf(s+n,"TO BAD")
+    case 37:
+      n=n+sprintf(s+n,"BARCODE %i",parm1)
+      if parm1==0 sprintf(s+n," (OK)")
+      if parm1==1 sprintf(s+n," (RETRY)")
+    case 38:
+      sprintf(s+n,"ALL PRODUCTS TO BAD")
+    case 58:
+      sprintf(s+n,"GOOD/BAD TO %i",parm1)
+    case 62:
+      sprintf(s+n,"SHUTTLE VACUUM %i",parm1)
+    case 64:
+      sprintf(s+n,"HARD RESET SHARCS")
+    case 65:
+      sprintf(s+n,"PATERNOSTER START")
+    case 66:
+      sprintf(s+n,"PATERNOSTER STOP")
+    case 68:
+      sprintf(s+n,"EXTLIGHT %i",parm1)
+    case 75:
+      sprintf(s+n,"SHUPDOWN %i",parm1)
+    default:
+      if ndata>=1 n=n+sprintf(s+n,"P1=%i",parm1)
+      if ndata>=2 n=n+sprintf(s+n," P2=%i",parm2)
+      if ndata>=3 n=n+sprintf(s+n," P3=%i",parm3)
+    endsw
+    add hlist text=s
+    Protocol("%s",s)
+  else if answer[5]==0x06 then
+    // Answer from SPS.
+    change hlist color=BROWN
+    cmd=$int4(answer+6)                // Answer from SPS
+    error=$int4(answer+10)             // Error from SPS
+    parm1=$int4(answer+15)             // First parameter
+    parm2=$int4(answer+19)             // Second parameter
+    parm3=$int4(answer+23)             // Third parameter
+    n=sprintf(s,"From SPS: %3i ",cmd)
+    switch Abs(cmd)
+    case 0:
+      sprintf(s+n,"NOP")
+    case 1:
+      sprintf(s+n,"RESET")
+    case 3:
+      sprintf(s+n,"RESTART")
+    case 4:
+      if parm1>0 then
+        n=n+sprintf(s+n,"INFO MESSAGE %i ",parm1)
+        n=n+SERV.Decodespsinfo(parm1,s+n)
+      else
+        n=n+sprintf(s+n,"ERROR MESSAGE %i ",parm2)
+        n=n+SERV.Decodespserror(parm1,s+n)
+      endif
+      if parm3==1 then
+        sprintf(s+n,"[Cancel]")
+      else if parm3==2 then
+        sprintf(s+n,"[OK]")
+      else if parm3==3 then
+        sprintf(s+n,"[OK/Cancel]")
+      endif
+    case 5:
+      n=n+sprintf(s+n,"REMOVE ")
+      if parm1==0 then
+        sprintf(s+n,"INFO")
+      else
+        sprintf(s+n,"ERROR")
+      endif
+    case 6:
+      sprintf(s+n,"INFO/ERROR")
+    case 7:
+      sprintf(s+n,"LOAD BOARDS")
+    case 8:
+      sprintf(s+n,"UNLOAD BOARDS")
+    case 9:
+      sprintf(s+n,"STOP AUTOMATION")
+    case 12:
+      sprintf(s+n,"PRODUCT SETUP")
+    case 13:
+      sprintf(s+n,"SHUTTLE MODE")
+    case 14:
+      sprintf(s+n,"LIFTER MODE")
+    case 15:
+      sprintf(s+n,"MARK")
+    case 29:
+      sprintf(s+n,"HARDWARE MODE")
+    case 30:
+      sprintf(s+n,"BRAKE MODE")
+    case 31:
+      sprintf(s+n,"OPEN SHUTTLE")
+    case 32:
+      sprintf(s+n,"TRAFFIC LIGHTS")
+    case 33:
+      sprintf(s+n,"RESET AUTOMATION")
+    case 34:
+      sprintf(s+n,"TO GOOD")
+    case 35:
+      sprintf(s+n,"TO BAD")
+    case 36:
+      sprintf(s+n,"AT BARCODE POSITION")
+    case 37:
+      sprintf(s+n,"BARCODE")
+    case 38:
+      sprintf(s+n,"ALL PRODUCTS TO BAD")
+    case 58:
+      sprintf(s+n,"GOOD/BAD")
+    case 62:
+      sprintf(s+n,"SHUTTLE VACUUM")
+    case 64:
+      sprintf(s+n,"HARD RESET SHARCS")
+    case 65:
+      sprintf(s+n,"PATERNOSTER START")
+    case 66:
+      sprintf(s+n,"PATERNOSTER STOP")
+    case 68:
+      sprintf(s+n,"EXTLIGHT")
+    case 75:
+      sprintf(s+n,"SHUPDOWN")
+    default:
+      sprintf(s+n,"ANSWER %i A1=%i A2=%i A3=%i",cmd,parm1,parm2,parm3)
+    endsw
+    n=Strlen(s)
+    if (n>0 && s[n-1]!=' ') then
+      s[n]=' '; n++
+    endif
+    if cmd<0 then
+      sprintf(s+n,"FAILED (error %i) ",error)
+    else if cmd!=4 then
+      sprintf(s+n,"OK")
+    else
+      s[n]='\0'
+    endif
+    add hlist text=s
+    Protocol("%s",s)
+    if cmd<0 && extdata then
+      change hlist color=DARKGRAY
+      SERV.Decodespserror(error,s)
+      add hlist text=format("          %s",s)
+      Protocol("  %s",s)
+    endif
+  else if answer[5]==0x07 || answer[5]==0x08 || answer[5]==0x09 then
+    // Command to or answer from Firewire camera.
+    head=answer[6]
+    // Answer should be protocolled.
+    if head<14 then
+////      if filter[head]==0 return
+      sprintf(sharc,"%i%c ",head/2,head & 1?'R':'L')
+    else if head>=16 && head<30 then
+////      if filter[head]==0 return
+      sprintf(sharc,"%i%c ",(head-16+$LAY.nfing)/2,head & 1?'R':'L')
+    else if head==14 then
+      Strcpy(sharc,"TOP")
+    else if head==30 then
+      Strcpy(sharc,"BOT")
+    else if head==63 then
+      Strcpy(sharc,"ALL")
+    else if head>=128 then
+      sprintf(sharc,"n%i ",head & 0x7F)
+    else
+      Strcpy(sharc,"?? ")
+    endif
+    sharc[3]='\0'
+    cmd=answer[7]                      // tLabel
+    size=answer[8];                    // Number of quadlets
+    if (size==0) size=256;
+    // NOTE: physically, only max. 64 quads are transmitted!
+    addr=$uint4(answer+9)              // Address or events
+    if (answer[5]==0x07 || answer[5]==0x08) then
+      // Command to SHARC controller.
+      change hlist color=BLUE
+      n=sprintf(s,"Cam  %s: tLbl=%02X %s addr=%08X (%i quad%s)",               \
+        sharc,cmd,(answer[5]==0x07?"Read ":"Write"),addr,size,(size==1?"":"s"));
+      add hlist text=s
+      Protocol("%s",s)
+    else
+      // Answer from SHARC controller.
+      data=$uint4(answer+15)
+      tc=(data>>4) & 0xF
+      change hlist color=BLUE
+      n=sprintf(s,"Resp %s: tLbl=%02X",sharc,($uint4(answer+15)>>10) & 0x3F)
+      if tc==7 then
+        sprintf(s+n," (%i quads)",$uint4(answer+27)>>18)
+      else
+        sprintf(s+n," (1 quad)")
+      endif
+      add hlist text=s
+      Protocol("%s",s)
+      if extdata then
+        change hlist color=DARKGRAY
+        data=$uint4(answer+15)
+        sprintf(s,                                                             \
+          "  %08X  dst=%03X.%02X tLbl=%02X rtr=%1X tCode=%s res=%1X",          \
+          data,(data>>22 & 0x3FF),(data>>16) & 0x3F,(data>>10) & 0x3F,         \
+          (data>>8) & 0x3,tcode[tc],data & 0xF)
+        add hlist text=format("        %s",s)
+        Protocol("%s",s)
+        data=$uint4(answer+19)
+        sprintf(s,                                                             \
+          "  %08X  src=%03X.%02X rCode=%s",                                    \
+          data,(data>>22 & 0x3FF),(data>>16) & 0x3F,rcode[(data>>12) & 0xF])
+        add hlist text=format("        %s",s)
+        Protocol("%s",s)
+        data=$uint4(answer+23)
+        sprintf(s,"  %08X",data)
+        add hlist text=format("        %s",s)
+        Protocol("%s",s)
+        data=$uint4(answer+27)
+        if tc==7 then
+          sprintf(s,"  %08X  length=%i",data,data>>18)
+        else
+          sprintf(s,"  %08X",data)
+        endif
+        add hlist text=format("        %s",s)
+        Protocol("%s",s)
+      endif
+    endif
+  else if answer[5]==0x0A then
+    // Command to L&M automation.
+    if showosc!=0 then
+      show=1
+    else if Strncmp(answer+6,"MECH.Ampel=",11)==0 then
+      show=0
+    else
+      n=Strlen(answer+6)
+      if n==0 then
+        show=0
+      else if answer[6+n-1]=='?' then
+        show=0
+      else
+        show=1
+      endif
+    endif
+    if show then
+      change hlist color=CYAN
+      j=$uint2(answer)-6
+      n=sprintf(s,"To L&M  : ")
+      Memcpy(s+n,answer+6,j)
+      s[n+j]='\0'
+      add hlist text=s
+      Protocol("%s",s)
+    endif
+  else if answer[5]==0x0B then
+    // Answer from L&M automation.
+    if showosc!=0 then
+      show=1
+    else if Strncmp(answer+6,"MECH.LOG= Linux",15)==0 then
+      show=1
+    else if Strncmp(answer+6,"MECH.LOG=",9)==0 then
+      show=0
+    else if Strncmp(answer+6,"MECH.STATUS=",12)==0 then
+      show=0
+    else if Strncmp(answer+6,"MECH.Alive=",11)==0 then
+      show=0
+    else if Strncmp(answer+6,"MECHDLG.LOG=",12)==0 then
+      show=0
+    else if Strncmp(answer+6,"MECH.Para.AmpelHandling=",24)==0 then
+      show=0
+    else
+      show=1
+    endif
+    if show then
+      change hlist color=BROWN
+      j=$uint2(answer)-6
+      if j>400 j=400
+      n=sprintf(s,"From L&M: ")
+      Memcpy(s+n,answer+6,j)
+      n=n+j
+      if Strncmp(answer+6,"MECH.S2ShuttleStatus=",21)==0 then
+        data=0
+        for k=21,k<j,k++ do
+          if Isdigit(answer[6+k])==0 break
+          data=data*10+answer[6+k]-'0'
+        enddo
+        n=n+sprintf(s+n,"  HI:")
+        if (data & S2S_LEFT)==0 then
+          n=n+sprintf(s+n," 0")
+        else
+          if (data & S2S_LPULLEND) n=n+sprintf(s+n," PULL")
+          if (data & S2S_LBARRIER) n=n+sprintf(s+n," BARR")
+          if (data & S2S_LFIX) n=n+sprintf(s+n," FIX")
+          if (data & S2S_LBTN) n=n+sprintf(s+n," BTN")
+          if (data & S2S_LBRD) n=n+sprintf(s+n," BOARD")
+          if (data & S2S_LLOCK) n=n+sprintf(s+n," LOCK")
+          if (data & S2S_LIN) n=n+sprintf(s+n," IN")
+          if (data & S2S_LOUT) n=n+sprintf(s+n," OUT")
+        endif
+        n=n+sprintf(s+n,", LO:")
+        if (data & S2S_RIGHT)==0 then
+          n=n+sprintf(s+n," 0")
+        else
+          if (data & S2S_RPULLEND) n=n+sprintf(s+n," PULL")
+          if (data & S2S_RBARRIER) n=n+sprintf(s+n," BARR")
+          if (data & S2S_RFIX) n=n+sprintf(s+n," FIX")
+          if (data & S2S_RBTN) n=n+sprintf(s+n," BTN")
+          if (data & S2S_RBRD) n=n+sprintf(s+n," BOARD")
+          if (data & S2S_RLOCK) n=n+sprintf(s+n," LOCK")
+          if (data & S2S_RIN) n=n+sprintf(s+n," IN")
+          if (data & S2S_ROUT) n=n+sprintf(s+n," OUT")
+        endif
+      endif
+      s[n]='\0'
+      add hlist text=s
+      Protocol("%s",s)
+    endif
+  else if answer[5]==0x0C || answer[5]==0x0D then
+    // Serial communication.
+    change hlist color=LIGHTBLUE
+    if answer[5]==0x0C then
+      n=sprintf(s,"To   RS%i: ",answer[6])
+    else
+      n=sprintf(s,"From RS%i: ",answer[6])
+    endif
+    if answer[7] & 0x02 n=n+sprintf(s+n,"TMOUT ")
+    if answer[7] & 0x10 n=n+sprintf(s+n,"IOERR ")
+    if answer[7] & 0x20 n=n+sprintf(s+n,"BREAK ")
+    if answer[7] & 0x40 n=n+sprintf(s+n,"OVFLW ")
+    j=8
+    while n<500 && j<$uint2(answer) do
+      if answer[6]==6 then             // Temperature array sensd binary data
+        n=n+sprintf(s+n,"%02X ",answer[j])
+      else if answer[j]>=0x20 && answer[j]<=0x7E then
+        s[n]=answer[j]; n++
+      else
+        n=n+sprintf(s+n,"<%02X>",answer[j])
+      endif
+      j++
+    enddo
+    s[n]='\0'
+    add hlist text=s
+    Protocol("%s",s)
+  else if answer[5]==0x0E || answer[5]==0x0F then
+    if answer[5]==0x0E then
+      change hlist color=BLACK
+      n=sprintf(s,"To   ")
+    else
+      change hlist color=RED
+      n=sprintf(s,"From ")
+    endif
+    if answer[6]==1 then
+      n=n+sprintf(s+n,"SHL: ")
+    else if answer[6]==2 then
+      n=n+sprintf(s+n,"SHR: ")
+    else if answer[6]==3 then
+      n=n+sprintf(s+n,"SHB: ")
+    else
+      n=n+sprintf(s+n,"SH?: ")
+    endif
+    n=n+sprintf(s+n,"MOVEMENT 0x%08X Y=%.3f",                                  \
+      $long(answer+7),$long(answer+11)/256000.0)
+    add hlist text=s
+    Protocol("%s",s)
+  endif
+end
+
+// Displays modal "dialog box" with error message.
+function int Error(char *s1,char *s2)
+  handle herr,hdummy,hok
+  herr=control WINDOW
+    window=hmain
+    position=0,0,250,135
+    name="错误"
+    mode=M_MODAL
+    bkcolor=YELLOW
+  endc
+  hok=control BUTTON
+    window=herr
+    position=85,100,80,24
+    name="确定"
+    help="按下可以确认错误消息"
+  endc
+  hdummy=control ICON
+    window=herr
+    position=5,30,36,36
+    name="EXCLAM"
+    bkcolor=YELLOW
+  endc
+  hdummy=control TEXT
+    window=herr
+    position=41,20,200,24
+    name=s1
+    bkcolor=YELLOW
+    mode=M_CENTERED
+  endc
+  hdummy=control TEXT
+    window=herr
+    position=41,45,200,54
+    name=s2
+    bkcolor=YELLOW
+    mode=M_CENTERED
+  endc
+  while Pressed(hok)==0 do; enddo
+  destroy herr
+end
+
+// Service function, starts or stops bus protocol.
+function int Setprotocol(int off)
+  int i,start
+  char buf[32]
+  if off then
+    start=0
+  else
+    start=(rawin?0x02:0x00)
+    for i=0,i<32,i++ do
+      if filter[i]!=0 start=start|0x01
+    enddo
+    if fwcamdata start=start|0x04
+    if spsdata start=start|0x08
+    if serial start=start|0x10
+  endif
+  buf[0]=S_DEBUG
+  buf[1]=0x03                          // Set bus protocolling mode
+  $uint4(buf+2)=start
+  SYS.Sendimm(0,6,buf)
+end
+
+function int main()
+  int i,j,k,x,y,dy,delta
+  char s[260]
+  handle hclear,hprot,hexit
+  filter[63]=1                         // Enable broadcasts
+  hmain=control WINDOW
+    window=NULL
+    position=10,10,DX+125,DY+10
+    name=format("火线总线协议%s",VERSION)
+    help=" "
+    bkcolor=WHITEBLUE
+  endc
+  hlist=control LIST
+    window=hmain
+    position=5,5,DX,DY
+    help="H5 火线总线协议"
+    size=524288
+    mode=M_VSCROLL
+    font=TERMINALFONT
+  endc
+  y=10                                 // For the case of bad layout
+  k=0                                  // DIP-based rail
+  if $LAY.nfing<=8 then
+    dy=22; delta=10
+  else if $LAY.nfing<=10 then
+    dy=20; delta=5
+  else
+    dy=18; delta=4
+  endif
+  for i=0,i<$LAY.nfing,i++ do          // Layout-based rail
+    y=i*dy+delta
+    if $LAY.side[i]==0 then
+      k=i*2                            // DIP-based head ID
+    else
+      k=16+i*2-$LAY.nfing
+      y=y+delta
+    endif
+    hfilter[k]=control CHECKBOX
+      window=hmain
+      position=DX+15,y,45,20
+      name=format("%iL",i)
+      help=format("检查往返于主程序%i左边的协议消息",i)
+      font=INFOFONT
+    endc
+    hfilter[k+1]=control CHECKBOX
+      window=hmain
+      position=DX+70,y,45,20
+      name=format("%iR",i)
+      help=format("检查往返于主程序%i右边的协议消息",i)
+      font=INFOFONT
+    endc
+  enddo
+  if $LAY.cameras then
+    y=y+dy+delta
+    if $LAY.cameras & 1 then
+      hfilter[14]=control CHECKBOX
+        window=hmain
+        position=DX+15,y,45,20
+        name="正面"
+        help="检查往返于顶部相机控制器的协议消息"
+        font=INFOFONT
+      endc
+    endif
+    if $LAY.cameras & 2 then
+      hfilter[30]=control CHECKBOX
+        window=hmain
+        position=DX+70,y,45,20
+        name="背面"
+        help="检查往返于底部相机控制器的协议消息"
+        font=INFOFONT
+      endc
+    endif
+  endif
+  y=y+dy+delta
+  hfilter[31]=control CHECKBOX
+    window=hmain
+    position=DX+15,y,50,20
+    name="测量"
+    help="检查往返于测量卡的协议消息"
+    font=INFOFONT
+  endc
+  y=y+dy+delta
+  hfwcam=control CHECKBOX
+    window=hmain
+    position=DX+15,y,50,20
+    name="相机"
+    help="检查来自/发送到选定测试头上的火线相机的协议消息"
+    font=INFOFONT
+  endc
+  hsps=control CHECKBOX
+    window=hmain
+    position=DX+70,y,45,20
+    name="自动"
+    help="检查往返于SPS或自动化的协议消息"
+    font=INFOFONT
+  endc
+  y=y+dy
+  hrawin=control CHECKBOX
+    window=hmain
+    position=DX+15,y,45,20
+    name="FW"
+    help="检查协议原始输入火线数据"
+    font=INFOFONT
+  endc
+  hserial=control CHECKBOX
+    window=hmain
+    position=DX+70,y,45,20
+    name="Ser"
+    help="检查协议串行数据(除SPS之外的所有串行通道)"
+    font=INFOFONT
+  endc
+  y=y+dy
+  herr=control CHECKBOX
+    window=hmain
+    position=DX+70,y,45,20
+    name="错误"
+    help="检查协议错误消息"
+    font=INFOFONT
+  endc
+  hlookup=control CHECKBOX
+    window=hmain
+    position=DX+15,y,45,20
+    name="查看"
+    help=" 检查协议查找"
+    font=INFOFONT
+  endc
+  y=y+dy
+  hextdata=control CHECKBOX
+    window=hmain
+    position=DX+15,y,45,20
+    name="退出"
+    help="检查协议扩展数据"
+    font=INFOFONT
+  endc
+  hosc=control CHECKBOX
+    window=hmain
+    position=DX+70,y,50,20
+    name="振荡"
+    help="检查以显示不重要的消息，例如示波器"
+    font=INFOFONT
+  endc
+  showosc=0
+  hclear=control BUTTON
+    window=hmain
+    position=DX+10,DY-75,110,24
+    name="清除"
+    help="按下以清除通讯协定视窗"
+  endc
+  hprot=control BUTTON
+    window=hmain
+    position=DX+10,DY-47,110,24
+    name="协议"
+    help="按此键开始将数据记录到文件或关闭日志"
+  endc
+  hexit=control BUTTON
+    window=hmain
+    position=DX+10,DY-19,110,24
+    name="退出"
+    help="按下以停止协议并关闭窗口"
+  endc
+  while 1 do
+    if Pressed(hclear) then
+      clear hlist
+    else if Pressed(hprot) then
+      if hfile==NULL then
+        Strcpy(s,"a5bus.txt")
+        if SYS.Browse(hmain,s,"Select protocol file",0)!=0 then
+          hfile=Fopen(s,"wt")
+          if hfile==NULL then
+            Error("Unable to open file",s)
+          else
+            change hprot text="Close log"
+            change hprot color=LIGHTRED
+          endif
+        endif
+      else
+        Fclose(hfile)
+        hfile=NULL
+        change hprot text="日志"
+        change hprot color=BLACK
+      endif
+    else if Pressed(hfwcam) then
+      fwcamdata=Status(hfwcam)
+      Setprotocol(0)
+    else if Pressed(hsps) then
+      spsdata=Status(hsps)
+      Setprotocol(0)
+    else if Pressed(hrawin) then
+      rawin=Status(hrawin)
+      Setprotocol(0)
+    else if Pressed(hserial) then
+      serial=Status(hserial)
+      Setprotocol(0)
+    else if Pressed(hextdata) then
+      extdata=Status(hextdata)
+      Setprotocol(0)
+    else if Pressed(hosc) then
+      showosc=Status(hosc)
+    else if Pressed(hexit) then
+      break
+    endif
+    for i=0,i<32,i++ do
+      if Pressed(hfilter[i]) then
+        filter[i]=Status(hfilter[i])
+        if i==31 filter[15]=filter[i]
+        Setprotocol(0)
+      endif
+    enddo
+    wait
+  enddo
+  if $GLOBAL.headloaded==1 then
+    Setprotocol(1)                     // Automatically stop protocolling
+  endif
+end
+

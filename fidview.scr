@@ -1,0 +1,517 @@
+#include "ls.icl"
+
+#define VERSION        "1.01"
+#define DESCRIPTION    "Fiducial file viewer for Test Player"
+
+#define TITLE          "Fiducial Viewer"
+#define DX             960             // Width of fiducial viewer window
+#define DY             768             // Height of fiducial viewer window
+
+//----------------
+// FIDUCIAL DATA
+// struct t_fid separated into single structs
+// as structs inside structs not supported for SCRIPT2
+typedef struct t_model                 // Header of model description
+  int            height                // Model size in Y direction, pixels
+  int            width                 // Model size in X direction, pixels
+  int            cx                    // X offset in model to its center
+  int            cy                    // Y offset in model to its center
+  int            stepx                 // Search step in X direction, pixels
+  int            stepy                 // Search step in Y direction, pixels
+  $float4        ax                    // X width of approximating parabola
+  $float4        ay                    // Y width of approximating parabola
+  int            channel               // Channel (input of grabber)
+  int            camerax               // Expected width of image from camera
+  int            area                  // Total number of points in the model
+  int            fast                  // Offset of fast model in data
+  int            sm                    // Sum of all model points
+  int            smm                   // Sum of squares of all model points
+  $float4        offsetx               // Offset of model in X dir, pixels
+  $float4        offsety               // Offset of model in Y dir, pixels
+  int            size                  // Size of data array, bytes
+ends
+
+typedef struct t_CameraSettings        // Header of camera parameter description
+  int            m_is_valid            // Parameter equal to current camera settings
+  int            m_brightness          // Brightness value for fiducial
+  int            m_contrast            // Contrast value for fiducial
+  int            m_auto                // Autoset Brightness contrast
+  int            m_edr                 // EDR active
+  int            m_color_filter        // Color filter (id?)
+  $uint4         m_lighting_config     // Lighting config (TOP/SHADOW/TOP+SHADOW)
+  int            m_camerafocus         // Focus position, currently only for S3 Tester
+  $double        m_contrast_measure    // Contrast value at focus position
+ends
+
+typedef struct t_sniperModeHeader      // Header of sniper mode parameters
+  $uint4         objectType            // Sniper object Type of fiducial
+  $double        x                     // X coordinate
+  $double        y                     // Y coordinate
+  $int4          aoiWidth              // Width restriction for targetpad
+  $int4          aoiHeight             // Height restriction for targetpad
+ends
+//----------------
+
+handle           hmain                 // Main window
+handle           hview                 // Fiducial viewer
+handle           hmess                 // Message banner
+handle           hopen                 // Open file button
+handle           hquit                 // Close button
+
+handle           hfidu                 // Index of fiducial
+handle           hprev                 // Previous fiducial
+handle           hnext                 // Next fiducial
+handle           hbig                  // Big model
+handle           hrough                // Rough model
+handle           hexact                // Exact model
+handle           hzoom                 // Zoom selection
+handle           hzoomout              // Decrease zoom
+handle           hzoomin               // Increase zoom
+handle           hcircles              // Display brightness with circles
+handle           hpixels               // Display brightness with pixels
+handle           hinfo                 // Information on fiducial
+handle           hinfonext             // Next info page
+handle           hinfoprev             // Prev info page
+
+int              zoom2                 // Actual zoom x2
+int              fiducial              // Index of selected fiducial
+int              model                 // Model: 0-big, 1-rough, 2-exact
+int              variant               // Variant (0..2)
+int              info[16]              // File- & fiducial-related information
+char             *data                 // Model-related data
+int              datavalid             // Whether model-related data is valid
+int              infopage              // Index of current info page
+char             *fid_cameraSettings   // Fiducial corresponding camera settings
+char             *fid_sniperModeHeader // Fiducial corresponding sniper mode header
+
+
+// Draws model.
+function int Drawmodel()
+  int i,j,x,y,n,color,dataoffs,mode
+  struct t_model dataheader
+  mode=Status(hpixels)
+  draw window=hview color=BLACK bkcolor=(mode==0?LIGHTYELLOW:WHITE) clear
+  draw color=GRAY at DX/2,0 to DX/2,DY at 0,DY/2 to DX,DY/2
+  if datavalid then
+    Memcpy(dataheader,data,Sizeof(dataheader))
+    for j=0,j<dataheader.height,j++ do
+      y=((j-dataheader.cy)*zoom2+DY)/2
+      dataoffs=$uint4(data+info[2]+j*4)
+      if dataoffs==0 continue             // Empty row
+      dataoffs=dataoffs+info[2]
+      n=$uint4(data+dataoffs)
+      for i=0,i<n,i++ do
+        dataoffs=dataoffs+4
+        x=(($uint2(data+dataoffs)-dataheader.cx)*zoom2+DX)/2
+        if mode==0 then
+          color=$uint2(data+dataoffs+2)/32+2
+          draw color=CYAN bkcolor=LIGHTYELLOW
+          draw at x,y fillellipse color,color
+        else
+          color=$uint2(data+dataoffs+2)
+          if color<85 then
+            draw color=LIGHTGRAY
+          else if color<170 then
+            draw color=DARKGRAY
+          else
+            draw color=BLACK
+          endif
+          draw pixel x,y pixel x,y+1
+          draw pixel x+1,y pixel x+1,y+1
+        endif
+      enddo
+    enddo
+  endif
+  draw show
+end
+
+// Draws combined fiducial/model data.
+function int Drawmodeldata()
+  int mode,type,n
+  char s[2048]
+  struct t_model dataheader
+  struct t_CameraSettings CamSettings
+  struct t_sniperModeHeader SniperModeHeader
+
+  if info[1]==0 then
+    change hinfo text=""               // No data
+    return
+  endif
+  if infopage==0 then
+    n=sprintf(s," \t\tPage %i\n General:\n",infopage+1)
+    n=n+sprintf(s+n," Pad ID = \t%i\n",info[3])
+    n=n+sprintf(s+n," Panel = \t%i\n",info[4])
+    n=n+sprintf(s+n," Channel = \t%i\n",info[5])
+    n=n+sprintf(s+n," Direction = \t%i\n",info[6])
+    n=n+sprintf(s+n," Variants = \t%i\n",info[7])
+    mode=info[8]
+    type=mode & 0x00007000
+    n=n+sprintf(s+n," Mode = 0x%08X\n",mode)
+    if type==0x00000000 then             // Standard scanning
+      n=n+sprintf(s+n,"    Type = \tStandard\n")
+    else if type==0x00001000 then        // Scan copper (exclude drills)
+      n=n+sprintf(s+n,"    Type = \tCopper\n")
+    else if type==0x00002000 then        // Scan drills only
+      n=n+sprintf(s+n,"    Type = \tDrills\n")
+    else if type==0x00003000 then        // Show points of possible contact
+      n=n+sprintf(s+n,"    Type = \tContactss\n")
+    endif
+    n=n+sprintf(s+n,"    Synth = \t%i\n",mode & 1)
+    n=n+sprintf(s+n," Search R = \t%i\n",info[9])
+    n=n+sprintf(s+n," LowRes = \t%i\n",info[10])
+    n=n+sprintf(s+n," FirstAuto = \t%i\n",info[11])
+    n=n+sprintf(s+n,"\n")
+    if datavalid then
+      Memcpy(dataheader,data,Sizeof(dataheader))
+      n=n+sprintf(s+n," Width = \t%i pixel\n",dataheader.width)
+      n=n+sprintf(s+n," Height = \t%i pixel\n",dataheader.height)
+      n=n+sprintf(s+n," Points = \t%i\n",dataheader.area)
+      n=n+sprintf(s+n," cx = \t\t%i\n",dataheader.cx)
+      n=n+sprintf(s+n," cy = \t\t%i\n",dataheader.cy)
+      n=n+sprintf(s+n," stepx = \t%i\n",dataheader.stepx)
+      n=n+sprintf(s+n," stepy = \t%i\n",dataheader.stepy)
+      n=n+sprintf(s+n," \n Approximations:\n")
+      n=n+sprintf(s+n," ax = \t\t%.5f\n",dataheader.ax)
+      n=n+sprintf(s+n," ay = \t\t%.5f\n",dataheader.ay)
+      n=n+sprintf(s+n," offsetx = \t%.5f\n",dataheader.offsetx)
+      n=n+sprintf(s+n," offsety = \t%.5f\n",dataheader.offsety)
+    else
+      n=n+sprintf(s+n," Model not available\n")
+    endif
+    change hinfo text=s
+  else
+    Memcpy(CamSettings,fid_cameraSettings,Sizeof(CamSettings))
+    n=sprintf(s," \t\tPage %i\n Camera:\n",infopage+1)
+    n=n+sprintf(s+n," Valid = \t%i\n",CamSettings.m_is_valid)
+    n=n+sprintf(s+n," Brightn = \t%i\n",CamSettings.m_brightness)
+    n=n+sprintf(s+n," Contrast = \t%i\n",CamSettings.m_contrast)
+    n=n+sprintf(s+n," AutoSet = \t%i\n",CamSettings.m_auto)
+    n=n+sprintf(s+n," EDR ON = \t%i\n",CamSettings.m_edr)
+    n=n+sprintf(s+n," Col Filt = \t%i\n",CamSettings.m_color_filter)
+    n=n+sprintf(s+n," Lighting = \t%i\n",CamSettings.m_lighting_config)
+    n=n+sprintf(s+n," FocusPos = \t%i\n",CamSettings.m_camerafocus)
+    n=n+sprintf(s+n," FocusVal = \t%f\n\n",CamSettings.m_contrast_measure)
+    
+    Memcpy(SniperModeHeader,fid_sniperModeHeader,Sizeof(SniperModeHeader))
+    n=n+sprintf(s+n," SniperMode:\n")
+    n=n+sprintf(s+n," Type =\t%i\n",SniperModeHeader.objectType)
+    n=n+sprintf(s+n," X = \t%f\n",SniperModeHeader.x)
+    n=n+sprintf(s+n," Y = \t%f\n",SniperModeHeader.y)
+    n=n+sprintf(s+n," aoiWidth = \t%i\n",SniperModeHeader.aoiWidth)
+    n=n+sprintf(s+n," aoiHeight = \t%i\n",SniperModeHeader.aoiHeight)
+    change hinfo text=s
+  endif
+end
+
+// Opens model in previous(dir=-1), next (dir=1) or same (dir=0) fiducial.
+function int Openmodel(int dir)
+  int i,n,nfid,currfiducial,tempinfo[16]
+  char dummymodel[1], dummycamset[1], dummysniper[1]
+  if dir!=0 then
+    currfiducial=fiducial
+    i=SYS.GetfiducialEx(0,2,0,tempinfo,dummymodel,dummycamset,dummysniper)
+    if i<0 || tempinfo[0]==0 || tempinfo[1]==0 return
+    variant=0;
+    if model==0 model=2
+    for n=0,n<tempinfo[0],n++ do       // For additional security
+      if dir<0 then
+        fiducial--; if fiducial<0 fiducial=tempinfo[0]-1
+      else
+        fiducial++; if fiducial>=tempinfo[0] fiducial=0
+      endif
+      if fiducial==currfiducial break
+      i=SYS.GetfiducialEx(fiducial,model,variant,info,data,fid_cameraSettings,fid_sniperModeHeader)
+      if i==0 then
+        datavalid=1
+        return
+      endif
+    enddo
+  endif
+  i=SYS.GetfiducialEx(fiducial,model,variant,info,data,fid_cameraSettings,fid_sniperModeHeader)
+  if i==0 then
+    datavalid=1
+  else
+    datavalid=0
+  endif
+end
+
+// Main function.
+function int main()
+  int i,recount,redraw
+  char path[260],drv[10],dir[260],nam[260],ext[260],dummymodel[1],dummycamset[1],dummysniper[1]
+  handle htemp
+  if Embedded()==0 then
+    lprintf(RED,"Fiducial Viewer works only in Test Player!")
+    return
+  endif
+  //Alloc(data,132800)                   // Size is too big for static allocation
+  Alloc(data,256384)                   // Size is too big for static allocation
+  Alloc(fid_cameraSettings,40)
+  Alloc(fid_sniperModeHeader,28)
+  // Create main window.
+  hmain=control WINDOW
+    window=NULL
+    position=10,10,DX+137,DY+39
+    name=format("%s v%s",TITLE,VERSION)
+    help=" "
+    color=BLACK
+    bkcolor=LIGHTGRAY
+    size=1024
+  endc
+  hview=control GRAPH
+    window=hmain
+    position=6,6,DX,DY
+    help="选定的基准"
+    color=BLACK
+    bkcolor=LIGHTYELLOW
+  endc
+  hmess=control TEXT
+    window=hmain
+    position=5,DY+12,DX+2,22
+    help="实际信息"
+    color=BLACK
+    bkcolor=WHITE
+    font=MEDIUMFONT
+    mode=M_BORDER
+  endc
+  hopen=control BUTTON
+    window=hmain
+    position=DX+12,5,120,24
+    name="打开文件"
+    help="打开不同的基准文件"
+  endc
+  draw window=hmain font=INFOFONT color=BLACK
+  draw at DX+12,55 text="基准:"
+  hfidu=control TEXT
+    window=hmain
+    position=DX+42,58,45,22
+    help="选定的基准"
+    color=BLACK
+    bkcolor=WHITE
+    font=MEDIUMFONT
+    mode=M_BORDER
+  endc
+  hprev=control BUTTON
+    window=hmain
+    position=DX+89,58,22,22
+    text="C"
+    help="上一个基准"
+    font=MEDIUMFONT
+  endc
+  hnext=control BUTTON
+    window=hmain
+    position=DX+110,58,22,22
+    text="+"
+    help="下一个基准"
+    font=MEDIUMFONT
+  endc
+  draw at DX+12,100 text="Model:"
+  hbig=control RADIO
+    window=hmain
+    position=DX+42,102,90,18
+    name="大"
+    help="显示大模型"
+    font=INFOFONT
+  endc
+  hrough=control RADIO
+    window=hmain
+    position=DX+42,121,90,18
+    name="粗略"
+    help="显示粗略模型"
+    font=INFOFONT
+  endc
+  hexact=control RADIO
+    window=hmain
+    position=DX+42,140,90,18
+    name="精准"
+    help="显示精确的模型"
+    font=INFOFONT
+  endc
+  draw at DX+12,175 text="Zoom:"
+  hzoom=control TEXT
+    window=hmain
+    position=DX+42,177,45,22
+    help="选定的缩放系数"
+    color=BLACK
+    bkcolor=WHITE
+    font=MEDIUMFONT
+    mode=M_BORDER
+  endc
+  hzoomout=control BUTTON
+    window=hmain
+    position=DX+89,177,22,22
+    text="C"
+    help="缩小"
+    font=MEDIUMFONT
+  endc
+  hzoomin=control BUTTON
+    window=hmain
+    position=DX+110,177,22,22
+    text="+"
+    help="放大"
+    font=MEDIUMFONT
+  endc
+  draw at DX+12,219 text="Display:"
+  htemp=control CHILD
+    window=hmain
+    position=DX+12,222,120,40
+    help=" "
+    color=LIGHTGRAY
+    bkcolor=LIGHTGRAY
+  endc
+  hcircles=control RADIO
+    window=htemp
+    position=30,1,90,18
+    name="循环"
+    help="将数据显示为大小与亮度成比例的圆"
+    font=INFOFONT
+  endc
+  hpixels=control RADIO
+    window=htemp
+    position=30,20,90,18
+    name="像素"
+    help="将数据显示为不同颜色的像素"
+    font=INFOFONT
+  endc
+  change hcircles mode=M_CHECKED
+  draw at DX+12,279 text="Fiducial data:"
+  hinfo=control TEXT
+    window=hmain
+    position=DX+12,282,120,DY-275
+    help="有关所选型号的信息"
+    font=SMALLFONT
+    color=BLACK
+    bkcolor=WHITE
+    mode=M_BORDER
+  endc
+  draw show
+  hquit=control BUTTON
+    window=hmain
+    position=DX+12,DY+12,120,22
+    name="关闭"
+    help="关闭基准查看器"
+  endc
+  hinfoprev=control BUTTON
+    window=hmain
+    position=DX+92,262,18,18
+    text="<"
+    help="上一个信息页"
+    font=MEDIUMFONT
+  endc
+  hinfonext=control BUTTON
+    window=hmain
+    position=DX+110,262,18,18
+    text=">"
+    help="下一个信息页"
+    font=MEDIUMFONT
+  endc
+  // Get directory of actually loaded task. Fiducial file is usually stored
+  // here.
+  path[0]='\0'
+  SYS.Boardname(path);
+  Fnsplit(path,drv,dir,nam,ext)
+  Fnmerge(path,drv,dir,nam,".fid")
+  // Main loop.
+  zoom2=2
+  fiducial=0
+  model=2
+  variant=0
+  recount=1
+  redraw=1
+  infopage=0
+  while 1 do
+    if Pressed(hopen) then
+      i=SYS.Browse(hmain,path,"Select fiducial file",0)
+      if i==1 && path[0]!='\0' then
+        Fnsplit(path,drv,dir,nam,ext)
+        i=SYS.Loadfiducials(path);
+        if i==0 then
+          change hmain name=format("%s v%s - %s%s",TITLE,VERSION,nam,ext)
+          recount=1
+        else
+          change hmess color=LIGHTRED
+          change hmess text=format(" Error opening '%s%s'",nam,ext)
+        endif
+      endif
+    else if Pressed(hprev) then
+      Openmodel(-1)
+      redraw=1
+    else if Pressed(hnext) then
+      Openmodel(1)
+      redraw=1
+    else if Pressed(hbig) then
+      model=0
+      Openmodel(0)
+      redraw=1
+    else if Pressed(hrough) then
+      model=1
+      Openmodel(0)
+      redraw=1
+    else if Pressed(hexact) then
+      model=2
+      Openmodel(0)
+      redraw=1
+    else if Pressed(hzoomout) && zoom2>1 then
+      zoom2=zoom2/2
+      redraw=1
+    else if Pressed(hzoomin) && zoom2<8 then
+      zoom2=zoom2*2
+      redraw=1
+    else if Pressed(hcircles) then
+      redraw=1
+    else if Pressed(hpixels) then
+      redraw=1
+    else if Pressed(hinfoprev) then
+      infopage--; if infopage<0 infopage=1
+      redraw=1
+    else if Pressed(hinfonext) then
+      infopage++; if infopage>1 infopage=0
+      redraw=1
+    else if Pressed(hquit) then
+      break
+    endif
+    // Display number of fiducials and open first available.
+    if (recount) then
+      i=SYS.GetfiducialEx(0,2,0,info,dummymodel,dummycamset,dummysniper)
+      if i>=0 then
+        Fnsplit(path,drv,dir,nam,ext)
+        change hmess color=BLACK
+        if nam[0]=='\0' then
+          change hmess text=format(" %i fiducials",info[1])
+        else
+          change hmess text=format(" %s%s: %i fiducials",nam,ext,info[1])
+        endif
+        variant=0
+        fiducial=9999999
+        Openmodel(1)                   // Opens first available model
+        redraw=1
+      endif
+      recount=0
+    endif
+    // Redraw fiducial and update controls.
+    if (redraw) then
+      change hfidu text=format(" %i",fiducial)
+      if model==0 then
+        change hbig mode=M_CHECKED
+      else if model==1 then
+        change hrough mode=M_CHECKED
+      else
+        change hexact mode=M_CHECKED
+      endif
+      if zoom2==1 then
+        change hzoom text=" :2"
+      else if zoom2==2 then
+        change hzoom text=" =1"
+      else if zoom2==4 then
+        change hzoom text=" x2"
+      else if zoom2==8 then
+        change hzoom text=" x4"
+      endif
+      Drawmodel()
+      Drawmodeldata()
+      redraw=0
+    endif
+    wait
+  enddo
+end
+

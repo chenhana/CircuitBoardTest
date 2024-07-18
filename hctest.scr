@@ -1,0 +1,831 @@
+#include "ls.icl"                  // Standard functions
+#include "or.icl"                // Command names
+#cmdbuff 18
+
+#define VERSION        "1.01"
+#define DESCRIPTION    "Head controller test"
+
+// 1.01: Derived from a5hctest.scr.
+
+#define MAINX          840             // X client size, pixels
+#define MAINY          560             // Y client size, pixels
+#define BTNDX          100             // X button size
+#define BTNDY          24              // Y button size
+#define PANEDY         150             // Height of axis pane
+
+#define BORDER         6               // Border between controls
+
+handle           hmain                 // Main window
+handle           hheads                // Heads pane
+handle           hhead[32]             // Head selection controls
+handle           hmessage              // Messageb text
+handle           hhard                 // Hard reset button
+handle           hlayout               // Name of layout
+handle           hload                 // Load layout
+handle           hreset                // Reset statistics
+handle           hquit                 // Finish script
+
+handle           htop                  // Top light
+handle           hskew                 // Skew light
+
+// Channels: 0 - phase A, 1 - phase B, 2 - zero pulse, 3 - counter,
+// 4 - temperature, 5 - end switch.
+handle           hact[3][6]            // Actual values, [axis][channel]
+handle           hmin[3][6]            // Minimal values, [axis][channel]
+handle           hmax[3][6]            // Maximal values, [axis][channel]
+handle           hpwroff[3]            // Turn axis power off
+handle           hminus[3]             // Decrease phase counter
+handle           hphase[3]             // Motor phase counter
+handle           hplus[3]              // Increase phase counter
+
+int              head                  // Currently selected head
+int              reset                 // Reset all statistics
+int              pwroff                // Current state of power off bits
+int              phase[3]              // Current motor phases
+int              lights                // Current state of light bits
+
+
+////////////////////////////////////////////////////////////////////////////////
+//////////////////////////////////// LAYOUT ////////////////////////////////////
+
+// Loads layout to Crate.
+function int Loadlayout()
+  int i,j,n,t,len,nextra,nsent,err
+  char name[260],buf[774]
+  handle f
+  change hmessage color=BLACK
+  change hmessage text="Loading layout, please wait..."
+  confirm hlayout
+  Text(hlayout,name)
+  // Set debug mode.
+  buf[0]=S_DEBUG
+  buf[1]=0x01                          // Set debugging mode
+  $uint2(buf+2)=$GLOBAL.debugmode
+  $uint2(buf+4)=$GLOBAL.disabledrails
+  $uint2(buf+6)=$GLOBAL.videomode
+  SYS.Sendimm(16,8,buf)
+  if $GLOBAL.a5 then
+    buf[0]=S_DEBUG
+    buf[1]=0x0F                        // Set debug mode of measurement card
+    $uint4(buf+2)=$uint4($GLOBAL+280)
+    $uint4(buf+6)=0
+    $uint4(buf+10)=0
+    $uint4(buf+14)=0
+    SYS.Sendimm(16,18,buf)
+  endif
+  f=Fopen(name,"rb")
+  if f==NULL then
+    change hmessage color=LIGHTRED
+    change hmessage text=format("Unable to read '%s'",name)
+    return 1
+  endif
+  Fseek(f,0,2); len=Ftell(f); Fseek(f,0,0);
+  if len!=768 && len!=1536 && len!=2304 && len!=3072 &&                        \
+    len!=3840 && len!=4608 then
+    change hmessage color=LIGHTRED
+    change hmessage text=format("Invalid length of layout '%s'",name)
+    return 1
+  endif
+  err=0
+  Memset($EXTLAY,0,768)
+  Memset($EXT0,0,768)
+  Memset($EXT1,0,768)
+  Memset($EXT2,0,768)
+  Memset($EXT3,0,768)
+  n=Fread($LAY,768,f)
+  if n!=768 err=1
+  $LAY.extlay=0
+  if err==0 && len>=1536 then
+    n=Fread($EXTLAY,768,f)
+    if n!=768 err=1
+    $LAY.extlay=$LAY.extlay+1
+  endif
+  if err==0 && len>=2304 then
+    n=Fread($EXT0,768,f)
+    if n!=768 err=1
+    $LAY.extlay=$LAY.extlay+1
+  endif
+  if err==0 && len>=3072 then
+    n=Fread($EXT1,768,f)
+    if n!=768 err=1
+    $LAY.extlay=$LAY.extlay+1
+  endif
+  if err==0 && len>=3840 then
+    n=Fread($EXT2,768,f)
+    if n!=768 err=1
+    $LAY.extlay=$LAY.extlay+1
+  endif
+  if err==0 && len>=4608 then
+    n=Fread($EXT3,768,f)
+    if n!=768 err=1
+    $LAY.extlay=$LAY.extlay+1
+  endif
+  Fclose(f)
+  SYS.Broadcast(8,"CHG LAY")           // Inform others that layout changed
+  if err!=0 then
+    change hmessage color=LIGHTRED
+    change hmessage text=format("Unable to read '%s'",name)
+    return 1
+  endif
+  if $LAY.nfing<=0 || $LAY.nfing>16 then
+    change hmessage color=LIGHTRED
+    change hmessage text=format("Wrong layout '%s'",name)
+    return 1
+  endif
+  // Load main layout and wait for answer. If additional layout extentions are
+  // supported, answer will indicate this fact.
+  SYS.Killimm(0)
+  buf[0]=S_LOADRUN
+  buf[1]=3                             // Load layout
+  $int4(buf+2)=0                       // Dummy zero bytes
+  Memcpy(buf+6,$LAY,768)
+  SYS.Sendimm(0,774,buf)
+  t=Time()
+  while $A[0].length==0 do
+    if Pressed(hquit) return -1
+    if Time()-t>10000 then
+      change hmessage color=LIGHTRED
+      change hmessage text="Timeout while loading layout"
+      $GLOBAL.layloaded=-1
+      return 1
+    endif
+    wait
+  enddo
+  if $A[0].answer!=S_LOADRUN then
+    change hmessage color=LIGHTRED
+    change hmessage text="Crate reports layout loading error"
+    $GLOBAL.layloaded=-1
+    return 1
+  endif
+  for i=0,i<16,i++                     // Same offsets in tester & inner copy
+    $LAYCORR.leftzerox[i]=$LAY.leftzerox[i]
+    $LAYCORR.leftzeroy[i]=$LAY.leftzeroy[i]
+    $LAYCORR.rightzerox[i]=$LAY.rightzerox[i]
+    $LAYCORR.rightzeroy[i]=$LAY.rightzeroy[i]
+  enddo
+  if $A[0].length>=7 then
+    nextra=$char($A[0]+6)
+  else
+    nextra=1
+  endif
+  // Load layout extentions. I load additional extentions first, this is the
+  // standard sequence.
+  nsent=0
+  if len>=2304 && nextra>=2 then
+    buf[0]=S_LOADRUN
+    buf[1]=20                          // Load additional layout extention
+    $int4(buf+2)=0                     // First additional extention
+    Memcpy(buf+6,$EXT0,768)
+    SYS.Sendimm(1,774,buf)
+    nsent=Max(nsent,2)
+  endif
+  if len>=3072 && nextra>=3 then
+    buf[0]=S_LOADRUN
+    buf[1]=20                          // Load additional layout extention
+    $int4(buf+2)=1                     // Second additional extention
+    Memcpy(buf+6,$EXT1,768)
+    SYS.Sendimm(2,774,buf)
+    nsent=Max(nsent,3)
+  endif
+  if len>=3840 && nextra>=4 then
+    buf[0]=S_LOADRUN
+    buf[1]=20                          // Load additional layout extention
+    $int4(buf+2)=2                     // Third additional extention
+    Memcpy(buf+6,$EXT2,768)
+    SYS.Sendimm(3,774,buf)
+    nsent=Max(nsent,4)
+  endif
+  if len>=4608 && nextra>=5 then
+    buf[0]=S_LOADRUN
+    buf[1]=20                          // Load additional layout extention
+    $int4(buf+2)=3                     // Fourth additional extention
+    Memcpy(buf+6,$EXT3,768)
+    SYS.Sendimm(4,774,buf)
+    nsent=Max(nsent,5)
+  endif
+  if len>=1536 then
+    buf[0]=S_LOADRUN
+    buf[1]=15                          // Load main layout extention
+    $int4(buf+2)=0                     // Dummy zero bytes
+    Memcpy(buf+6,$EXTLAY,768)
+    SYS.Sendimm(0,774,buf)
+    nsent=Max(nsent,1)
+  endif
+  while 1 do
+    for j=0,j<nsent,j++ do
+      if $A[j].length==0 break
+    enddo
+    if j>=nsent break                  // All answers are back
+    if Pressed(hquit) return -1
+    if Time()-t>10000 then
+      change hmessage color=LIGHTRED
+      change hmessage text="Timeout while loading layout"
+      for j=0,j<nsent,j++ do
+        SYS.Killimm(j)
+      enddo
+      $GLOBAL.layloaded=-1
+      return 1
+    endif
+    wait
+  enddo
+  for j=0,j<nsent,j++ do
+    if $A[j].answer!=S_LOADRUN break
+  enddo
+  if j<nsent then
+    change hmessage color=LIGHTRED
+    change hmessage text="Crate reports layout loading error"
+    $GLOBAL.layloaded=-1
+    return 1
+  endif
+  change hmessage color=BLACK
+  change hmessage text="Layout loaded"
+  $GLOBAL.layloaded=1
+  return 0
+end
+
+
+////////////////////////////////////////////////////////////////////////////////
+//////////////////////////////////// PORTS /////////////////////////////////////
+
+static int portlist[16] = {          \ // Ports to be read
+  0x10000100,                        \ // 0: X phase A
+  0x10000101,                        \ // 1: X phase B
+  0x10000102,                        \ // 2: X zero pulse
+  0x000000C0,                        \ // 3: X counter
+  0x1000010B,                        \ // 4: Raw X temperature
+  0x10000103,                        \ // 5: Y phase A
+  0x10000104,                        \ // 6: Y phase B
+  0x10000105,                        \ // 7: Y zero pulse
+  0x000000C2,                        \ // 8: Y counter
+  0x1000010C,                        \ // 9: Raw Y temperature
+  0x10000108,                        \ // 10: Z phase A
+  0x10000109,                        \ // 11: Z phase B
+  0x1000010A,                        \ // 12: Z counter
+  0x1000010D,                        \ // 13: Raw Z temperature
+  0x10000107,                        \ // 14: Z pressure
+  0x000000CA }                         // 15: End switches
+
+// Reads ports from the specified controller. On success, sets data and returns
+// 0. On error, sets message and returns 1. If exit button is pressed, returns
+// -1.
+function int Readports(int head,int *data)
+  int i,t
+  char buf[64]
+  // Send commands.
+  for i=0,i<16,i++ do
+    SYS.Killimm(i)
+    buf[0]=0x30                        // S_INPORT
+    buf[1]=head                        // Destination
+    $int4(buf+2)=portlist[i]           // Port
+    SYS.Sendimm(i,6,buf)
+  enddo
+  // Wait for answers.
+  t=Time()
+  while 1 do
+    for i=0,i<16,i++ do
+      if $A[i].length==0 break
+    enddo
+    if i>=16 break
+    if Pressed(hquit) return -1
+    if Time()-t>1000 then
+      change hmessage color=LIGHTRED
+      change hmessage text="Unable to read data: timeout"
+      return 1
+    endif
+    wait
+  enddo
+  // Verify answers for validity.
+  for i=0,i<16,i++ do
+    if $A[i].answer!=0x30 then
+      change hmessage color=LIGHTRED
+      change hmessage text="Unable to read data: invalid answer"
+      return 1
+    endif
+  enddo
+  // Parse data.
+  data[0]=$uint2($A[0]+5)-32768        // X phase A
+  data[1]=$uint2($A[1]+5)-32768        // X phase B
+  data[2]=$uint2($A[2]+5)-32768        // X zero pulse
+  data[3]=$int2($A[3]+5)               // X counter, lowest 16 bits
+  data[4]=$uint2($A[4]+5)              // Raw X temperature
+  data[5]=($uint4($A[15]+5) & 0x1)==0  // X end switch
+  data[6]=$uint2($A[5]+5)-32768        // Y phase A
+  data[7]=$uint2($A[6]+5)-32768        // Y phase B
+  data[8]=$uint2($A[7]+5)-32768        // Y zero pulse
+  data[9]=$int2($A[8]+5)               // Y counter, lowest 16 bits
+  data[10]=$uint2($A[9]+5)             // Raw Y temperature
+  data[11]=($uint4($A[15]+5) & 0x2)==0 // Y end switch
+  data[12]=$uint2($A[10]+5)-32768      // Z phase A
+  data[13]=$uint2($A[11]+5)-32768      // Z phase B
+  data[14]=0                           // There is no Z zero pulse
+  data[15]=$int2($A[12]+5)             // Z counter, lowest 16 bits
+  data[16]=$uint2($A[13]+5)            // Raw Z temperature
+  data[17]=$uint2($A[14]+5)            // Raw Z pressure
+  return 0
+end
+
+
+////////////////////////////////////////////////////////////////////////////////
+//////////////////////////////////// HEADS /////////////////////////////////////
+
+// Selects specified head.
+function int Selecthead(int h)
+  int i
+  char s[256]
+  if head>=0 then
+    change hhead[head] color=BLACK
+    change hhead[head] bkcolor=GRAY
+    sprintf(s,"OUTPORT32 HEAD(%i) 0x80000002 0x00",head)
+    SERV.Cmdimm(16,s)
+    sprintf(s,"OUTPORT32 HEAD(%i) 0x80000003 0x0F",head)
+    SERV.Cmdimm(16,s)
+    for i=0,i<3,i++ do
+      change hpwroff[i] color=BLACK
+      change hpwroff[i] bkcolor=LIGHTGRAY
+      change hphase[i] text="0"
+      change hphase[i] color=BLACK
+      change hphase[i] bkcolor=LIGHTGRAY
+      sprintf(s,"OUTPORT32 HEAD(%i) 0x%08X 0",head,0x80000010+i*2)
+      SERV.Cmdimm(16,s)
+      phase[i]=0
+    enddo
+    change htop color=BLACK
+    change htop bkcolor=LIGHTGRAY
+    change hskew color=BLACK
+    change hskew bkcolor=LIGHTGRAY
+  endif
+  if h<0 || h>=32 || hhead[h]==NULL return
+  head=h
+  change hhead[head] color=LIGHTRED
+  change hhead[head] bkcolor=YELLOW
+  reset=1
+  pwroff=0
+  lights=0
+end
+
+// Creates head selection controls according to layout.
+function int Createheads()
+  int i,x,y,yshift
+  for i=0,i<32,i++ do
+    if hhead[i]==NULL continue
+    destroy hhead[i]
+    hhead[i]=NULL
+  enddo
+  clear hheads
+  draw window=hheads font=MEDIUMFONT mode=M_CENTERED color=BLACK
+  draw at 143/2-2*BORDER,33 text="Heads"
+  draw show
+  yshift=0
+  for i=0,i<$LAY.nfing*2,i++ do
+    if ($LAY.side[i/2] & 1)!=0 yshift=8
+    x=(i & 1?143/2-2*BORDER+3:5)
+    y=(i/2)*27+yshift+40
+    hhead[i]=control BUTTON
+      window=hheads
+      position=x,y,143/2-2*BORDER-8,22
+      text=format("%i%s",i/2,i & 1?"R":"L")
+      help=format("选择测试头 %i%s",i/2,i & 1?"R":"L")
+      color=BLACK
+      bkcolor=GRAY
+    endc
+  enddo
+  if $LAY.cameras!=0 then
+    y=$LAY.nfing*27+yshift+8+40
+    if $LAY.cameras & 0x1 then
+      x=5
+      hhead[$LAY.nfing*2+0]=control BUTTON
+        window=hheads
+        position=x,y,143/2-2*BORDER-8,22
+        text="VTop"
+        help="选择上部专用相机"
+        color=BLACK
+        bkcolor=GRAY
+      endc
+    endif
+    if $LAY.cameras & 0x2 then
+      x=143/2-2*BORDER+3
+      hhead[$LAY.nfing*2+1]=control BUTTON
+        window=hheads
+        position=x,y,143/2-2*BORDER-8,22
+        text="VBot"
+        help="选择下部专用相机"
+        color=BLACK
+        bkcolor=GRAY
+      endc
+    endif
+  endif
+  head=-1
+  Selecthead(0)
+end
+
+
+////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////// MAIN PROGRAM /////////////////////////////////
+
+// Main program.
+function int main()
+  int i,j,x0,y0,x,y,dx,t,loaded,running,update
+  int data[3][6],dmin[3][6],dmax[3][6],ok[3][6],pulse[3][6]
+  char axis[3][8] = { "X", "Y", "Z" }
+  char chan[6][8] = { "PhA", "PhB", "Zero", "Cnt", "T", "End" }
+  char full[6][20] = { "phase A", "phase B", "zero pulse",                     \
+    "counter", "temperature sensor", "end switch" }
+  char channame[8],fullname[20],buf[32],s[256]
+  hmain=control WINDOW
+    window=NULL
+    position=10,10,MAINX,MAINY
+    name=format("A5 自动 v%s",VERSION)
+    help=" "
+    bkcolor=GRAY
+    size=4096
+  endc
+  hheads=control CHILD
+    window=hmain
+    position=2*BORDER,2*BORDER,143-4*BORDER,473
+    help=" "
+    bkcolor=LIGHTGRAY
+    size=256
+  endc
+  draw window=hmain
+  x0=143
+  for j=0,j<3,j++ do                   // Axis
+    y0=(2*j+2)*BORDER+PANEDY*j
+    draw font=LARGEFONT color=BLACK mode=M_LEFT
+    draw at x0+5,y0+78 text=axis[j]
+    draw color=BLACK bkcolor=LIGHTGRAY
+    draw at x0+37,y0 fillrect MAINX-2*BORDER,y0+PANEDY
+    draw font=MEDIUMFONT color=DARKGRAY mode=M_RIGHT
+    for i=0,i<6,i++ do                 // Channel
+      if j==2 && i==2 continue         // There is no Z zero pulse
+      if j==2 && i==5 then
+        Strcpy(channame,"P")
+        Strcpy(fullname,"pressure sensor")
+        x=x0+47+112*2
+      else
+        Strcpy(channame,chan[i])
+        Strcpy(fullname,full[i])
+        x=x0+47+112*i
+      endif
+      y=y0+13
+      dx=(i==5 && j!=2?24:(i==3?80:60))
+      draw at x+31,y+22 text=channame
+      hact[j][i]=control EDIT
+        window=hmain
+        position=x+38,y,dx,24
+        help=format("%s%s的实际值，位",axis[j],fullname)
+        font=MEDIUMFONT
+        color=BLACK
+        bkcolor=WHITE
+        mode=M_NOEDIT
+      endc
+      y=y+34
+      if i==0 draw at x+31,y+22 text="Min"
+      hmin[j][i]=control EDIT
+        window=hmain
+        position=x+38,y,dx,24
+        help=format("%s%s的最小值，位",axis[j],fullname)
+        font=MEDIUMFONT
+        color=BLACK
+        bkcolor=WHITE
+        mode=M_NOEDIT
+      endc
+      y=y+34
+      if i==0 draw at x+31,y+22 text="Max"
+      hmax[j][i]=control EDIT
+        window=hmain
+        position=x+38,y,dx,24
+        help=format("%s%s的最大值，位",axis[j],fullname)
+        font=MEDIUMFONT
+        color=BLACK
+        bkcolor=WHITE
+        mode=M_NOEDIT
+      endc
+    enddo
+    hpwroff[j]=control BUTTON
+      window=hmain
+      position=x0+37+2*BORDER,y0+117,96,22
+      text="Encoder off"
+      help="按下关闭编码器电源"
+      color=BLACK
+      bkcolor=LIGHTGRAY
+    endc
+    draw at x0+215+2*BORDER,y0+138 text="Motor:"
+    hminus[j]=control BUTTON
+      window=hmain
+      position=x0+220+2*BORDER,y0+117,30,22
+      text="<"
+      help="按下减小电机相位"
+      color=BLACK
+      bkcolor=LIGHTGRAY
+      font=MEDIUMFONT
+      mode=M_REPEAT
+    endc
+    hphase[j]=control TEXT
+      window=hmain
+      position=x0+255+2*BORDER,y0+117,50,22
+      text="0"
+      help="实际电机相位"
+      color=BLACK
+      bkcolor=LIGHTGRAY
+      font=MEDIUMFONT
+      mode=M_BORDER|M_CENTERED
+    endc
+    hplus[j]=control BUTTON
+      window=hmain
+      position=x0+310+2*BORDER,y0+117,30,22
+      text=">"
+      help="按下增加电机相位"
+      color=BLACK
+      bkcolor=LIGHTGRAY
+      font=MEDIUMFONT
+      mode=M_REPEAT
+    endc
+    if j==2 then
+      // Illumination controls.
+      draw at MAINX-6*BORDER-125,y0+138 text="Light:"
+      htop=control BUTTON
+        window=hmain
+        position=MAINX-5*BORDER-120,y0+117,60,22
+        text="Top"
+        help="切换上部灯光"
+        color=BLACK
+        bkcolor=LIGHTGRAY
+      endc
+      hskew=control BUTTON
+        window=hmain
+        position=MAINX-4*BORDER-60,y0+117,60,22
+        text="Skew"
+        help="切换侧边灯光"
+        color=BLACK
+        bkcolor=LIGHTGRAY
+      endc
+    endif
+  enddo
+  draw show
+  hmessage=control TEXT
+    window=hmain
+    position=60,(2*3+2)*BORDER+PANEDY*3,MAINX-60-2*BORDER,24
+    text=format("%s %s",DESCRIPTION,VERSION)
+    help=" "
+    font=MEDIUMFONT
+  endc
+  hhard=control BUTTON
+    window=hmain
+    position=2*BORDER,MAINY-BTNDY-BORDER,BTNDX,BTNDY
+    name="硬复位"
+    help="按下进行硬件复位"
+  endc
+  hlayout=control COMBOEDIT
+    window=hmain
+    position=3*BORDER+BTNDX,MAINY-BTNDY-BORDER,280,120
+    name="布局文件"
+    help="包含主测试机布局的文件"
+    mode=M_VSCROLL
+  endc
+  hload=control BUTTON
+    window=hmain
+    position=4*BORDER+BTNDX+280,MAINY-BTNDY-BORDER,BTNDX,BTNDY
+    name="载入布局"
+    help="按下可加载布局"
+  endc
+  hreset=control BUTTON
+    window=hmain
+    position=5*BORDER+2*BTNDX+300,MAINY-BTNDY-BORDER,BTNDX,BTNDY
+    name="清除"
+    help="按下可重置统计信息并重新启动测试"
+  endc
+  hquit=control BUTTON
+    window=hmain
+    position=MAINX-BTNDX-2*BORDER,MAINY-BTNDY-BORDER,BTNDX,BTNDY
+    text="关闭"
+    help="关闭此脚本"
+  endc
+  // Check if layout is loaded.
+  buf[0]=S_LAYOUT
+  buf[1]=0x02                          // Read layout "as is"
+  SYS.Sendimm(16,2,buf)
+  t=Time()
+  while Time()-t<1000 do
+    if $A[16].length!=0 break
+    if Pressed(hquit) goto quit
+    wait
+  enddo
+  if $A[16].answer==S_LAYOUT then
+    loaded=1
+    reset=1
+  else if $A[16].length!=0 then
+    change hmessage color=LIGHTRED
+    change hmessage text="Layout is not yet loaded"
+    loaded=0
+    reset=0
+  else
+    change hmessage color=LIGHTRED
+    change hmessage text="No answer from Crate controller"
+    loaded=0
+    reset=0
+  endif
+  // Main loop.
+  Createheads()
+  running=0
+  update=0
+  while 1 do
+    if reset then
+      running=0
+      clear hmessage
+      i=Readports(head,data)
+      if i<0 then
+        break
+      else if i==0 then
+        Memcpy(dmin,data,Sizeof(data))
+        Memcpy(dmax,data,Sizeof(data))
+        running=1
+        update=1
+      endif
+      reset=0
+    endif
+    if running then
+      i=Readports(head,data)
+      if i<0 then
+        break
+      else if i==0 then
+        update=1
+      else
+        running=0
+      endif
+    endif
+    if update then
+      for j=0,j<3,j++ do
+        for i=0,i<6,i++ do
+          if j==2 && i==2 continue     // There is no Z zero pulse
+          // Update values.
+          change hact[j][i] text=format("%i",data[j][i])
+          dmin[j][i]=Min(dmin[j][i],data[j][i])
+          change hmin[j][i] text=format("%i",dmin[j][i])
+          dmax[j][i]=Max(dmax[j][i],data[j][i])
+          change hmax[j][i] text=format("%i",dmax[j][i])
+          // Mark good channels.
+          if i==0 || i==1 then         // Phase A or B
+            ok[j][i]=(dmin[j][i]>=(-25000) && dmin[j][i]<=(-10000) &&          \
+            dmax[j][i]>=10000 && dmax[j][i]<=25000)
+          else if i==2 then            // Zero pulse
+            ok[j][i]=(dmin[j][i]>=(-30000) && dmin[j][i]<=(-12000) &&          \
+            dmax[j][i]>=3000 && dmax[j][i]<=25000)
+            pulse[j][i]=(data[j][i]>dmin[j][i]+5000)
+          else if i==3 then            // Counter
+            ok[j][i]=(dmax[j][i]-dmin[j][i]>=256)
+          else if i==4 then            // Temperature
+            ok[j][i]=(data[j][i]>=22000 && data[j][i]<=27000)
+          else if i==5 && j<=1 then    // End switch
+            ok[j][i]=(dmin[j][i]==0 && dmax[j][i]==1)
+          else if i==5 && j==2 then    // Pressure
+            ok[j][i]=(dmin[j][i]<500 && dmax[j][i]>20000 && dmax[j][i]<30000)
+          endif
+          if ok[j][i] then
+            change hact[j][i] color=BLACK
+            change hact[j][i] bkcolor=LIGHTGREEN
+            change hmin[j][i] bkcolor=LIGHTGREEN
+            change hmax[j][i] bkcolor=LIGHTGREEN
+          else
+            change hact[j][i] color=(pulse[j][i]?LIGHTRED:BLACK)
+            change hact[j][i] bkcolor=(pulse[j][i]?YELLOW:WHITE)
+            change hmin[j][i] bkcolor=WHITE
+            change hmax[j][i] bkcolor=WHITE
+          endif
+        enddo
+      enddo
+      update=0
+    endif
+    for i=0,i<32,i++ do
+      if hhead[i]==NULL continue
+      if Pressed(hhead[i]) Selecthead(i)
+    enddo
+    for i=0,i<3,i++ do
+      if Pressed(hminus[i]) then
+        phase[i]=Max(0,phase[i]-1)
+        if phase[i]==0 then
+          change hphase[i] color=BLACK
+          change hphase[i] bkcolor=LIGHTGRAY
+        else
+          change hphase[i] color=LIGHTRED
+          change hphase[i] bkcolor=YELLOW
+        endif
+        change hphase[i] text=format("%i",phase[i])
+        sprintf(s,"OUTPORT32 HEAD(%i) 0x%08X %i",head,0x80000010+i*2,phase[i])
+        SERV.Cmdimm(16,s)
+      else if Pressed(hplus[i]) then
+        phase[i]=Min(phase[i]+1,999)
+        change hphase[i] color=LIGHTRED
+        change hphase[i] bkcolor=YELLOW
+        change hphase[i] text=format("%i",phase[i])
+        sprintf(s,"OUTPORT32 HEAD(%i) 0x%08X %i",head,0x80000010+i*2,phase[i])
+        SERV.Cmdimm(16,s)
+      endif
+    enddo
+    if Pressed(hpwroff[0]) then
+      pwroff=pwroff ^ 0x01
+      if pwroff & 0x01 then
+        change hpwroff[0] color=LIGHTRED
+        change hpwroff[0] bkcolor=YELLOW
+      else
+        change hpwroff[0] color=BLACK
+        change hpwroff[0] bkcolor=LIGHTGRAY
+      endif
+      sprintf(s,"OUTPORT32 HEAD(%i) 0x80000003 %i",head,pwroff^0xF)
+      SERV.Cmdimm(16,s)
+    else if Pressed(hpwroff[1]) then
+      pwroff=pwroff ^ 0x02
+      if pwroff & 0x02 then
+        change hpwroff[1] color=LIGHTRED
+        change hpwroff[1] bkcolor=YELLOW
+      else
+        change hpwroff[1] color=BLACK
+        change hpwroff[1] bkcolor=LIGHTGRAY
+      endif
+      sprintf(s,"OUTPORT32 HEAD(%i) 0x80000003 %i",head,pwroff^0xF)
+      SERV.Cmdimm(16,s)
+    else if Pressed(hpwroff[2]) then
+      pwroff=pwroff ^ 0x0C
+      if pwroff & 0x0C then
+        change hpwroff[2] color=LIGHTRED
+        change hpwroff[2] bkcolor=YELLOW
+      else
+        change hpwroff[2] color=BLACK
+        change hpwroff[2] bkcolor=LIGHTGRAY
+      endif
+      sprintf(s,"OUTPORT32 HEAD(%i) 0x80000003 %i",head,pwroff^0xF)
+      SERV.Cmdimm(16,s)
+    else if Pressed(hhard) then
+      running=0
+      buf[0]=0x06                      // S_LOADRUN
+      buf[1]=0                         // Hard reset
+      buf[2]=0                         // Normal reset
+      buf[3]=0
+      buf[4]=0
+      buf[5]=0
+      SYS.Killimm(16)
+      SYS.Sendimm(16,6,buf)
+      change hmessage color=BLACK
+      change hmessage text="Resetting controller, please wait..."
+      t=Time()
+      while Time()-t<15000 do
+        if $A[16].length!=0 break
+        if Pressed(hquit) goto quit
+        wait
+      enddo
+      if $A[16].length!=0 && $A[16].answer==0x06 then
+        change hmessage text="Hard reset OK"
+      else
+        change hmessage color=LIGHTRED
+        change hmessage text="Unable to reset controller"
+      endif
+    else if Pressed(htop) then
+      lights=lights^0x04
+      if (lights & 0xC)==0 then
+        lights=0
+      else
+        lights=lights | 0x03
+      endif
+      if lights & 0x04 then
+        change htop color=LIGHTRED
+        change htop bkcolor=YELLOW
+      else
+        change htop color=BLACK
+        change htop bkcolor=LIGHTGRAY
+      endif
+      sprintf(s,"OUTPORT32 HEAD(%i) 0x80000002 %i",head,lights)
+      SERV.Cmdimm(16,s)
+    else if Pressed(hskew) then
+      lights=lights^0x08
+      if (lights & 0xC)==0 then
+        lights=0
+      else
+        lights=lights | 0x03
+      endif
+      if lights & 0x08 then
+        change hskew color=LIGHTRED
+        change hskew bkcolor=YELLOW
+      else
+        change hskew color=BLACK
+        change hskew bkcolor=LIGHTGRAY
+      endif
+      sprintf(s,"OUTPORT32 HEAD(%i) 0x80000002 %i",head,lights)
+      SERV.Cmdimm(16,s)
+    else if Pressed(hload) then
+      i=Loadlayout()
+      if i<0 break
+      if i==0 then
+        loaded=1
+        reset=1
+      endif
+    else if Pressed(hreset) then
+      reset=1
+    else if Pressed(hquit) then
+      break
+    endif
+    wait
+  enddo
+quit:
+  // Finish script.
+  Selecthead(-1)
+end
+

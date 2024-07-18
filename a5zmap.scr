@@ -1,0 +1,268 @@
+#include "ls.icl"                  // Standard functions
+#include "or.icl"                // A2 command names
+#cmdbuff 10
+
+#define VERSION        "1.00"
+#define DESCRIPTION    "Z map visualisation"
+
+#define GRAPHX         600             // Width of viewer window, with border
+#define GRAPHY         500             // Height of viewer window, with border
+#define VIEWX          4000            // Client X size of viewer window
+#define VIEWY          1500            // Client X size of viewer window
+
+#define RIGHTX         140             // Width of right pane
+#define INFOY          24              // Height of information string
+#define DELTA          5               // Distance between graphical elements
+
+#define NHEAD          32              // Max number of heads
+#define FINEX          128             // Number of fine corr points along Ro
+#define FINEY          128             // Number of fine corr points along Fi
+#define CORDX          10000.0         // X distance between corrections, um
+#define CORDY          10000.0         // Y distance between corrections, um
+
+handle           hmain                 // Main window
+handle           hview                 // Viewer
+handle           hinfo                 // Info/error viewer
+handle           hhead[NHEAD]          // Head selection buttons
+handle           hexit                 // Close button
+
+float            radius                // Head radius, micrometers
+float            zmap[FINEY,FINEX]     // Z map
+float            zmax[FINEY,FINEX]     // Z max map
+
+
+// Reads Z map for the specified head. Returns 0 on success, 1 on error and -1
+// if operator pressed Close button.
+function int Readzmap(int head)
+  int i,j,t
+  char buf[64]
+  change hinfo color=BLACK
+  change hinfo text="Reading Z map..."
+  Memset(zmap,0,Sizeof(zmap))
+  Memset(zmax,0,Sizeof(zmax))
+  // Read Z maps.
+  for i=0,i<FINEX,i++ do
+    SYS.Killimm(0)
+    SYS.Killimm(1)
+    SYS.Killimm(2)
+    SYS.Killimm(3)
+    buf[0]=S_DEBUG                     // S_DEBUG
+    buf[1]=0x53                        // Dump SHARC memory
+    buf[2]=head                        // Head
+    $int2(buf+3)=0x3                   // Request Z map
+    $int4(buf+5)=i*FINEY               // Offset
+    $int4(buf+9)=FINEY/2               // Data count
+    $int4(buf+13)=0                    // Reserved, must be zero
+    $int4(buf+17)=0                    // Reserved, must be zero
+    SYS.Sendimm(0,21,buf)
+    $int2(buf+3)=0x4                   // Request Z max
+    SYS.Sendimm(2,21,buf)
+    $int2(buf+3)=0x3                   // Request Z map
+    $int4(buf+5)=i*FINEY+FINEY/2       // Offset
+    $int4(buf+9)=FINEY/2               // Data count
+    SYS.Sendimm(1,21,buf)
+    $int2(buf+3)=0x4                   // Request Z max
+    SYS.Sendimm(3,21,buf)
+    t=Time()
+    while 1 do
+      if $A[0].length!=0 && $A[1].length!=0 &&                                 \
+        $A[2].length!=0 && $A[3].length!=0 break
+      if Pressed(hexit) return -1
+      if Time()-t>2000 then
+        change hinfo color=LIGHTRED
+        change hinfo text="Timeout while reading Z map"
+        return 1
+      endif
+    enddo
+    if $A[0].answer!=S_DEBUG || $A[1].answer!=S_DEBUG ||                       \
+      $A[2].answer!=S_DEBUG || $A[3].answer!=S_DEBUG then
+      change hinfo color=LIGHTRED
+      change hinfo text="Invalid answer (Z map not supported?)"
+      return 1
+    endif
+    for j=0,j<FINEY/2,j++ do
+      if (head & 1)==0 then
+        // Left head.
+        zmap[j][i]=$float4($A[0]+5+j*4)
+        zmap[j+FINEY/2][i]=$float4($A[1]+5+j*4)
+        zmax[j][i]=$float4($A[2]+5+j*4)
+        zmax[j+FINEY/2][i]=$float4($A[3]+5+j*4)
+      else
+        // Right head.
+        zmap[FINEY-j-1][FINEX-i-1]=$float4($A[0]+5+j*4)
+        zmap[FINEY-j-FINEY/2-1][FINEX-i-1]=$float4($A[1]+5+j*4)
+        zmax[FINEY-j-1][FINEX-i-1]=$float4($A[2]+5+j*4)
+        zmax[FINEY-j-FINEY/2-1][FINEX-i-1]=$float4($A[3]+5+j*4)
+      endif
+    enddo
+  enddo
+  // Report success.
+  change hinfo text=""
+  return 0
+end
+
+function int Drawzmap(int head)
+  int i,j,x,y,x0,y0,x1,y1,step
+  float fi,testerx,testery
+  step=50
+  draw window=hview clear
+  draw color=GRAY bkcolor=GRAY
+  draw at 0,0 fillrect VIEWX,VIEWY
+  x0=($LAY.leftlimit-$LAY.xoffset)/CORDX*step+VIEWX/2
+  x1=($LAY.rightlimit-$LAY.xoffset)/CORDX*step+VIEWX/2
+  y0=VIEWY/2-($LAY.top[head/2]-$LAY.yoffset[head/2])/CORDY*step
+  y1=VIEWY/2-($LAY.bottom[head/2]-$LAY.yoffset[head/2])/CORDY*step
+  draw color=LIGHTRED bkcolor=WHITE
+  draw at x0,y0 fillrect x1,y1
+  draw font=SMALLFONT mode=M_CENTERED
+  testerx=$LAY.leftlimit-20000
+  testerx=(testerx/10000)*10000
+  for testerx=testerx,testerx<$LAY.rightlimit-1,testerx=testerx+10000 do
+    if testerx<=$LAY.leftlimit+1 continue
+    x=(testerx-$LAY.xoffset)/CORDX*step+VIEWX/2
+    draw color=LIGHTGRAY at x,y0-22 to x,y1+23
+    draw color=BLACK
+    draw at x,y0-28 text=format("%i",testerx/1000)
+    draw at x,y1+41 text=format("%i",testerx/1000)
+  enddo
+  testery=$LAY.bottom[head/2]-20000
+  testery=(testery/10000)*10000
+  for testery=testery,testery<$LAY.top[head/2]-1,testery=testery+10000 do
+    if testery<=$LAY.bottom[head/2]+1 continue
+    y=VIEWY/2-(testery-$LAY.yoffset[head/2])/CORDY*step
+    draw color=LIGHTGRAY at x0-32,y to x1+33,y
+    draw color=BLACK
+    draw mode=M_RIGHT at x0-38,y+7 text=format("%i",testery/1000)
+    draw mode=M_LEFT at x1+38,y+7 text=format("%i",testery/1000)
+  enddo
+  draw color=LIGHTRED
+  draw at 0,VIEWY/2 to VIEWX,VIEWY/2
+  draw at VIEWX/2,0 to VIEWX/2,VIEWY
+  draw color=BLACK bkcolor=DARKGRAY mode=M_CENTERED
+  for j=0,j<FINEY,j++ do
+    fi=(CORDY/2+(j-FINEY/2)*CORDY)/radius
+    if Abs(fi)>3.1415926/2.0 continue
+    testery=$LAY.yoffset[head/2]+Sin(fi)*radius
+    if testery<$LAY.bottom[head/2]-5000 || testery>$LAY.top[head/2]+5000 continue
+    for i=0,i<FINEX,i++ do
+      testerx=$LAY.xoffset+CORDX/2+(i-FINEX/2)*CORDX
+      if (head & 1)==0 then
+        testerx=testerx-(1.0-Cos(fi))*radius
+      else
+        testerx=testerx+(1.0-Cos(fi))*radius
+      endif
+      if testerx<$LAY.leftlimit-5000 || testerx>$LAY.rightlimit+5000 continue
+      x=(testerx-$LAY.xoffset)/CORDX*step+VIEWX/2
+      y=VIEWY/2-(testery-$LAY.yoffset[head/2])/CORDY*step
+      draw color=BLACK
+      draw at x,y fillellipse 7,7
+      if zmap[j,i]==0.0 continue
+      draw at x,y-2 text=format("%.0f",zmap[j,i])
+      if zmax[j,i]==0.0 continue
+      if zmax[j,i]>zmap[j,i]+500 then
+        draw color=LIGHTRED
+      endif
+      draw at x,y+16 text=format("%.0f",zmax[j,i])
+    enddo
+  enddo
+  draw show
+end
+
+function int Selecthead(int head)
+  int i
+  Readzmap(head)
+  Drawzmap(head)
+  for i=0,i<$LAY.nfing*2,i++ do
+    if i==head then
+      change hhead[i] color=LIGHTRED
+      change hhead[i] bkcolor=YELLOW
+    else
+      change hhead[i] color=BLACK
+      change hhead[i] bkcolor=GRAY
+    endif
+  enddo
+end
+
+function int main()
+  int i,j,head,x,y,dx,dy,yside
+  // Get head radius.
+  if $EXTLAY.radius!=0 then
+    radius=$EXTLAY.radius
+  else if $LAY.software==0xB7 then
+    radius=180000.0
+  else if $LAY.software==0x8C || $LAY.software==0xA5 then
+    radius=155000.0
+  else
+    radius=115000.0
+  endif
+  // Create main controls.
+  hmain=control WINDOW
+    window=NULL
+    position=10,10,GRAPHX+RIGHTX+3*DELTA,GRAPHY+INFOY+3*DELTA
+    name=format("%s v%s",DESCRIPTION,VERSION)
+    help=" "
+    bkcolor=LIGHTGRAY
+    size=256
+  endc
+  hview=control CHILD
+    window=hmain
+    position=DELTA+1,DELTA+1,GRAPHX-2,GRAPHY-2
+    help="移动光标查看值"
+    color=BLACK
+    bkcolor=WHITE
+    size=2097152                       // Oh, yes!..
+    limits=VIEWX,VIEWY
+    offset=(VIEWX-GRAPHX)/2,(VIEWY-GRAPHY)/2
+    mode=M_HSCROLL|M_VSCROLL
+  endc
+  hinfo=control TEXT
+    window=hmain
+    position=DELTA,2*DELTA+GRAPHY,GRAPHX,INFOY
+    text=format("%s v%s",DESCRIPTION,VERSION)
+    help="信息"
+    font=MEDIUMFONT
+  endc
+  // Create head selection buttons.
+  dx=(RIGHTX+DELTA)/2-DELTA; dy=24
+  y=DELTA; yside=0
+  for j=0,j<$LAY.nfing,j++ do
+    if $LAY.side[j]!=0 yside=8
+    for i=0,i<2,i++ do
+      x=GRAPHX+2*DELTA
+      if i==1 x=x+(RIGHTX+DELTA)/2
+      head=j*2+i
+      hhead[head]=control BUTTON
+        window=hmain
+        position=x,y+yside,dx,dy
+        name=format("%i%c",j,(i==0?'L':'R'))
+        help=format("按下查看测试头 %i%c的Z示意图",j,(i==0?'L':'R'))
+        color=BLACK
+        bkcolor=GRAY
+      endc
+    enddo
+    y=y+dy+DELTA
+  enddo
+  // Close button.
+  hexit=control BUTTON
+    window=hmain
+    position=GRAPHX+2*DELTA,GRAPHY+INFOY+2*DELTA-24,RIGHTX,24
+    name="关闭"
+    help="按下以关闭此脚本"
+  endc
+  Selecthead(0)
+  // Main loop.
+  while 1 do
+    // Check controls.
+    if Pressed(hexit) then
+      break
+    endif
+    for i=0,i<$LAY.nfing*2,i++ do
+      if Pressed(hhead[i]) then
+        Selecthead(i)
+        break
+      endif
+    enddo
+    wait
+  enddo
+end
+

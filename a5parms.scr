@@ -1,0 +1,574 @@
+#include "ls.icl"                  // Standard functions
+#include "or.icl"                // A2 command names
+#cmdbuff 2
+#multinst
+
+#define VERSION        "1.07"
+#define DESCRIPTION    "Individual parameters of A5/A6 controllers"
+
+// 1.01: Option to save all parameters to file.
+// 1.02: Version information.
+// 1.03: Version in log, support of new flash loader.
+// 1.04: Option to copy parameters to all heads or video cameras.
+// 1.05: Unused bits in GAL version masked.
+// 1.06: Indicates presence of head camera.
+// 1.07: Recognizes incomplete set of dedicated cameras.
+
+#define WIDTH          493             // Full width of client area
+#define NPARM          16              // Maximal number of parameters
+#define DY             24              // Height of single string
+#define X0             205             // Alignment of explanations
+
+handle           hmain                 // Main window
+handle           hhead                 // Selected head
+handle           hhscr                 // Head scroll
+handle           hall                  // Modify all simultaneously
+handle           hheadcam              // Indicates headcam availability
+handle           hvgal                 // Version of GAL
+handle           hvlink                // Version of link layer
+handle           hvphys                // Version of physical layer
+handle           hvflash               // Version of flash loader
+handle           hvsoft                // Version of embedded software
+handle           horig[NPARM]          // Display original parameters
+handle           hact[NPARM]           // Display actual parameters
+handle           hplus[NPARM]          // Add 5% and send
+handle           hminus[NPARM]         // Subtract 5% and send
+handle           hrestore[NPARM]       // Restore original and send
+handle           hcreatelog            // Save parameters of all heads to file
+handle           hdefaults             // Set all to 1 and send
+handle           hrestoreall           // Restore all originals and send
+handle           hflash                // Flash parameters
+handle           hquit                 // Basta!
+
+int              nparm                 // Actual number of parameters
+int              index[NPARM]          // Actual indices of parameters
+int              ybase[NPARM]          // Base Y coordinates of parameters
+int              nhead                 // Number of movement controllers
+
+float            orig[32][NPARM]       // Original parameters
+float            act[NPARM]            // Actual parameters
+int              actvalid[NPARM]       // Whether corresponding act valid
+char             vgal[256]             // Version of GAL
+char             vlink[256]            // Version of link layer
+char             vphys[256]            // Version of physical layer
+char             vflash[256]           // Version of flash loader
+char             vsoft[256]            // Version of embedded software
+
+// Symbol '+' on the third place means zero-based linear parameter.
+char             title[NPARM][64] = { \
+  "00 X proportional feedback",       \
+  "01 X integral feedback",           \
+  "02 X velocity feedback",           \
+  "08.Y proportional feedback",       \
+  "09 Y integral feedback",           \
+  "10 Y velocity feedback",           \
+  "16.Z proportional feedback",       \
+  "17 Z integral feedback",           \
+  "18 Z velocity feedback" }
+
+// Display modal "dialog box" with error message.
+function int Error(char *s1,char *s2)
+  handle herr,hdummy,hok
+  herr=control WINDOW
+    window=hmain
+    position=0,0,350,135
+    name="错误"
+    mode=M_MODAL
+    bkcolor=YELLOW
+  endc
+  hok=control BUTTON
+    window=herr
+    position=135,100,80,24
+    name="确定"
+    help="按下可以确认错误消息"
+  endc
+  hdummy=control ICON
+    window=herr
+    position=5,30,36,36
+    name="EXCLAM"
+    bkcolor=YELLOW
+  endc
+  hdummy=control TEXT
+    window=herr
+    position=41,20,300,24
+    name=s1
+    bkcolor=YELLOW
+    font=TIMESFONT
+    mode=M_CENTERED
+  endc
+  hdummy=control TEXT
+    window=herr
+    position=41,45,300,54
+    name=s2
+    bkcolor=YELLOW
+    font=TIMESFONT
+    mode=M_CENTERED
+  endc
+  while Pressed(hok)==0 do
+    wait
+  enddo
+  destroy herr
+end
+
+// Service function, redraws original and actual parameters.
+function int Redraw(int head)
+  int i,enableflash
+  if head>=$LAY.nfing*2 then
+    change hhead text=format(" %i (%s)",head,head & 1?"VBot":"VTop")
+  else
+    change hhead text=format(" %i (%i%c)",head,head/2,head & 1?'R':'L')
+  endif
+  if hheadcam!=NULL then
+    if $LAY.cameras!=0 || ($LAY.headcameras & (1<<head))==0 then
+      change hheadcam text=""
+    else
+      change hheadcam text="This head is equipped with head camera"
+    endif
+  endif
+  enableflash=0
+  for i=0,i<nparm,i++ do
+    if actvalid[i]==0 then
+      change horig[i] text=""
+      change hact[i] color=LIGHTRED
+      change hact[i] text=""
+      disable hplus[i]
+      disable hminus[i]
+      disable hrestore[i]
+    else
+      change horig[i] text=format(" %.3f",orig[head][i])
+      if Abs(act[i]-orig[head][i])<=(Abs(orig[head][i])+0.001)*0.001 then
+        act[i]=orig[head][i]             // Kinda autorestoring
+        change hact[i] color=BLACK
+        change hact[i] text=format(" %.3f",act[i])
+      else
+        change hact[i] color=LIGHTRED
+        change hact[i] text=format(" %.3f",act[i])
+      endif
+      enable hplus[i]
+      enable hminus[i]
+      enable hrestore[i]
+      enableflash=1
+    endif
+  enddo
+  if enableflash then
+    enable hall
+    enable hdefaults
+    enable hrestoreall
+    enable hflash
+  else
+    disable hall
+    disable hdefaults
+    disable hrestoreall
+    disable hflash
+  endif
+end
+
+// Service function, requests actual version information and parameters from
+// head.
+function int Getactual(int head)
+  int i,n,t
+  char buf[128]
+  $A[0].length=0
+  buf[0]=S_DEBUG
+  buf[1]=0x2E                          // Get version information
+  buf[2]=head
+  SYS.Sendimm(0,3,buf)
+  t=Time()+3000
+  while t>Time() do
+    if $A[0].length!=0 break
+  enddo
+  if $A[0].command==S_DEBUG then
+    if ($uint2($A[0]+5) & 0xF800)==0x3800 then
+      sprintf(vgal,"A7 vers. %i",($uint2($A[0]+5) & 0x07F0)>>4)
+    else if $uint2($A[0]+5)>0x50 then
+      sprintf(vgal,"%i",($uint2($A[0]+5) & 0x07F8)>>3)
+    else                               // Older GAL, without encoder error bits
+      sprintf(vgal,"%i",($uint2($A[0]+5) & 0x07FE)>>1)
+    endif
+    n=sprintf(vlink,"%02X-%02X-%02X-%02X",                                     \
+      $uint1($A[0]+12),$uint1($A[0]+11),$uint1($A[0]+10),$uint1($A[0]+9))
+    if $uint4($A[0]+9)==0x30313042 then
+      sprintf(vlink+n," (TSB12LV01A)")
+    else if $uint4($A[0]+9)==0x30313043 then
+      sprintf(vlink+n," (TSB12LV01B)")
+    endif
+    if ($uint3($A[0]+13) & 0x00FFFFFF)==0x00080028 then
+      n=sprintf(vphys,"TI")            // Texas Instruments
+    else
+      n=sprintf(vphys,"Vendor %02X-%02X-%02X",                                 \
+      $uint1($A[0]+15),$uint1($A[0]+14),$uint1($A[0]+13))
+    endif
+    n=n+sprintf(vphys+n,", product %02X-%02X-%02X",                            \
+      $uint1($A[0]+19),$uint1($A[0]+18),$uint1($A[0]+17))
+    if ($uint3($A[0]+13) & 0x00FFFFFF)==0x00080028 then
+      if ($uint3($A[0]+17) & 0x00FFFFFF)==0x0046318A then
+        sprintf(vphys+n," (TSB41LV03A)")
+      else if ($uint3($A[0]+17) & 0x00FFFFFF)==0x00434195 then
+        sprintf(vphys+n," (TSB41AB3)")
+      endif
+    endif
+    sprintf(vflash,"%i.%02i",$uint1($A[0]+26),$uint1($A[0]+25))
+    if $uint3($A[0]+29)==0 then
+      sprintf(vsoft,"Not loaded")
+    else
+      sprintf(vsoft,"%i.%02X.%02X",                                            \
+      $uint1($A[0]+31),$uint1($A[0]+30),$uint1($A[0]+29))
+    endif
+  else                                 // Error or command not supported
+    Strcpy(vgal,"(No version data support from crate or head)")
+    vlink[0]='\0'
+    vphys[0]='\0'
+    vflash[0]='\0'
+    vsoft[0]='\0'
+  endif
+  change hvgal text=vgal
+  change hvlink text=vlink
+  change hvphys text=vphys
+  change hvflash text=vflash
+  change hvsoft text=vsoft
+  for i=0,i<nparm,i++ do
+    $A[0].length=0
+    buf[0]=S_DEBUG
+    buf[1]=0x25                        // Get individual movement parameter
+    buf[2]=head
+    $uint2(buf+3)=index[i]
+    SYS.Sendimm(0,5,buf)
+    t=Time()+3000
+    while t>Time() do
+      if $A[0].length==0 continue
+      if $A[0].command==S_DEBUG then
+        act[i]=$float4($A[0]+5)
+        actvalid[i]=1
+      else
+        act[i]=0.0
+        actvalid[i]=0
+      endif
+      break
+    enddo
+  enddo
+end
+
+function int Sendparm(int head,int p,float data)
+  char buf[128]
+  buf[0]=S_DEBUG
+  buf[1]=0x26                          // Set individual movement parameter
+  buf[2]=head
+  $uint2(buf+3)=p
+  $float4(buf+5)=data
+  SYS.Sendimm(1,9,buf)
+end
+
+// Requests head to write parameters to flash.
+function int Flash(int head)
+  char buf[128]
+  buf[0]=S_DEBUG
+  buf[1]=0x27                          // Write parameters to flash
+  buf[2]=head
+  SYS.Sendimm(1,3,buf)
+end
+
+function int Sendall(int head)
+  int i
+  for i=0,i<nparm,i++ do
+    Sendparm(head,index[i],act[i])
+  enddo
+end
+
+function int main()
+  int i,j,yinfo,y,h,head,islin,update
+  char s[256]
+  float r
+  handle f
+  // Get number of controllers.
+  nhead=$LAY.nfing*2
+  if $LAY.cameras==0x01 then
+    nhead=nhead+1
+  else if ($LAY.cameras & 0x02)!=0 then
+    nhead=nhead+2
+  endif
+  // Calculate actual number and Y positions of parameters.
+  y=167
+  for nparm=0,nparm<NPARM,nparm++ do
+    if title[nparm][0]=='\0' break
+    index[nparm]=(title[nparm][0]-'0')*10+(title[nparm][1]-'0')
+    if title[nparm][2]=='.' y=y+7
+    ybase[nparm]=y
+    y=y+DY
+  enddo
+  hmain=control WINDOW
+    window=NULL
+    position=10,10,WIDTH,y+43
+    name=format("A5 特殊移动参数 v%s",VERSION)
+    help=" "
+    bkcolor=LIGHTYELLOW
+    size=1024
+  endc
+  draw window=hmain mode=M_RIGHT font=INFOFONT
+  draw at X0,28 text="Head"
+  hhead=control TEXT
+    window=hmain
+    position=X0+10,10,80,DY-4
+    help="选择测试头"
+    font=MEDIUMFONT
+    mode=M_BORDER
+  endc
+  hhscr=control VSCROLL
+    window=hmain
+    position=X0+90,10,20,DY-4
+    help="按下更换测试头"
+    limits=1,-1
+    mode=M_NOTAB
+  endc
+  hall=control BUTTON
+    window=hmain
+    position=X0+125,10,90,DY-4
+    name="复制到所有"
+    help="将参数从此复制到所有测试头或摄像头"
+  endc
+  if $LAY.cameras!=0 || $LAY.headcameras==0 then
+    yinfo=50
+  else
+    yinfo=58
+    hheadcam=control TEXT
+      window=hmain
+      position=X0+15,yinfo-20,260,18
+      help=" "
+      font=INFOFONT
+      color=LIGHTRED
+    endc
+  endif
+  draw at X0,yinfo+16 text="GAL version"
+  hvgal=control TEXT
+    window=hmain
+    position=X0+15,yinfo,260,18
+    help="GAL软件版本"
+    font=INFOFONT
+  endc
+  draw at X0,yinfo+36 text="Link layer"
+  hvlink=control TEXT
+    window=hmain
+    position=X0+15,yinfo+20,260,18
+    help="1394链路层芯片"
+    font=INFOFONT
+  endc
+  draw at X0,yinfo+56 text="Physical layer"
+  hvphys=control TEXT
+    window=hmain
+    position=X0+15,yinfo+40,260,18
+    help="1394物理层芯片"
+    font=INFOFONT
+  endc
+  draw at X0,yinfo+76 text="Flash loader"
+  hvflash=control TEXT
+    window=hmain
+    position=X0+15,yinfo+60,260,18
+    help="Flash loader的版本"
+    font=INFOFONT
+  endc
+  draw at X0,yinfo+96 text="Embedded software"
+  hvsoft=control TEXT
+    window=hmain
+    position=X0+15,yinfo+80,260,18
+    help="加载的嵌入式软件的版本"
+    font=INFOFONT
+  endc
+  for i=0,i<nparm,i++ do
+    islin=(title[i][2]=='+')
+    draw at X0,ybase[i]+18 text=title[i]+3
+    horig[i]=control TEXT
+      window=hmain
+      position=X0+15,ybase[i],80,DY-4
+      help=format("'%s'的旧值",title[i]+3)
+      color=DARKGRAY
+      bkcolor=WHITE
+      mode=M_BORDER
+      font=MEDIUMFONT
+    endc
+    hact[i]=control EDIT
+      window=hmain
+      position=X0+110,ybase[i],80,DY-4
+      help=format("'%s'的实际值",title[i]+3)
+      color=BLACK
+      bkcolor=WHITE
+      font=MEDIUMFONT
+    endc
+    if islin then
+      sprintf(s,"Press to decrement '%s' by 0.001",title[i]+3)
+    else
+      sprintf(s,"Press to reduce '%s' by 5%%",title[i]+3)
+    endif
+    hminus[i]=control BUTTON
+      window=hmain
+      position=X0+200,ybase[i],20,DY-4
+      name="C"
+      help=s
+      font=MEDIUMFONT
+      bkcolor=LIGHTGRAY
+    endc
+    if islin then
+      sprintf(s,"Press to increment '%s' by 0.001",title[i]+3)
+    else
+      sprintf(s,"Press to increase '%s' by 5%%",title[i]+3)
+    endif
+    hplus[i]=control BUTTON
+      window=hmain
+      position=X0+225,ybase[i],20,DY-4
+      name="+"
+      help=s
+      font=MEDIUMFONT
+      bkcolor=LIGHTGRAY
+    endc
+    hrestore[i]=control BUTTON
+      window=hmain
+      position=X0+253,ybase[i],20,DY-4
+      name="R"
+      help=format("按恢复旧的'%s'",title[i]+3)
+      font=MEDIUMFONT
+      bkcolor=LIGHTGRAY
+    endc
+  enddo
+  draw show
+  hcreatelog=control BUTTON
+    window=hmain
+    position=8,y+13,90,22
+    name="建立日志"
+    help="读取所有测试头的参数并将其保存到文件中"
+  endc
+  hdefaults=control BUTTON
+    window=hmain
+    position=WIDTH-364,y+13,81,22
+    name="默认值"
+    help="将所有参数设置为默认值"
+  endc
+  hrestoreall=control BUTTON
+    window=hmain
+    position=WIDTH-273,y+13,81,22
+    name="恢复"
+    help="将所有参数恢复为旧的值"
+  endc
+  hflash=control BUTTON
+    window=hmain
+    position=WIDTH-182,y+13,81,22
+    name="保存"
+    help="将所有参数写入闪存EEPROM"
+  endc
+  hquit=control BUTTON
+    window=hmain
+    position=WIDTH-91,y+13,81,22
+    name="退出"
+    help="按下可以关闭此窗口"
+  endc
+  for head=nhead-1,head>=0,head-- do
+    if head>=$LAY.nfing*2 && ($LAY.cameras & 1<<(head-$LAY.nfing*2))==0        \
+      continue                         // Missing head camera
+    Getactual(head)
+    for i=0,i<nparm,i++ do
+      orig[head][i]=act[i]
+    enddo
+  enddo
+  head=0
+  Redraw(head)
+  update=0
+  while 1 do
+    for i=0,i<nparm,i++ do
+      islin=(title[i][2]=='+')
+      Text(hact[i],s); r=orig[head][i]; sscanf(s,"%f",&r);
+      if Pressed(hact[i]) then
+        act[i]=r
+        Sendparm(head,index[i],act[i])
+        update=1
+      else if Pressed(hminus[i]) then
+        if islin then
+          act[i]=r-0.001
+        else
+          act[i]=r*0.95
+        endif
+        Sendparm(head,index[i],act[i])
+        update=1
+      else if Pressed(hplus[i]) then
+        if islin then
+          act[i]=r+0.001
+        else
+          act[i]=r/0.95                // OK, a bit more than 5% but reversible
+        endif
+        Sendparm(head,index[i],act[i])
+        update=1
+      else if Pressed(hrestore[i]) then
+        act[i]=orig[head][i]
+        Sendparm(head,index[i],act[i])
+        update=1
+      endif
+    enddo
+    if Pressed(hhscr) then
+      head=Max(0,Min(nhead-1,head+Status(hhscr)))
+      change hhscr select=0
+      update=1
+    else if Pressed(hcreatelog) then
+      Strcpy(s,"a5parms.txt")
+      if SYS.Browse(hmain,s,"Specify name of log file",0)==0 continue
+      f=Fopen(s,"wt")
+      if f==NULL then
+        Error("Unable to create file",s)
+        continue
+      endif
+      for i=0,i<32,i++ do
+        s[i]=$LAY.serialid[i]
+      enddo
+      s[32]='\0'
+      fprintf(f,"Layout: '%s'\n",s)
+      for h=0,h<($LAY.nfing+1)*2,h++ do
+        if h==$LAY.nfing*2 && ($LAY.cameras & 1)==0 continue
+        if h==$LAY.nfing*2+1 && ($LAY.cameras & 2)==0 continue
+        Getactual(h)
+        fprintf(f,"-------------------------------------\n")
+        fprintf(f,"Parameters of %s %i%c:\n",                                  \
+          h<$LAY.nfing*2?"HEAD":"CAMERA",h/2,(h & 1)==0?'L':'R')
+        fprintf(f,"  GAL version                  %s\n",vgal)
+        fprintf(f,"  Link layer                   %s\n",vlink)
+        fprintf(f,"  Physical layer               %s\n",vphys)
+        fprintf(f,"  Flash loader                 %s\n",vflash)
+        fprintf(f,"  Embedded software            %s\n",vsoft)
+        for i=0,i<nparm,i++ do
+          if actvalid[i]==0 continue
+          fprintf(f,"  %-28s %.3f\n",title[i]+3,act[i])
+        enddo
+      enddo
+      Fclose(f)
+      update=1
+    else if Pressed(hall) then
+      if head<$LAY.nfing*2 then        // Heads
+        for j=0,j<$LAY.nfing*2,j++ do
+          Sendall(j)
+        enddo
+      else
+        for j=0,j<2,j++ do             // Video cameras
+          if j==0 && ($LAY.cameras & 1)==0 continue
+          if j==1 && ($LAY.cameras & 2)==0 continue
+          Sendall($LAY.nfing*2+j)
+        enddo
+      endif
+      update=1
+    else if Pressed(hdefaults) then
+      for i=0,i<nparm,i++ do
+        Sendparm(head,index[i],1.0)
+      enddo
+      update=1
+    else if Pressed(hrestoreall) then
+      for i=0,i<nparm,i++ do
+        Sendparm(head,index[i],orig[head][i])
+      enddo
+      update=1
+    else if Pressed(hflash) then
+      Flash(head)
+    else if Pressed(hquit) then
+      break
+    endif
+    if update then
+      Getactual(head)
+      Redraw(head)
+      update=0
+    endif
+    wait
+  enddo
+end
+

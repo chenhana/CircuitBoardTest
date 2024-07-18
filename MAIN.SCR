@@ -1,0 +1,740 @@
+#include "ls.icl"
+#include "or.icl"
+#stack 32768                           // SERV.Decodeerror() requires memory!
+
+#define VERSION        "0.91"
+#define DESCRIPTION    "OllyTest v0.91"
+#define NBUTTON        10
+
+
+////////////////////////////////////////////////////////////////////////////////
+// List of broadcast messages:
+// CHG LAY     - Structure $LAY is changed, update display
+
+external int SERV.Decodeanswer(char *answer,char *text,char *extra,int mask)
+external int SERV.Decodecommand(char *command,char *s,int mask)
+external int SERV.Decodespsinfo(int code,char *s)
+external int SERV.Decodespserror(int code,char *s)
+
+handle btn[NBUTTON]
+handle hmain                           // Main system window
+handle syslist                         // Main system list
+handle htst,hclr                       // Timestamp and Clear buttons
+handle listtitle                       // Window with the list name
+handle hinfo,hitext,hiok,hicancel      // SPS information window
+handle herror,hetext,heok,hecancel     // SPS error window
+char btname[NBUTTON,24] = {                                                    \
+  "演示","诊断","校验","相机","运行",                                       \
+  "编码测试","设置","数据","信息","退出" }
+char bthelp[NBUTTON,24] = {                                                    \
+  "演示","诊断","校验","相机","运行",                                       \
+  "按下以进行编码测试","设置","数据","信息","退出" }
+int checkifloaded                      // 1: check if tester is still loaded
+int timestamping
+int hscroll
+int debugmode                          // 1: debugging features enabled
+
+// Function Answerproc() in the main thread is called each time any answer from
+// crate controller comes. This allows, for example, to display answers and to
+// monitor asyncronous errors (i.e these with identifier 0). However, info is
+// always 0 in this case.
+function int Answerproc(char *answer,int info)
+  char s[1024],extra[4096]
+  int len                              // Length of the answer
+  int cmd,subcmd                       // Code/subcode of the answer
+  int color                            // Color of the info string
+  int i,j,ne,rail,head
+  len=$uint2(answer)
+  // Analyze answer and extract information vital for tester support. This
+  // information concerns mainly the statistics of different errors.
+  if (len>=5) then
+    cmd=answer[4]
+    if cmd==S_ERROR then               // S_ERROR
+      subcmd=answer[5]
+      if (answer[8] & 0x4C)!=0 then
+        head=2*rail+1
+      else
+        head=2*rail
+      endif
+      if subcmd==0x00 then             // Crate not loaded
+        $GLOBAL.crateloaded=(-1)
+        $GLOBAL.layloaded=(-1)
+        $GLOBAL.headloaded=(-1)
+        $GLOBAL.corrloaded=(-1)
+      else if subcmd==0x01 then        // Head controllers not loaded
+        $GLOBAL.headloaded=(-1)
+        $GLOBAL.corrloaded=(-1)
+      else if subcmd==0x08 then        // Phase lost
+        sprintf(s,"Lost phases[%i]",head)
+        i=0; j=0;
+        getini("Statistics",s,"%i,%i",&i,&j)
+        if (answer[8] & 0x05)!=0 i++
+        if (answer[8] & 0x0A)!=0 j++
+        setini("Statistics",s,"%i,%i",i,j)
+      else
+        $GLOBAL.dumpfollows=1          // Dump may follow
+      endif
+    else if cmd==S_LAYOUT then         // S_LAYOUT
+      $GLOBAL.crateloaded=1
+      $GLOBAL.layloaded=1
+      $GLOBAL.headloaded=1
+    else if cmd==S_STROKES then        // S_STROKES
+      if len==14 && answer[5]<16 then
+        rail=answer[5]                 // Accumulate strokes for each head
+        sprintf(s,"Strokes[%i]",rail*2)
+        i=0; getini("Statistics",s,"%i",&i)
+        i=i+$long(answer+6)
+        setini("Statistics",s,"%i",i)
+        sprintf(s,"Strokes[%i]",rail*2+1)
+        i=0; getini("Statistics",s,"%i",&i)
+        i=i+$long(answer+10)
+        setini("Statistics",s,"%i",i)
+      endif
+    else if cmd==S_MESSAGE then        // S_MESSAGE
+      if len==13 || len==21 then
+        switch answer[5]
+        case 1:                        // Show info message
+          if hinfo!=NULL destroy hinfo
+          hinfo=control WINDOW
+            window=NULL
+            position=10,10,300,200
+            text="SPS info"
+            help=" "
+            bkcolor=WHITEGREEN
+            mode=M_NOOWNER
+          endc
+          SERV.Decodespsinfo($uint2(answer+6),s)
+          hitext=control TEXT
+            window=hinfo
+            position=5,5,290,165
+            text=s
+            help="SPS 信息"
+            mode=M_BORDER
+          endc
+          //DISPLAY TEXT!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+          hiok=NULL; hicancel=NULL
+          if answer[8]==1 then
+            hicancel=control BUTTON
+              window=hinfo
+              position=110,175,80,20
+              text="Cancel"
+              help="取消"
+            endc
+          else if answer[8]==2 then
+            hiok=control BUTTON
+              window=hinfo
+              position=110,175,80,20
+              text="确定"
+              help="确定"
+            endc
+          else if answer[8]==3 then
+            hicancel=control BUTTON
+              window=hinfo
+              position=65,175,80,20
+              text="Cancel"
+              help="取消"
+            endc
+            hiok=control BUTTON
+              window=hinfo
+              position=155,175,80,20
+              text="确定"
+              help="确定"
+            endc
+          endif
+        case 2:                        // Show error message
+          if herror!=NULL destroy herror
+          herror=control WINDOW
+            window=NULL
+            position=10,10,300,200
+            text="SPS info"
+            help=" "
+            bkcolor=PINK
+            mode=M_NOOWNER
+          endc
+          SERV.Decodespserror($uint2(answer+6),s)
+          hetext=control TEXT
+            window=herror
+            position=5,5,290,165
+            text=s
+            help="SPS 信息"
+            mode=M_BORDER
+          endc
+          //DISPLAY TEXT!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+          heok=NULL; hecancel=NULL
+          if answer[8]==1 then
+            hecancel=control BUTTON
+              window=herror
+              position=110,175,80,20
+              text="Cancel"
+              help="取消"
+            endc
+          else if answer[8]==2 then
+            heok=control BUTTON
+              window=herror
+              position=110,175,80,20
+              text="确定"
+              help="确定"
+            endc
+          else if answer[8]==3 then
+            hecancel=control BUTTON
+              window=herror
+              position=65,175,80,20
+              text="Cancel"
+              help="取消"
+            endc
+            heok=control BUTTON
+              window=herror
+              position=155,175,80,20
+              text="确定"
+              help="确定"
+            endc
+          endif
+        case 3:                        // Remove info message
+          if hinfo!=NULL then
+            destroy hinfo; hinfo=NULL
+          endif
+        case 4:                        // Remove error message
+          if herror!=NULL then
+            destroy herror; herror=NULL
+          endif
+        endsw
+      endif
+    else if cmd==0xF0 then             // Message, not an answer
+      if Memicmp(answer+5,"LOG?",4)==0 then
+        Text(syslist,s);
+        if s[0]==0 then return 0;
+        else return 1;
+        endif
+      else if Memicmp(answer+5,"LOG ",4)==0 then
+        change syslist name=answer+9
+        Text(syslist,s);
+        if s[0]==0 then
+          change listtitle text="  System messages"
+          return 0
+        else
+          change listtitle text=format("  System messages -- %s",s)
+          return 1
+        endif
+      endif
+    else if cmd==0xFE then             // Incomplete answer discarded
+      checkifloaded=1                  // Probably tester is switched off
+    endif
+  endif
+  if $short(answer)<5 then             // Wrong answer came
+    checkifloaded=1                    // Probably tester is switched off
+  endif
+  if $short(answer)==0 return          // Do not display on/off noise
+  color=SERV.Decodeanswer(answer,s,extra,$GLOBAL.displaymode)
+  if cmd!=0x10 $GLOBAL.dumpfollows=0
+  if color!=(-1) then                  // Display decoded answer in mainlist
+    if (answer[2]==0 && answer[4]==0xF0) then
+      lprintf(color,"  -    %s",s)
+    else if (answer[3]==0) then
+      lprintf(color,"%3i    %s",answer[2],s)
+    else if (answer[3]==255) then
+      lprintf(color,"%3i +  %s",answer[2],s)
+    else
+      lprintf(color,"%3i %2i %s",answer[2],answer[3],s)
+    endif
+    ne=0
+    while extra[ne]!='\0' do
+      i=0
+      if extra[ne]=='+' then
+        color=RED; ne++
+      else if extra[ne]=='-' then
+        color=DARKGRAY; ne++
+      else
+        color=BLACK
+      endif
+      while extra[ne]!='\n' && extra[ne]!='\0' do
+        s[i]=extra[ne];
+        ne++; if i<255 i++;
+      enddo
+      s[i]='\0'
+      if extra[ne]=='\n' ne++
+      lprintf(color,"  : %s",s)
+    enddo
+  endif
+end
+
+// Displays simple modal window which reports the current version of the OT.
+function int Info()
+  handle win,bmp,txt,exi
+  int hi,lo,os
+  SYS.Version(&hi,&lo,&os)
+  win=control WINDOW
+    window=NULL
+    name="关于"
+    mode=M_MODAL
+    position=170,140,300,160
+    bkcolor=YELLOW
+  endc
+  bmp=control ICON
+    name="MAINICON"
+    window=win
+    position=20,35,36,36
+  endc
+  txt=control TEXT
+    window=win
+    color=BLACK
+    font=INFOFONT
+    bkcolor=YELLOW
+    position=70,20,220,110
+    text="调试软件版本V19.02"//format("OLLYTEST v %i.%i\n",hi,lo)
+  endc
+  //add txt text="诊断软件"
+  add txt text="\n"
+  add txt text="Copyright 2017-2019 HENGCE Ce co,.Ltd\n"
+  //add txt text="Written by Oleh Yuschuk"
+  exi=control WINBUTTON
+    window=win
+    position=115,130,70,26
+    text="确定"
+    help="按下继续"
+  endc
+  while Pressed(exi)==0 do
+    wait
+  enddo
+  destroy win
+end
+
+// Informs about resident modules and active tasks.
+function int Sysdata()
+  int i,j,k,t,size,inst,type,tupd
+  int active,prio,runtime,cputime,update,sel
+  char s[128],name[64]
+  handle win,mod,ins,run,dbm,kil,exi,txt
+  win=control WINDOW
+    window=NULL
+    position=170,140,425,305
+    name="系统数据"
+    help=" "
+    mode=M_MODAL
+    bkcolor=YELLOW
+  endc
+  txt=control TEXT
+    window=win
+    position=5,3,330,15
+    name=" #  模块        字节 实例"
+    font=FIXEDFONT
+    bkcolor=YELLOW
+  endc
+  mod=control LISTBOX
+    window=win
+    position=5,20,330,130
+    help="常驻SCRIPT2模块列表(编译的源文件)"
+    font=FIXEDFONT
+    mode=M_VSCROLL
+  endc
+  txt=control TEXT
+    window=win
+    position=5,153,330,15
+    name=" #  实例   数 优先 运行时间 CPU时间"
+    font=FIXEDFONT
+    bkcolor=YELLOW
+  endc
+  ins=control LISTBOX
+    window=win
+    position=5,170,330,130
+    help="正在运行的程序列表(常驻模块的实例)"
+    font=FIXEDFONT
+    mode=M_VSCROLL
+  endc
+  run=control WINBUTTON
+    window=win
+    position=345,19,75,26
+    text="运行"
+    help="按下启动所选模块"
+  endc
+  dbm=control CUSTOMBOX
+    window=win
+    position=345,49,75,26
+    text="调试"
+    help="选中此项可在鼠标右键上显示调试信息"
+    mode=(debugmode==0?0:M_CHECKED)
+  endc
+  kil=control WINBUTTON
+    window=win
+    position=345,169,75,26
+    text="终止"
+    help="按下终止选定实例"
+  endc
+  exi=control WINBUTTON
+    window=win
+    position=345,275,75,26
+    text="确定"
+    help="按下关闭系统数据窗口"
+  endc
+  update=1
+  tupd=Time()
+  while 1 do
+    if Time()-tupd>=1000 update=1
+    if update then
+      sel=Status(mod)
+      change mod redraw=0
+      clear mod
+      for i=0,1,i=i+1
+        j=SYS.Moduledata(i,name,&size,&inst,&type)
+        if j==0 continue
+        if j<0 break
+        sprintf(s,"%2i  %-10s %7i  %2i",i,name,size,inst)
+        add mod text=s
+      enddo
+      change mod select=sel
+      change mod redraw=1
+      sel=Status(ins)
+      change ins redraw=0
+      clear ins
+      for i=0,1,i=i+1
+        j=SYS.Rundata(i,name,&active,&prio,&runtime,&cputime)
+        if j==0 continue
+        if j<0 break
+        k=sprintf(s,"%2i  %-10s %2i  %3i",i,name,active,prio)
+        t=runtime/1000
+        if t<3600 then
+          k=k+sprintf(s+k," %3im%2is",t/60,t%60)
+        else
+          t=t/60
+          k=k+sprintf(s+k," %3ih%2im",t/60,t%60)
+        endif
+        t=cputime/1000
+        if t<3600 then
+          k=k+sprintf(s+k," %3im%2is",t/60,t%60)
+        else
+          t=t/60
+          k=k+sprintf(s+k," %3ih%2im",t/60,t%60)
+        endif
+        add ins text=s
+      enddo
+      change ins select=sel
+      change ins redraw=1
+      update=0
+      tupd=Time()
+    endif
+    if Pressed(run) then
+      Text(mod,s)
+      i=-1
+      sscanf(s,"%i",&i)
+      j=SYS.Moduledata(i,name,&size,&inst,&type)
+      if j==1 then
+        SYS.Start(name,1,"")
+        update=1
+      endif
+    else if Pressed(dbm) then
+      debugmode=(Status(dbm)!=0)
+      SYS.Debugmode(debugmode,0,0,0)
+    else if Pressed(kil) then
+      Text(ins,s)
+      i=-1
+      sscanf(s,"%i",&i)
+      if i>0 then
+        i=SYS.Kill(i)
+        wait                           // Necessary to give system the
+        update=1                       // opportunity to kill before updating.
+      endif
+    else if Pressed(exi) then
+      break
+    endif
+    wait
+  enddo
+  destroy win
+end
+
+// Special whim of one unnamed customer.
+function int Updatetonghsingfile()
+  int i,n,answer,index
+  char path[260],buf[260],thfile[260],ifile[300],testerid[80]
+  char s[260],date[32],time[64]
+  handle kernel32,ft,fi
+  // Get handle of kernel32.dll, contains GetPrivateProfileString().
+  kernel32=LoadDLL("kernel32.dll")
+  if kernel32==NULL return
+  // Locate fconfig.ini. I try first record from .ini, then the parent of the
+  // current location, then one of the standard directories.
+  for i=0,i<5,i++ do
+    if i==0 then
+      path[0]='\0'; getini("System","Fconfig","%s",path)
+      if path[0]=='\0' continue
+    else if i==1 then
+      Strcpy(path,"..\\fconfig.ini")
+    else if i==2 then
+      Strcpy(path,"c:\\Programs\\atg\\TestPlayer2\\fconfig.ini")
+    else if i==3 then
+      Strcpy(path,"c:\\Program Files\\atg\\TestPlayer2\\fconfig.ini")
+    else                               // Internal debugging purposes
+      Strcpy(path,"e:\\ewroot\\testpl\\bin\\fconfig.ini")
+    endif
+    // Key "Layout" is always present.
+    answer=CallDLL(kernel32,"GetPrivateProfileStringA",                        \
+      "Hardware","Layout","",buf,260,path)
+    if answer>0 break
+  enddo
+  if i>=5 goto finish                  // Fconfig.ini not found
+  // Check whether writing is requested.
+  CallDLL(kernel32,"GetPrivateProfileStringA",                                 \
+    "TongHsing","GenerateTongHsingTesterStatusFile","",buf,260,path)
+  if buf[0]!='1' goto finish
+  // Get name of protocol file.
+  thfile[0]='\0'
+  CallDLL(kernel32,"GetPrivateProfileStringA",                                 \
+    "TongHsing","TongHsingTesterStatusFileName","",thfile,260,path)
+  if thfile[0]=='\0' goto finish
+  // Get tester ID.
+  testerid[0]='\0'
+  CallDLL(kernel32,"GetPrivateProfileStringA",                                 \
+    "General","TesterId","",testerid,80,path)
+  // Get name of index file.
+  Strcpy(ifile,path)
+  n=Strlen(ifile)
+  while n>0 && ifile[n-1]!='\\' && ifile[n-1]!=':' do
+    n--
+  enddo
+  Strcpy(ifile+n,"TongHsingTesterStatusNextSerial_DoNotDeleteThisFile.txt")
+  // Prepare current date.
+  Strtime(date,"%m/%d/%Y",0,0)
+  Strtime(time,"%Y/%m/%d,%H:%M:%S",0,0)
+  // Open files. No guarantee that access is exclusive!
+  fi=Fopen(ifile,"r+t")
+  if fi==NULL goto finish
+  ft=Fopen(thfile,"a+t")
+  if ft==NULL goto finish
+  // Read and update index file.
+  fscanf(fi,"%s",s)
+  if Memcmp(s,date,10)!=0 then
+    index=1
+  else
+    sscanf(s+10,"%i",&index)
+    index++
+  endif
+  Fclose(fi)
+  fi=Fopen(ifile,"wt")
+  if fi==NULL goto finish
+  fprintf(fi,"%s %8i\n",date,index)
+  // Add record to protocol file.
+  fprintf(ft,"\n%s,%i,%s,M",testerid,index,time)
+  lprintf(BLACK,"TongHsing protocol file updated")
+finish:
+  if fi!=NULL Fclose(fi)
+  if ft!=NULL Fclose(ft)
+  UnloadDLL(kernel32)
+end
+
+function int main()
+	// 
+    handle f_log_main
+    f_log_main=Fopen("fpt_ca_log.log","wt")
+    if f_log_main!=NULL fprintf(f_log_main, "new fpt_ot file")
+
+
+
+  int i,j,deffont,ext[13]
+  char s[64]
+  hmain=SYS.Getmainwindow()
+  change hmain position=*,*,950,530//638,456
+  deffont=FIXEDFONT
+  getini("Startup","Main window","%i",&deffont)
+  syslist=SYS.Getsyslist();
+  change syslist mode=M_VSCROLL
+  change syslist font=deffont
+  change syslist help="系统信息"
+  change syslist position=5,179,525,273
+  change syslist menu="100清除|101时间标识|102横轴||"          \
+    "1小字体|2普通字体|3大字体"
+  htst=control BUTTON
+    window=NULL
+    position=5,160,80,20
+    name="时间"
+    help="点击以显示系统信息窗口的时间标记"
+    font=INFOFONT
+  endc
+  hclr=control BUTTON
+    window=NULL
+    position=85,160,80,20
+    name="清空列表"
+    help="点击以清空系统信息窗口"
+    font=INFOFONT
+  endc
+  listtitle=control TEXT
+    window=NULL
+    position=164,160,366,20
+    name="系统信息"
+    help="系统信息"
+    mode=M_LEFT|M_BORDER
+    font=INFOFONT
+    bkcolor=GRAY
+  endc
+  i=0
+  getini("Startup","Debug mode",&i)    // Restore initial debug mode
+  $GLOBAL.debugmode=i
+  i=0
+  getini("Startup","Video mode",&i)
+  $GLOBAL.videomode=i
+  i=0
+  getini("Startup","Disabled rails",&i)
+  $GLOBAL.disabledrails=i
+  i=0
+  getini("Startup","Disabled measurements",&i)
+  $uint4($GLOBAL+280)=i
+  i=0xFFFFFFFF
+  getini("Startup","Display mode",&i)
+  $GLOBAL.displaymode=i|1              // Enable error messages unconditionally
+  for i=0,i<8,i++
+    for j=0,j<11,j=j+1
+      ext[j]=0
+    enddo
+    ext[11]=-1                         // Default secondary channel is -1 (none)
+    sprintf(s,"EXTERN mode[%i]",i)
+    getini("Startup",s,"%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i",               \
+      ext+0,ext+1,ext+2,ext+3,ext+4,ext+5,                                     \
+      ext+6,ext+7,ext+8,ext+9,ext+10,ext+11,ext+12);
+    $GLOBAL.extmode[i]=ext[0];
+    $GLOBAL.extconverter[i]=ext[1];
+    $GLOBAL.extbaud[i]=ext[2];
+    $GLOBAL.extwait[i]=ext[3];
+    $GLOBAL.extecho[i]=ext[4];
+    $GLOBAL.extanswer[i]=ext[5];
+    $GLOBAL.extprompt[i]=ext[6];
+    $GLOBAL.exterr1[i]=ext[7];
+    $GLOBAL.exterr2[i]=ext[8];
+    $GLOBAL.exterr3[i]=ext[9];
+    $GLOBAL.extprimary[i]=ext[10];
+    $GLOBAL.extsecondary[i]=ext[11];
+    $uint1($GLOBAL+508+i)=ext[12];     // $GLOBAL.extopt
+  enddo
+  checkifloaded=1
+  $GLOBAL.defstroke=40                 // Set default stroke parameters
+  $GLOBAL.defpressure=30
+  $GLOBAL.defheight=5000
+  $GLOBAL.defaccuracy=250              // Set default accuracy
+  $GLOBAL.dumpfollows=0
+  do i=0,NBUTTON-1,1
+    btn[i]=control BUTTON
+      window=NULL
+      position=534,i*45+5,99,42
+      help=bthelp[i]
+      name=btname[i]
+      font=MEDIUMFONT
+    endc                                  
+  enddo
+  if $GLOBAL.a5!=0 lprintf(BLACK,"A5操作的模式选择")
+  SYS.Compile("serv.scr",1);
+  SYS.Compile("debug.scr",1);
+  SYS.Start("DEBUG",0,"");
+  // One of the customers requires that Ollytest writes a line to a special
+  // file each time it starts.
+  Updatetonghsingfile()
+  while 1 do
+    if Pressed(htst) then
+      timestamping=timestamping ^ M_TSTAMP
+      change syslist mode=timestamping|hscroll|M_VSCROLL
+      setfocus syslist
+    else if Pressed(hclr) then
+      clear syslist
+      add syslist text="清空列表"
+      setfocus syslist
+    else if Pressed(listtitle) then
+      setfocus syslist
+    else if Pressed(btn[0]) then
+      SYS.Compile("demo.scr",1);
+      SYS.Start("DEMO",0,"");
+    else if Pressed(btn[1]) then
+      SYS.Compile("debug.scr",1);
+      SYS.Start("DEBUG",0,"");
+    else if Pressed(btn[2]) then
+      SYS.Compile("calibr.scr",1);
+      SYS.Start("CALIBR",0,"");
+    else if Pressed(btn[3]) then
+      SYS.Compile("video.scr",1);
+      SYS.Start("VIDEO",0,"");
+    else if Pressed(btn[4]) then
+      SYS.Compile("runscr.scr",1);
+      SYS.Start("RUNSCR",0,"");
+    else if Pressed(btn[5]) then
+      SYS.Compile("encmeas.scr",1);
+      SYS.Start("ENCMEAS",0,"");
+    else if Pressed(btn[6]) then
+      SYS.Compile("setup.scr",1);
+      SYS.Start("SETUP",0,"");
+    else if Pressed(btn[7]) then
+      Sysdata();
+    else if Pressed(btn[8]) then
+      Info();
+    else if Pressed(btn[9]) then
+      break;
+    else if Pressed(hiok) then
+      s[0]=S_MESSAGE
+      s[1]=1                           // Close info message
+      s[2]=2
+      $int4(s+3)=0
+      SYS.Send(7,s,0)
+      destroy hinfo
+      hiok=NULL; hicancel=NULL
+    else if Pressed(hicancel) then
+      s[0]=S_MESSAGE
+      s[1]=1                           // Close info message
+      s[2]=1
+      $int4(s+3)=0
+      SYS.Send(7,s,0)
+      destroy hinfo
+      hiok=NULL; hicancel=NULL
+    else if Pressed(heok) then
+      s[0]=S_MESSAGE
+      s[1]=2                           // Close error message
+      s[2]=2
+      $int4(s+3)=0
+      SYS.Send(7,s,0)
+      destroy herror
+      heok=NULL; hecancel=NULL
+    else if Pressed(hecancel) then
+      s[0]=S_MESSAGE
+      s[1]=2                           // Close error message
+      s[2]=1
+      $int4(s+3)=0
+      SYS.Send(7,s,0)
+      destroy herror
+      heok=NULL; hecancel=NULL
+    else if checkifloaded!=0 then
+      //////////////////////////////////////
+    endif
+    i=Menu(syslist)
+    if i==0 then
+      ;
+    else if i==1 then
+      deffont=TERMINALFONT
+      change syslist font=TERMINALFONT
+    else if i==2 then
+      deffont=FIXEDFONT
+      change syslist font=FIXEDFONT
+    else if i==3 then
+      deffont=LARGEFONT
+      change syslist font=LARGEFONT
+    else if i==100 then
+      clear syslist
+      add syslist text="清空列表"
+    else if i==101 then
+      timestamping=timestamping ^ M_TSTAMP
+      change syslist mode=timestamping|hscroll|M_VSCROLL
+    else if i==102 then
+      hscroll=hscroll ^ M_HSCROLL
+      change syslist mode=timestamping|hscroll|M_VSCROLL
+    endif
+    wait
+  enddo
+  setini("Startup","Main window","%i",deffont)
+  setini("Startup","Debug mode",$GLOBAL.debugmode)
+  setini("Startup","Video mode",$GLOBAL.videomode)
+  setini("Startup","Disabled rails",$GLOBAL.disabledrails)
+  setini("Startup","Disabled measurements",$uint4($GLOBAL+280))
+  setini("Startup","Display mode",$GLOBAL.displaymode)
+  for i=0,i<8,i++
+    sprintf(s,"EXTERN mode[%i]",i)
+    setini("Startup",s,"%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i",               \
+    $GLOBAL.extmode[i],$GLOBAL.extconverter[i],$GLOBAL.extbaud[i],             \
+    $GLOBAL.extwait[i],$GLOBAL.extecho[i],$GLOBAL.extanswer[i],                \
+    $GLOBAL.extprompt[i],$GLOBAL.exterr1[i],$GLOBAL.exterr2[i],                \
+    $GLOBAL.exterr3[i],$GLOBAL.extprimary[i],$GLOBAL.extsecondary[i],          \
+    $uint1($GLOBAL+508+i));
+  enddo
+  SYS.Quit();
+end
+

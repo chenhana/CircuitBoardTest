@@ -1,0 +1,1403 @@
+// Stand-alone rotational encoder test, version 1.3 13.02.2001
+// Language: SCRIPT2 for OLLYTEST. Written by Oleh Yuschuk
+
+#include "ls.icl"
+#include "or.icl"
+#include "ly.icl"                // MSWrite file support
+
+#cmdbuff 4                             // Allow 4 commands with immediate answer
+
+#define GX 338                         // Dimensions of the graph window
+#define GY 317               
+#define LX 40                          // Left X shift in graph window
+#define DY 15                          // Down Y shift in graph window
+#define UY 20                          // Upper Y shift in graph window
+#define SH 10                          // All other shifts in graph window
+#define UNDEFDATA 1.2481632e66         // Number considered as undefined
+
+#define NSCAN  121                     // Number of phase test points
+#define SSTEP  5                       // Phase test step, um
+#define NACC   30                      // Number of accuracy test points
+#define NACC1  31                      // Simply NACC+1
+#define DMACC  10                      // Number of dummy accuracy steps
+#define NGLOB  21                      // Number of global test points
+#define NGACC  101                     // Number of global accuracy tests
+#define NGFACT 5                       // NGACC=(NGLOB-1)*NGFACT+1
+#define NLOC   3                       // Number of local tests
+#define NCIRC  64                      // Number of points on the circle
+
+// Controls within the test window
+handle hmain                           // Main test window
+handle hstat                           // Status/info line
+handle hrail                           // Connected to this rail
+handle hside                           // Connected as left/right finger
+handle hname                           // Encoder ID number
+handle hdraw                           // Graphics
+handle htext                           // Test results
+handle hplot[5]                        // Plot selection buttons
+handle htime                           // Test time indicator
+handle hstst                           // Start/stop button
+handle hwrit                           // Create write file
+handle hexit                           // Exit button
+
+// Other work variables
+int   rail                             // Rail to which test unit is connected
+int   finger                           // Head to which test unit is connected
+int   loadchanged                      // Loader finished
+int   step                             // Step of the test sequence
+int   phase                            // Phase of the current step
+int   count                            // Count of the current phase
+int   ampla,amplb,amplz,roughz         // Phase amplitudes (signed)
+float xcoord,ycoord                    // Coordinates of Canon & tested encoders
+float zerodiff                         // ycoord-xcoord at zeroposition
+int   zeroposition                     // "Y coordinate" of zero pulse, um
+int   zerocanon                        // "X coordinate" of zero pulse, um
+int   stoppressed                      // Stop requested
+int   exitpressed                      // Exit requested
+int   currentdraw                      // Currently displayed graph
+int   drawrequest                      // Request to draw this graph
+float ax,bx,ay,by                      // Graphic transformation coefficients
+int   prevxcount                       // Handles X counter over/underflows
+int   xcountaddon                      // Handles X counter over/underflows
+int   starttime                        // Test start time, seconds
+int   currtime                         // Displayed time, seconds
+int   finestart                        // Where fine zero search was started
+int   searchretries                    // How many times zero search restarted
+float globaccstart,globaccstep         // Points where global accuracy measured
+char  encname[32]                      // Specified encoder ID or name
+
+// Collected data
+int   globvalid                        // Amplitude data valid flag
+float amplamin[NGLOB]                  // Minimal amplitude of phase A
+float amplamax[NGLOB]                  // Maximal amplitude of phase A
+float ampla0[NGLOB]                    // Zero of phase A
+float amplbmin[NGLOB]                  // Minimal amplitude of phase B
+float amplbmax[NGLOB]                  // Maximal amplitude of phase B
+float amplb0[NGLOB]                    // Zero of phase B
+float amplzmax[NGLOB]                  // Maximal amplitude of zero pulse
+int   amin,amax,bmin,bmax              // Amplitudes around zero pulse
+int   zeroa,zerob                      // Signed zero phase levels
+int   accvalid                         // Accuracy data valid flag
+float locacc[NLOC,NACC1]               // Measured local accuracy deviations
+int   nlocacc[NACC]                    // Corresponding number of points
+float globaccmin[NGACC]                // Measured global accuracy deviations
+float globaccmax[NGACC]                // Measured global accuracy deviations
+float smooaccmin[NGACC]                // Smoothed global accuracy deviations
+float smooaccmax[NGACC]                // Smoothed global accuracy deviations
+int   circlevalid                      // Circle data valid
+float circlea[NLOC,NCIRC]              // Circle data phase A
+float circleb[NLOC,NCIRC]              // Circle data phase B
+int   ncirc[NCIRC]                     // Corresponding number of points
+int   scanvalid                        // Scan data valid flag
+float scana[NSCAN]                     // Phase A in the vicinity of zero pulse
+float scanb[NSCAN]                     // Phase B in the vicinity of zero pulse
+float scanz[NSCAN]                     // Ref out in the vicinity of zero pulse
+int   nscan[NSCAN]                     // Corresponding number of points
+
+// Test results
+float zmin                             // Minimal zero pulse amplitude
+float zmax                             // Maximal zero pulse amplitude
+float zwidth                           // Zero pulse width at level +512 bits
+float zbadwidth                        // Worst-case accurate zero width
+float zaccwidth                        // Accurate zero pulse width
+float zphase                           // Phase of zero pulse
+float globmin                          // Minimal corrected global error, mkm
+float globmax                          // Maximal corrected global error, mkm
+float globdiff                         // Globally maximal local error
+
+float lvamin,lvamax,lvarel             // Min/max/relative phase A zero levels
+float lvbmin,lvbmax,lvbrel             // Min/max/relative phase B zero levels
+float dnamin,dnamax,upamin,upamax      // Min/max amplitudes of phase A
+float dnbmin,dnbmax,upbmin,upbmax      // Min/max amplitudes of phase B
+float maxglobzero                      // Max of zero pulse except zero pulse
+float acc[NLOC]                        // Local accuracy
+
+function int Answerproc(char *answer,int info)
+  if answer[4]==0xF0 then              // Internal OLLYTEST message
+    if Stricmp(answer+5,"CHG LOAD")==0 loadchanged=1
+    return
+  endif
+end
+
+function int Drawaxes(float lox,float hix,float loy,float hiy,                 \
+  char *txt,char *xname,char *yname)
+  float startx,stepx,starty,stepy,r
+  int i,j
+  char s[32]
+  if (lox>=hix || loy>=hiy) return -1; // Bad input data
+  stepx=Log10((hix-lox)/4.0); i=stepx; stepx=stepx-i;
+  if (stepx<0) then
+    i=i-1; stepx=stepx+1
+  endif
+  stepx=Exp10(stepx)+0.001
+  if stepx>=10.0 then stepx=10.0
+  else if stepx>5.0 then stepx=5.0
+  else if stepx>2.0 then stepx=2.0
+  else stepx=1.0
+  endif
+  stepx=stepx*Exp10(i)
+  if lox<0 then
+    i=lox/stepx
+  else
+    i=lox/stepx+1
+  endif
+  startx=i*stepx; ax=(GX-LX-SH)/(hix-lox); bx=LX-lox*ax;
+  stepy=Log10((hiy-loy)/4.0); i=stepy; stepy=stepy-i;
+  if (stepy<0) then
+    i=i-1; stepy=stepy+1
+  endif
+  stepy=Exp10(stepy)+0.001
+  if stepy>=10.0 then stepy=10.0
+  else if stepy>5.0 then stepy=5.0
+  else if stepy>2.0 then stepy=2.0
+  else stepy=1.0
+  endif
+  stepy=stepy*Exp10(i)
+  if loy<0 then i=loy/stepy
+  else i=loy/stepy+1
+  endif
+  starty=i*stepy; ay=(GY-DY-UY)/(loy-hiy); by=GY-DY-loy*ay;
+  draw window=hdraw clip=NULL font=SMALLFONT
+  clear hdraw
+  r=lox
+  draw mode=M_CENTERED
+  for j=0,r<=hix,j=j+1
+    r=startx+j*stepx
+    i=ax*r+bx
+    draw color=GRAY
+    draw at i,UY to i,GY-DY
+    draw color=DARKGRAY
+    if (stepx>=1.0 && stepx<11000) then
+      Sprintf(s,"%.0f",r)
+    else
+      Sprintf(s,"%.0e",r)
+    endif
+    draw at i,GY-1 text=s
+  enddo
+  r=loy
+  draw mode=M_RIGHT
+  for j=0,r<=hiy,j=j+1
+    r=starty+j*stepy
+    i=ay*r+by
+    draw color=GRAY
+    draw at LX,i to GX-SH,i
+    draw color=DARKGRAY
+    if (stepy>=1.0 && stepy<11000) then
+      Sprintf(s,"%.0f",r)
+    else
+      Sprintf(s,"%.0e",r)
+    endif
+    draw at LX-4,i+7 text=s
+  enddo
+  draw color=DARKGRAY
+  draw at GX-SH-2,GY-DY
+  draw text xname
+  draw mode=M_LEFT
+  draw at LX+3,UY+13
+  draw text yname
+  draw color=BLACK font=MAINFONT
+  draw at LX,UY-1 text txt
+  draw at LX,UY rect GX-SH,GY-DY
+  draw at LX+1,UY+1 clip GX-SH-1,GY-DY-1
+  draw show
+end
+
+function int Legend(int i,int color,char *txt)
+  draw window=hdraw color=color
+  draw at GX-SH-25,UY+9*i+7
+  draw to GX-SH-5,UY+9*i+7
+  draw mode=M_RIGHT
+  draw at GX-SH-27,UY+9*i+13
+  draw font=SMALLFONT
+  draw text=txt
+end
+
+// Plots data gathered during the test.
+function int Plotdata(float *data,int ndata,float x0,float step,int color)
+  int i,j,x,y
+  draw window=hdraw color=color
+  j=-1
+  for i=0,i<ndata,i=i+1
+    if data[i]==UNDEFDATA continue
+    x=ax*(x0+i*step)+bx
+    y=ay*data[i]+by
+    if j<0 then
+      draw at x,y; j=1
+    else
+      draw to x,y
+    endif
+  enddo
+  draw show
+end
+
+// Plots circle gathered during the test.
+function int Plotcircle(float *datax,float *datay,int ndata,int color)
+  int i,j,x,y
+  draw window=hdraw color=color
+  j=-1
+  for i=0,i<ndata,i=i+1
+    if datax[i]==UNDEFDATA continue
+    x=ax*datax[i]+bx
+    y=ay*datay[i]+by
+    if j<0 then
+      draw at x,y; j=i
+    else
+      draw to x,y
+    endif
+  enddo
+  if j>=0 then                         // Close the circle
+    x=ax*datax[j]+bx
+    y=ay*datay[j]+by
+    draw to x,y
+  endif
+  draw show
+end
+
+function int Drawgraph(int drawrequest)
+  int i,newdraw
+  newdraw=-1
+  if drawrequest==0 then
+    draw window=hdraw clip=NULL
+    change hdraw help=                                                         \
+      "Here you will see the graphics which represent the test results"
+    clear hdraw
+    newdraw=0
+    draw show
+  else if drawrequest==1 && globvalid!=0 then
+    Drawaxes(globaccstart/1000-1,                                              \
+      (globaccstart+globaccstep*NGFACT*(NGLOB-1))/1000+1,                      \
+      -33000,33000,"Stability of phase amplitudes","mm","ADC bits")
+    change hdraw help=                                                         \
+      "Maximal, mean and minimal amplitudes of encoder phases"
+    Legend(0,BLACK,"0 pulse")
+    Legend(1,GREEN,"Phase A")
+    Legend(2,RED,"Phase B")
+    Plotdata(amplzmax,NGLOB,globaccstart/1000,globaccstep*NGFACT/1000,BLACK)
+    Plotdata(amplamin,NGLOB,globaccstart/1000,globaccstep*NGFACT/1000,GREEN)
+    Plotdata(amplamax,NGLOB,globaccstart/1000,globaccstep*NGFACT/1000,GREEN)
+    Plotdata(ampla0,NGLOB,globaccstart/1000,globaccstep*NGFACT/1000,GREEN)
+    Plotdata(amplbmin,NGLOB,globaccstart/1000,globaccstep*NGFACT/1000,RED)
+    Plotdata(amplbmax,NGLOB,globaccstart/1000,globaccstep*NGFACT/1000,RED)
+    Plotdata(amplb0,NGLOB,globaccstart/1000,globaccstep*NGFACT/1000,RED)
+    newdraw=1
+  else if drawrequest==2 && globvalid!=0 then
+    Drawaxes(globaccstart/1000-1,(globaccstart+globaccstep*(NGACC-1))/1000+1,  \
+      -32.0,32.0,"Global encoder accuracy (corrected)","mm","m")
+    Legend(0,GREEN,"Max diff")
+    Legend(1,RED,"Min diff")
+    change hdraw help="Y轴编码器错误(沿圆弧测量)"
+    Plotdata(globaccmin,NGACC,globaccstart/1000,globaccstep/1000,GRAY)
+    Plotdata(globaccmax,NGACC,globaccstart/1000,globaccstep/1000,GRAY)
+    Plotdata(smooaccmin,NGACC,globaccstart/1000,globaccstep/1000,RED)
+    Plotdata(smooaccmax,NGACC,globaccstart/1000,globaccstep/1000,GREEN)
+    newdraw=2
+  else if drawrequest==3 && accvalid!=0 then
+    Drawaxes(-33000.0,33000.0,-33000.0,33000.0,"Phase circle",                 \
+     "ADC bits","ADC bits")
+    change hdraw help="相位循环"
+    Legend(0,RED,"y=-100")
+    Legend(1,BLACK,"y=0")
+    Legend(2,GREEN,"y=100")
+    if accvalid>0 Plotcircle(circlea[0],circleb[0],NCIRC,RED)
+    if accvalid>1 Plotcircle(circlea[1],circleb[1],NCIRC,BLACK)
+    if accvalid>2 Plotcircle(circlea[2],circleb[2],NCIRC,GREEN)
+    newdraw=3
+  else if drawrequest==4 && accvalid!=0 then
+    Drawaxes(-5.0,205.0,-16.0,16.0,"Local encoder accuracy (1 phase)",         \
+      "m","m")
+    change hdraw help=                                                         \
+      "Local encoder nonlinearity within single encoder phase"
+    Legend(0,RED,"y=-100")
+    Legend(1,BLACK,"y=0")
+    Legend(2,GREEN,"y=100")
+    if accvalid>0 Plotdata(locacc[0],NACC+1,0,200.0/NACC,RED)
+    if accvalid>1 Plotdata(locacc[1],NACC+1,0,200.0/NACC,BLACK)
+    if accvalid>2 Plotdata(locacc[2],NACC+1,0,200.0/NACC,GREEN)
+    newdraw=4
+  else if drawrequest==5 && scanvalid!=0 then
+    Drawaxes(-NSCAN/2.0*SSTEP-10,NSCAN/2.0*SSTEP+10,                           \
+      -33000,33000,"Encoder phases","m","ADC bits")
+    change hdraw help=                                                         \
+      "Encoder output signals in the vicinity of zero pulse"
+    Legend(0,BLACK,"0 pulse")
+    Legend(1,GREEN,"Phase A")
+    Legend(2,RED,"Phase B")
+    Plotdata(scanz,NSCAN,-NSCAN/2.0*SSTEP,SSTEP,BLACK)
+    Plotdata(scana,NSCAN,-NSCAN/2.0*SSTEP,SSTEP,GREEN)
+    Plotdata(scanb,NSCAN,-NSCAN/2.0*SSTEP,SSTEP,RED)
+    newdraw=5
+  endif
+  if newdraw>=0 then
+    for i=0,i<5,i++ do
+      if i==newdraw-1 then
+        change hplot[i] color=LIGHTRED
+      else
+        change hplot[i] color=BLACK
+      endif
+    enddo
+  endif
+  currentdraw=drawrequest
+end
+
+// Create and show protocol with pictures in MS Write format
+function int Writeprotocol()
+  char buf[128]
+  int i,problems
+  float r1,r2
+  float minampl
+  change hstat limits=0,0
+  Sprintf(buf,"\\hardware\\%s.wri",encname)
+  if WOpen(buf)<0 then
+    change hstat name=format("无法创建编写文件 '%s'!",buf)
+    return
+  endif
+  if globvalid!=0 then
+    minampl=Min(zeroa-dnamax,upamin-zeroa,zerob-dnbmax,upbmin-zerob)
+  else
+    minampl=99999.0                    // Simply undefined
+  endif
+  WParagraph(WRI_CENTERED)
+  WFmt(WRI_ARIAL,WRI_BOLD,24)
+  Sprintf(buf,"Parameters of encoder %s",encname)
+  WAddtext(buf)
+  WParagraph(WRI_CENTERED)
+  WAddtext(" ")
+  if scanvalid!=0 && minampl>1000 then // Vicinity of zero pulse
+    WParagraph(WRI_FORMAT)
+    WFmt(WRI_ARIAL,WRI_BOLD|WRI_ITALIC,14)
+    WAddtext(" ")
+    WParagraph(WRI_FORMAT)
+    WAddtext("1. Parameters of reference (zero) pulse.")
+    WParagraph(WRI_FORMAT)
+    WFmt(WRI_TIMES,WRI_BOLD|WRI_ITALIC,12)
+    WAddtext(" ")
+    Drawgraph(5)
+    WParagraph(WRI_CENTERED)
+    WAddpicture(hdraw,0,0,GX,GY,1)
+    WAddtext(" ")
+    WParagraph(WRI_FORMAT)
+    WAddtext("Possible problems: ")
+    problems=0
+    WFmt(WRI_TIMES,WRI_ITALIC,12)
+    if zphase<0 || zphase>90 then
+      problems=1
+      Sprintf(buf,"Encoder zero pulse is found at phase %.0f degrees. ",zphase)
+      WAddtext(buf)
+      WAddtext("Typically, zero pulse phase is between 0 and 90 degrees. ")
+      WAddtext("This shift may be caused, for example, by swapped wires on ")
+      WAddtext("the connector. Check the order of encoder connections. ")
+      WParagraph(WRI_FORMAT)
+    endif
+    if zmax<2048 then
+      problems=2
+      Sprintf(buf,"Maximal amplitude of zero pulse is only %i ADC bits, ",zmax)
+      WAddtext(buf)
+      WAddtext("which may cause bootstrap error 1 ")
+      WFmt(WRI_TIMES,WRI_BOLD,12)
+      WAddtext("\"Unable to pass encoder zero pulse\". ")
+      WFmt(WRI_TIMES,WRI_ITALIC,12)
+    endif
+    if zmin>(-4096) then
+      problems=2
+      Sprintf(buf,"Minimal zero pulse amplitude is %i ADC bits, ",zmin)
+      WAddtext(buf)
+      WAddtext("which means that ")
+      if zmin<(-1024) then
+        WAddtext("in some rare cases ")
+      endif
+      WAddtext("the embedded software can find false zero pulse. ")
+    endif
+    if problems==2 then
+      WAddtext("The main problem here is that such errors are usually unstable")
+      WAddtext(" and depend on temperature etc. ")
+    endif
+    if problems!=0 WParagraph(WRI_FORMAT)
+    if zbadwidth>50 || zaccwidth<=15 then
+      problems=2
+      WAddtext("According to the manufacturer's specifications, embedded ")
+      WAddtext("software recognizes zero pulse at the location where both ")
+      WAddtext("phases A and B and zero pulse are significantly positive. ")
+      if zbadwidth>50 then
+        WAddtext("Here there seemed to be at least two such places. Either ")
+        WAddtext("finger will (irreproducibly) loose the accuracy, or ")
+        WAddtext("embedded software will report encoder error 9 (")
+        WFmt(WRI_TIMES,WRI_BOLD,12)
+        WAddtext("\"Encoder counter missed pulses\"")
+        WFmt(WRI_TIMES,WRI_ITALIC,12)
+        WAddtext("). ")
+      else
+        WAddtext("The area where zero pulse is recognizable is narrow, so ")
+        WAddtext("the possibility exists that it will not be found ")
+        WAddtext("(encoder error 6, ")
+        WFmt(WRI_TIMES,WRI_BOLD,12)
+        WAddtext("\"Unable to find encoder zero pulse\"")
+        WFmt(WRI_TIMES,WRI_ITALIC,12)
+        WAddtext("). ")
+      endif
+    endif
+    if problems==0 WAddtext("None.")
+  endif
+  if globvalid!=0 && minampl>1000 then // Global encoder accuracy
+    WParagraph(WRI_FORMAT)
+    WFmt(WRI_ARIAL,WRI_BOLD|WRI_ITALIC,14)
+    WAddtext(" ")
+    WParagraph(WRI_FORMAT)
+    WAddtext("2. Global encoder accuracy.")
+    WParagraph(WRI_FORMAT)
+    WFmt(WRI_TIMES,WRI_BOLD|WRI_ITALIC,12)
+    WAddtext(" ")
+    Drawgraph(2)
+    WParagraph(WRI_CENTERED)
+    WAddpicture(hdraw,0,0,GX,GY,1)
+    WAddtext(" ")
+    WParagraph(WRI_FORMAT)
+    WAddtext("Possible problems: ")
+    problems=0
+    WFmt(WRI_TIMES,WRI_ITALIC,12)
+    if globmin<(-7.0) || globmax>7.0 then
+      problems=1
+      WAddtext("Standard A2 calibration procedure scans only two rows of ")
+      WAddtext("crosses on the calibration board, assuming that in all ")
+      WAddtext("intermediate points the rotational encoder is linear (but not ")
+      WAddtext("necessarily accurate, because calibration procedure corrects ")
+      WAddtext("all linear errors). Unfortunately, maximal encoder errors ")
+      Sprintf(buf,"after correction (%.1f..%.1f) exceed ",globmin,globmax)
+      WAddtext(buf)
+      WAddtext("allowed 7 um limit (this limit includes uncertainty of the ")
+      WAddtext("reference encoder), so tester may experience problems in ")
+      WAddtext("fine-pitch areas. ")
+    endif
+    if problems==0 WAddtext("None.")
+  endif
+  if globvalid!=0 then                 // Stability of phase amplitudes
+    WParagraph(WRI_FORMAT)
+    WFmt(WRI_ARIAL,WRI_BOLD|WRI_ITALIC,14)
+    WAddtext(" ")
+    WParagraph(WRI_FORMAT)
+    WAddtext("3. Stability of phase amplitudes.")
+    WParagraph(WRI_FORMAT)
+    WFmt(WRI_TIMES,WRI_BOLD|WRI_ITALIC,12)
+    WAddtext(" ")
+    Drawgraph(1)
+    WParagraph(WRI_CENTERED)
+    WAddpicture(hdraw,0,0,GX,GY,1)
+    WAddtext(" ")
+    WParagraph(WRI_FORMAT)
+    WAddtext("Possible problems: ")
+    problems=0
+    WFmt(WRI_TIMES,WRI_ITALIC,12)
+    r1=Max(Abs(lvamin),Abs(lvamax),Abs(lvbmin),Abs(lvbmax))
+    r2=Max(lvarel,lvbrel)
+    if (minampl>1000 && (r1>5000 || r2>0.15)) then
+      problems=1
+      WAddtext("Embedded software calculates the exact coordinate as inverse ")
+      WAddtext("tangent of the ratio of amplitudes A to B. The amplitudes ")
+      WAddtext("are relative to the zero levels which are measured only once ")
+      WAddtext("during bootstrap. To minimize coordinate errors, zero levels ")
+      WAddtext("should not change with the angle. In our case, ")
+      if r2>0.1 then
+        Sprintf(buf,"center shift is %.1f%% high which may cause ",r2*100);
+        WAddtext(buf)
+        WAddtext("non-correctable local accuracy fluctuations depending on ")
+        WAddtext("the coordinate. ")
+        if r1>5000 WAddtext("Please note also that ")
+      endif
+      if r1>5000 then
+        Sprintf(buf,"some phase zero has high offset (%.0f bits). ",r1)
+        WAddtext(buf)
+        WAddtext("Software, of course, takes this offset into account, but ")
+        WAddtext("such unusually high offset presumes that encoder is ")
+        WAddtext("unstable of partially damaged. ")
+      endif
+      WParagraph(WRI_FORMAT)
+    endif
+    r1=Max(-dnamin,upamax,-dnbmin,upbmax)
+    if minampl>1000 && r1>30000 then
+      problems=2
+      WAddtext("Some phases have very high amplitudes, over 30000 ADC bits. ")
+      WAddtext("Taking into account the tolerances of the electronic ")
+      WAddtext("components, it may happen that in the tester this phase will ")
+      WAddtext("exceed the input range of the ADC and will be truncated. ")
+      WAddtext("In this case, coordinate will be inaccurate. ")
+    endif
+    if minampl<12000 then
+      if minampl>5000 then
+        problems=2
+        WAddtext("Some phases have very low amplitudes, under 12000 ADC bits. ")
+        WAddtext("Low amplitudes may ")
+        if r1>30000 WAddtext("also ")
+        WAddtext("reduce local tester accuracy. ")
+      else
+        problems=2
+        WAddtext("Some phases have extremely low amplitude, so low that ")
+        WAddtext("normal operation of this encoder is impossible. Please ")
+        WAddtext("check that connections between encoder and move-head board ")
+        WAddtext("are not damaged. ")
+      endif
+    endif
+    if problems==2 WParagraph(WRI_FORMAT)
+    if maxglobzero>(-3000) then
+      problems=1
+      WAddtext("Outside the zero pulse, there are places where zero pulse ")
+      WAddtext("is so high that it may be recognized as a false reference. ")
+    endif
+    if problems==0 WAddtext("None.")
+  endif
+  if accvalid!=0 && minampl>1000 then  // Local accuracy
+    WParagraph(WRI_FORMAT)
+    WFmt(WRI_ARIAL,WRI_BOLD|WRI_ITALIC,14)
+    WAddtext(" ")
+    WParagraph(WRI_FORMAT)
+    WAddtext("4. Local encoder accuracy.")
+    WParagraph(WRI_FORMAT)
+    WFmt(WRI_TIMES,WRI_BOLD|WRI_ITALIC,12)
+    WAddtext(" ")
+    Drawgraph(3)
+    WParagraph(WRI_CENTERED)
+    WAddpicture(hdraw,0,0,GX,GY,1)
+    WAddtext(" ")
+    Drawgraph(4)
+    WParagraph(WRI_CENTERED)
+    WAddpicture(hdraw,0,0,GX,GY,1)
+    WAddtext(" ")
+    WParagraph(WRI_FORMAT)
+    WAddtext("Possible problems: ")
+    problems=0
+    WFmt(WRI_TIMES,WRI_ITALIC,12)
+    r1=0
+    for i=0,i<NLOC,i=i+1
+      r1=Max(r1,acc[i])
+    enddo
+    if r1>=5.0 then
+      problems=1
+      WAddtext("Local encoder accuracy (i.e. accuracy within single encoder ")
+      Sprintf(buf,"phase) is %.1f um. ",r1)
+      WAddtext(buf)
+      WAddtext("There are no ways to correct this error. ")
+    endif
+    if problems==0 WAddtext("None.")
+  endif
+  WClose()
+  Sprintf(buf,"write.exe \\hardware\\%s.wri",encname)
+  SYS.Winexec(buf)
+end
+
+function int Createcontrols()
+  int i
+  char plotname[5,11] = { "放大","G精度","循环","L精度","相位" }
+  char plothelp[5,64] = {                                                      \
+    "Press to display peak phase amplitudes against the angle",                \
+    "Press to display global encoder accuracy (through 300 mm way)",           \
+    "Press to display phase circles",                                          \
+    "Press to display local encoder accuracy (single phase)",                  \
+    "Press to display phases around zero pulse" }
+  handle frame,dummy
+  hmain=control WINDOW                 // Main encoder test window
+    window=NULL
+    position=20,20,606,406
+    name="编码器测试对比"
+    help=" "
+    bkcolor=GREEN
+  endc
+  hstat=control PROGRESS               // Status bar
+    window=hmain
+    position=5,5,596,20
+    mode=M_LEFT|M_PERCENT
+    limits=0,0
+    font=MEDIUMFONT
+    bkcolor=GRAY
+    name="编码器测试"
+    help="显示当前测试状态"
+  endc
+  frame=control FRAME
+    window=hmain
+    position=5,27,253,65
+    font=MEDIUMFONT
+    help="用于在开始测试之前设置常规测试参数"
+    bkcolor=WHITE
+  endc
+  dummy=control TEXT
+    window=frame
+    position=10,8,120,20
+    font=INFOFONT
+    text="连接到"
+  endc
+  hrail=control COMBOLIST
+    window=frame
+    position=138,5,40,155
+    help="选择测试单元连接的轨道(0..7)"
+  endc
+  do i=0,7,1
+    add hrail text=format("%i",i)
+  enddo
+  i=0                                  // Default selection if not in .ini
+  getini("Encmeas","Rail",&i)
+  i=Max(0,Min(i,7))
+  change hrail select=format("%i",i)
+  hside=control COMBOLIST
+    window=frame
+    position=178,5,65,60
+    help="选择编码器测试单元的连接方式(如左侧或右侧头部)"
+  endc
+  add hside text="左"
+  add hside text="右"
+  i=0                                  // Default selection if not in .ini
+  getini("Encmeas","Finger",&i)
+  change hside select=(i==0?"左":"右")
+  dummy=control TEXT
+    window=frame
+    position=10,40,120,20
+    font=INFOFONT
+    text="编码器序列号"
+  endc
+  encname[0]='\0'                      // Empty name if not in .ini
+  getini("Encmeas","ID number",encname)
+  hname=control EDIT
+    window=frame
+    position=138,38,70,21
+    font=FIXEDFONT               
+    name=encname
+    help="输入编码器ID号，它将作为日志文件的名称"
+  endc
+  htime=control TEXT
+    window=hmain
+    position=5,95,140,20
+    font=MEDIUMFONT
+    name=""
+    help="已用的测试时间"
+    mode=M_BORDER
+  endc
+  dummy=control TEXT
+    window=hmain
+    position=148,95,110,20
+    font=MEDIUMFONT
+    color=DARKGRAY
+    name="v19.02"
+    help="编码器测量软件版本"
+    mode=M_BORDER|M_CENTERED
+  endc
+  frame=control FRAME
+    window=hmain
+    position=5,118,253,284
+  endc
+  htext=control TEXT
+    window=frame
+    position=1,1,251,282
+    font=FIXEDFONT
+    help="此处显示的是中间测试结果"
+  endc
+  hdraw=control GRAPH                  // Graph window
+    window=hmain
+    position=262,28,GX,GY
+    help="此处将看到代表测试结果的图形"
+    mode=M_CENTERED
+    color=BLACK
+    bkcolor=WHITE
+  endc
+  currentdraw=-1
+  for i=0,i<5,i=i+1
+    hplot[i]=control BUTTON            // Plot selection buttons
+      window=hmain
+      position=261+68*i,349,68,22
+      name=plotname[i]
+      help=plothelp[i]
+      font=INFOFONT
+    endc
+  enddo
+  hstst=control BUTTON                 // Start/Stop button
+    window=hmain
+    position=261,380,83,22
+    name="开始"
+    help="按此按钮启动或中断编码器测试"
+  endc
+  hwrit=control BUTTON                 // Write file button
+    window=hmain
+    position=354,380,83,22
+    name="保存"
+    help="按此可创建包含MS格式图片的协议"
+  endc
+  disable hwrit
+  hexit=control BUTTON                 // Edit button
+    window=hmain
+    position=518,380,83,22
+    name="退出"
+    help="按此按钮完成测试并关闭测试窗口"
+  endc
+end
+
+// Move encoder into the point with angular coordinate "phase" (um). After
+// step-motor is in the point, measure current amplitudes of phases A, B and
+// Z. Returns -1 if interrupt requested, or 0 otherwise.
+function int Moveandmeasure(int phase,int wttime)
+  char buf[64]
+  int i,ident0,ident1,ident2,ident3
+  buf[0]=0x12                          // S_DEBUG
+  buf[1]=0x12                          // Show phases
+  $short(buf+2)=rail                   // Rail
+  $short(buf+4)=finger                 // Finger
+  $int3(buf+6)=0                       // X phase
+  $int3(buf+9)=phase*6.4               // Y phase
+  buf[12]=Min(255,Max(wttime,0))       // Delay
+  ident0=SYS.Sendimm(0,13,buf)         // Send movement command
+  while $A[0].length==0 do
+    if Pressed(hstst) then
+      SYS.Killsend(ident0)
+      stoppressed=1
+      break
+    else if Pressed(hexit) then
+      SYS.Killsend(ident0)
+      exitpressed=1
+      break
+    endif
+    i=Time()/1000-starttime
+    if i!=currtime then
+      currtime=i
+      change htime text=format("  Test time %i'%2i\"",i/60,i%60)
+    endif
+    wait
+  enddo
+  if (wttime>0) delay(wttime)          // Additional delay
+  buf[0]=0x11                          // S_DUMP
+  buf[1]=rail                          // Rail
+  buf[2]=(finger==0?0x04:0x05)         // Rotary encoder data for selected head
+  $short(buf+3)=0                      // Number of items not necessary
+  $short(buf+5)=0                      // Start item not necessary
+  ident1=SYS.Sendimm(1,7,buf)          // Send dump command
+  buf[2]=(finger==0?0x06:0x07)         // Linear encoder data for selected head
+  ident2=SYS.Sendimm(2,7,buf)          // Send dump command
+  buf[0]=0x20                          // S_INPORT
+  $short(buf+1)=0x80CE+rail*256+finger // Max zero amplitude port
+  ident3=SYS.Sendimm(3,3,buf)          // Send inport command
+  while $A[1].length==0 || $A[2].length==0 || $A[3].length==0 do
+    if Pressed(hstst) then
+      SYS.Killsend(ident1)
+      SYS.Killsend(ident2)
+      SYS.Killsend(ident3)
+      stoppressed=1
+      break
+    else if Pressed(hexit) then
+      SYS.Killsend(ident1)
+      SYS.Killsend(ident2)
+      SYS.Killsend(ident3)
+      exitpressed=1
+      break
+    endif
+    wait
+  enddo
+  ampla=$uint2($A[1]+5+4)-32768
+  amplb=$uint2($A[1]+5+6)-32768
+  amplz=$uint2($A[1]+5+8)-32768
+  ycoord=$long($A[1]+5)/6.4            // Convert to micrometers-on-the-tip
+  if prevxcount-$long($A[2]+5)>0x007fffff then
+    xcountaddon=xcountaddon+0x01000000
+  else if $long($A[2]+5)-prevxcount>0x007fffff then
+    xcountaddon=xcountaddon-0x01000000
+  endif
+  prevxcount=$long($A[2]+5)
+  xcoord=-(prevxcount+xcountaddon)/6.4/2.25
+  roughz=$uint2($A[3]+5)-128
+end
+
+// Initialize variables and enable rotational motors disabled in the debug mode
+function int Initialize()
+  char buf[80]
+  int i,ident1,ident2
+  drawrequest=0
+  xcountaddon=0
+  globvalid=0
+  accvalid=0
+  scanvalid=0
+  change hstat name="测试机初始化"
+  change hstat limits=0,0
+  change htext name=""
+  Text(hrail,buf)
+  rail=buf[0]-'0'
+  Text(hside,buf)
+  finger=(buf[0]=='R')
+  Text(hname,encname)
+  if (encname[0]=='\0') then
+    change hstat name="未指定编码器标识符"
+    step=-1
+    return
+  endif
+  for i=0,i<80,i=i+1
+    if encname[i]=='\0' break
+    if (Isalnum(encname[i])==0 || i>8) then
+      change hstat name="编码器标识符只能包含数字和字母"
+      step=-1
+      return
+    endif
+  enddo
+  Sprintf(buf,"\\hardware\\%s.log",encname)
+  setini("Encmeas","Rail",rail)
+  setini("Encmeas","Finger",finger)
+  setini("Encmeas","ID number",encname)
+  buf[0]=0x12                          // S_DEBUG
+  buf[1]=0x0A                          // Special debug mode
+  $short(buf+2)=2                      // Enable rotational motors
+  ident1=SYS.Sendimm(0,4,buf)
+  buf[0]=0x12                          // S_DEBUG
+  buf[1]=0x01                          // Set debug mode
+  $short(buf+2)=$GLOBAL.debugmode|0x2000
+  $short(buf+4)=$GLOBAL.disabledrails & (!(1<<rail))
+  $short(buf+6)=$GLOBAL.videomode
+  ident2=SYS.Sendimm(1,8,buf)
+  while $A[0].length==0 || $A[1].length==0 do
+    if Pressed(hstst) then
+      SYS.Killsend(ident1)
+      SYS.Killsend(ident2)
+      stoppressed=1
+      break
+    else if Pressed(hexit) then
+      SYS.Killsend(ident1)
+      SYS.Killsend(ident2)
+      exitpressed=1
+      break
+    endif
+    wait
+  enddo
+  phase=0; step=step+1
+end
+
+function int Analyzescan()
+  int i,imax,ident1,ident2
+  int zbadleft,zbadright,zleft,zright,zaccleft,zaccright
+  char s[32],buf[32]
+  zmax=-100000; zmin=100000; imax=0;
+  zbadleft=10000; zbadright=-10000;
+  zleft=10000; zright=-10000;
+  zaccleft=10000; zaccright=-10000;
+  for i=0,i<NSCAN,i=i+1                // Find maximum of reference pulse
+    if nscan[i]==0 continue
+    zmin=Min(zmin,scanz[i])
+    if scanz[i]>zmax then
+      zmax=scanz[i]
+      imax=i
+    endif
+    if scanz[i]>(-512) then            // -512 bits for worst case
+      if scana[i]>(amax+amin)/2+3072 && scanb[i]>(bmax+bmin)/2+3072 then
+        zbadleft=Min(zbadleft,i)
+        zbadright=Max(zbadleft,i)
+      endif
+    endif
+    if scanz[i]>512 then               // 512 bits for movehead shift
+      zleft=Min(zleft,i)
+      zright=Max(zright,i)
+      if scana[i]>(amax+amin)/2+4096 && scanb[i]>(bmax+bmin)/2+4096 then
+        zaccleft=Min(zaccleft,i)
+        zaccright=Max(zaccright,i)
+      endif
+    endif
+  enddo
+  zwidth=Max(0,zright-zleft)*SSTEP
+  zbadwidth=Max(0,zbadright-zbadleft)*SSTEP
+  zaccwidth=Max(0,zaccright-zaccleft)*SSTEP
+  if scana[imax]-(amax+amin)/2==0 && scanb[imax]-(bmax+bmin)/2==0 then
+    zphase=0.0
+  else
+    zphase=Atan2(scana[imax]-(amax+amin)/2,scanb[imax]-(bmax+bmin)/2)
+  endif
+  zphase=zphase*180.0/3.1415926535
+  change hstat name="设置编码器零位"
+  change hstat limits=0,0
+  buf[0]=0x21                          // S_OUTPORT
+  $short(buf+1)=0x80D2+rail*256+finger*4
+  $short(buf+3)=(amax+amin+65536)/512
+  ident1=SYS.Sendimm(0,5,buf)          // Set new zero of phase A
+  $short(buf+1)=0x80D3+rail*256+finger*4
+  $short(buf+3)=(bmax+bmin+65536)/512
+  ident2=SYS.Sendimm(1,5,buf)          // Set new zero of phase B
+  while $A[0].length==0 || $A[1].length==0 do
+    if Pressed(hstst) then
+      SYS.Killsend(ident1)
+      SYS.Killsend(ident2)
+      stoppressed=1
+      break
+    else if Pressed(hexit) then
+      SYS.Killsend(ident2)
+      SYS.Killsend(ident1)
+      exitpressed=1
+      break
+    endif
+    wait
+  enddo
+  add htext text="Zero pulse:\n"
+  if zmax>2048 && zmin<(-4096) then i=0;
+  else if zmax>1024 && zmin<(-1024) then i=1;
+  else i=2; endif
+  if zbadwidth>50 i=2                  // Danger to find two zero pulses
+  if zwidth<=30 || zaccwidth<=15 i=Max(1,i)
+  if zwidth<=20 || zaccwidth<=10 i=2
+  add htext text=format("  Bootstrap problems      %s\n",                      \
+    i==0?"NONE":(i==1?"MAYBE":"YES"))
+  return
+end
+
+// Find position of zero pulse (with accuracy of about 50 mkm) and correct
+// encoder counter, so that coordinate measured by head controller is valid.
+function int Scanzeropulse()
+  char buf[16]
+  int i,ident
+  if phase==0 then
+    change hstat name="寻找编码器零位脉冲"
+    change hstat limits=0,0
+    phase=1; count=0
+    searchretries=0; zmax=-99999.0
+    amin=32768; amax=-32768
+    bmin=32768; bmax=-32768
+    if Moveandmeasure(count,0)!=0 then
+      change hstat name="零位脉冲寻找中断"
+      step=-1
+    endif
+  else if phase==1 then                // Search for zero pulse roughly
+    count=count+1000                   // 1000-mkm steps
+    if count>1500000 then              // Zero pulse not found!
+      change hstat name="两周后未找到零位脉冲"
+      step=-1
+    else if Moveandmeasure(count,0)!=0 then
+      change hstat name="零位脉冲寻找中断"
+      step=-1
+    else if (roughz>0) then            // Zero pulse found!
+      zmax=Max(zmax,roughz)
+      finestart=count
+      zeroposition=count
+      phase=2
+      count=count+200                  // Avoid hysteresis etc.
+    endif
+  else if phase==2 then                // Search for zero pulse accurately
+    count=count-10                     // 10-mkm steps
+    if finestart-count>2000 then
+      searchretries=searchretries+1    // Retry rough zero search
+      change hstat name="继续寻找编码器零位脉冲"
+      phase=1
+    else if Moveandmeasure(count,100)!=0 then
+      change hstat name="零位脉冲寻找中断"
+      step=-1
+    else
+      zmax=Max(zmax,roughz)
+      if ((amplz>512 && ampla>=4096 && amplb>=4096) ||                         \
+        (searchretries>=2 && amplz>0 && amplz>zmax*256.0-512.0)) then
+        zeroposition=count             // Zero pulse found!
+        zerocanon=xcoord
+        buf[0]=0x21                    // S_OUTPORT
+        $short(buf+1)=0x80C2+rail*256+finger*4
+        $short(buf+3)=0                // Clear encoder counter
+        ident=SYS.Sendimm(0,5,buf)
+        while $A[0].length==0 do
+          if Pressed(hstst) then
+            SYS.Killsend(ident)
+            stoppressed=1
+            break
+          else if Pressed(hexit) then
+            SYS.Killsend(ident)
+            exitpressed=1
+            break
+          endif
+          wait
+        enddo
+        phase=phase+1; count=0;
+      endif
+      amin=Min(amin,ampla)
+      amax=Max(amax,ampla)
+      bmin=Min(bmin,amplb)
+      bmax=Max(bmax,amplb)
+    endif
+  else                                 // Scan the vicinity of zero pulse
+    if count==0 then
+      change hstat name="分析零位脉冲近点"
+      for i=0,i<NSCAN,i=i+1
+        scana[i]=0.0
+        scanb[i]=0.0
+        scanz[i]=0.0
+        nscan[i]=0
+      enddo
+    endif
+    if Moveandmeasure(zeroposition+(count-NSCAN-80)*SSTEP/2,100)!=0 then
+      change hstat name="分析中断"
+      step=-1
+    else
+      amin=Min(amin,ampla)
+      amax=Max(amax,ampla)
+      bmin=Min(bmin,amplb)
+      bmax=Max(bmax,amplb)
+      i=(xcoord-zerocanon)/SSTEP+NSCAN/2
+      if i>=0 && i<NSCAN then
+        scana[i]=scana[i]+ampla
+        scanb[i]=scanb[i]+amplb
+        scanz[i]=scanz[i]+amplz
+        nscan[i]=nscan[i]+1
+      endif
+    endif
+    count=count+1
+    change hstat limits=count,2*(NSCAN+80)
+    if count>=2*(NSCAN+80) then
+      for i=0,i<NSCAN,i=i+1
+        if nscan[i]==0 then
+          scana[i]=UNDEFDATA
+          scanb[i]=UNDEFDATA
+          scanz[i]=UNDEFDATA
+        else
+          scana[i]=scana[i]/nscan[i]
+          scanb[i]=scanb[i]/nscan[i]
+          scanz[i]=scanz[i]/nscan[i]
+        endif
+      enddo
+      scanvalid=1
+      Analyzescan()
+      drawrequest=5
+      currentdraw=-1
+      phase=0; count=0; step=step+1    // Proceed with the next step
+    endif
+  endif
+end
+
+function int Analyzeglobal()
+  int i
+  char s[32]
+  float appr,diff,r,r1,r2
+  add htext text="Global encoder parameters:\n"
+  globmin=100000.0; globmax=-100000.0
+  globdiff=0
+  for i=0,i<NGACC,i++ do
+    globmin=Min(globmin,smooaccmin[i])
+    globmax=Max(globmax,smooaccmax[i])
+    globdiff=Max(globdiff,smooaccmax[i]-smooaccmin[i])
+  enddo
+  add htext text=format("  Min error=%3.0f m        %s\n",globmin,            \
+    globmin>=(-7.0)?"OK":(globmin>=(-12.0)?"POOR":"BAD"))
+  add htext text=format("  Max error=%3.0f m        %s\n",globmax,            \
+    globmax<=7.0?"OK":(globmax<=12.0?"POOR":"BAD"))
+  add htext text=format("  Max local error=%3.0f m\n",globdiff)
+  lvamin=100000.0; lvamax=-100000.0
+  lvbmin=100000.0; lvbmax=-100000.0
+  dnamin=100000.0; dnamax=-100000.0
+  upamin=100000.0; upamax=-100000.0
+  dnbmin=100000.0; dnbmax=-100000.0
+  upbmin=100000.0; upbmax=-100000.0
+  maxglobzero=-100000.0
+  for i=0,i<NGLOB,i=i+1
+    lvamin=Min(lvamin,ampla0[i])
+    lvamax=Max(lvamax,ampla0[i])
+    lvbmin=Min(lvbmin,amplb0[i])
+    lvbmax=Max(lvbmax,amplb0[i])
+    dnamin=Min(dnamin,amplamin[i])
+    dnamax=Max(dnamax,amplamin[i])
+    upamin=Min(upamin,amplamax[i])
+    upamax=Max(upamax,amplamax[i])
+    dnbmin=Min(dnbmin,amplbmin[i])
+    dnbmax=Max(dnbmax,amplbmin[i])
+    upbmin=Min(upbmin,amplbmax[i])
+    upbmax=Max(upbmax,amplbmax[i])
+    if i!=NGLOB/2 maxglobzero=Max(maxglobzero,amplzmax[i])
+  enddo
+  r=amplamax[NGLOB/2]-amplamin[NGLOB/2]
+  if r!=0.0 then
+    lvarel=(lvamax-lvamin)/r*2.0
+  else
+    lvarel=1.0
+  endif
+  r=amplbmax[NGLOB/2]-amplbmin[NGLOB/2]
+  if r!=0.0 then
+    lvbrel=(lvbmax-lvbmin)/r*2.0
+  else
+    lvbrel=1.0
+  endif
+  add htext text=format("  Phase zero stability    %s\n",                      \
+    lvarel<0.15 && lvbrel<0.15?"OK":(lvarel<0.2 && lvbrel<0.2?"POOR":"BAD"))
+  r1=Max(-dnamin,upamax,-dnbmin,upbmax)
+  r2=Min(zeroa-dnamax,upamin-zeroa,zerob-dnbmax,upbmin-zerob)
+  add htext text=format("  Phase amplitudes        %s\n",                      \
+  r2<12000?"LOW":(r1>30000?"HIGH":"OK"))
+end
+
+// Measure encoder amplitudes and global accuracy through the whole working area
+function int Testglobal()
+  float accmax,accmin,accmean,a,b,c,r,x[NGACC]
+  int i,j,maxcount,na,nb,nc
+  j=phase/NGFACT
+  if count==0 then
+    if phase==0 then
+      change hstat name="检查全部编码器参数"
+      change hstat limits=0,0
+    endif
+    if j*NGFACT==phase then
+      amplamin[j]=9999999.9
+      amplamax[j]=-9999999.9
+      amplbmin[j]=9999999.9
+      amplbmax[j]=-9999999.9
+      amplzmax[j]=-9999999.9
+    endif
+    globaccmin[phase]=9999999.9
+    globaccmax[phase]=-9999999.9
+  endif
+  Moveandmeasure(zeroposition+globaccstart+phase*globaccstep+count*10,20)
+  if count>0 && count<21 then          // Always 1 full phase
+    globaccmin[phase]=Min(globaccmin[phase],ycoord-xcoord)
+    globaccmax[phase]=Max(globaccmax[phase],ycoord-xcoord)
+  endif
+  if j*NGFACT==phase then
+    amplamin[j]=Min(amplamin[j],ampla)
+    amplamax[j]=Max(amplamax[j],ampla)
+    amplbmin[j]=Min(amplbmin[j],amplb)
+    amplbmax[j]=Max(amplbmax[j],amplb)
+    amplzmax[j]=Max(amplzmax[j],amplz)
+    maxcount=60                        // 3 full phases
+  else
+    maxcount=21                        // 1.5 full phase
+  endif
+  count=count+1
+  if count>=maxcount then
+    if j*NGFACT==phase then
+      ampla0[j]=(amplamin[j]+amplamax[j])/2.0
+      amplb0[j]=(amplbmin[j]+amplbmax[j])/2.0
+    endif
+    phase=phase+1
+    change hstat limits=phase,NGACC
+    count=0
+    if phase>=NGACC then
+      for i=0,i<NGACC,i++ do
+        x[i]=i
+      enddo
+      SYS.Polyfit(NGACC,x,globaccmin,15,NGACC,x,smooaccmin)
+      SYS.Polyfit(NGACC,x,globaccmax,15,NGACC,x,smooaccmax)
+      na=NGACC/8
+      a=(smooaccmin[na-1]+smooaccmax[na-1]+smooaccmin[na+1]+smooaccmax[na+1])/4
+      nb=NGACC/2
+      b=(smooaccmin[nb-1]+smooaccmax[nb-1]+smooaccmin[nb+1]+smooaccmax[nb+1])/4
+      nc=NGACC-1-NGACC/8
+      c=(smooaccmin[nc-1]+smooaccmax[nc-1]+smooaccmin[nc+1]+smooaccmax[nc+1])/4
+      for i=0,i<=nb,i++ do
+        r=a+((i-na)*(b-a))/(nb-na)
+        globaccmin[i]=globaccmin[i]-r
+        globaccmax[i]=globaccmax[i]-r
+        smooaccmin[i]=smooaccmin[i]-r
+        smooaccmax[i]=smooaccmax[i]-r
+      enddo
+      for i=nb+1,i<NGACC,i++ do
+        r=b+((i-nb)*(c-b))/(nc-nb)
+        globaccmin[i]=globaccmin[i]-r
+        globaccmax[i]=globaccmax[i]-r
+        smooaccmin[i]=smooaccmin[i]-r
+        smooaccmax[i]=smooaccmax[i]-r
+      enddo
+      zeroa=ampla0[NGLOB/2]
+      zerob=amplb0[NGLOB/2]
+      globvalid=1
+      Analyzeglobal()
+      drawrequest=1; currentdraw=-1
+      phase=0; count=0; step=step+1    // Proceed with the next step
+      change hstat limits=0,0
+      change hstat name="全部测试完成"
+    endif
+  endif
+end
+
+// Test local encoder accuracy and phase circles in several points
+function int Testlocal()
+  int i,coord
+  char s[32]
+  float fi,accmax,accmin,accmean
+  if count==0 then
+    if phase==0 then
+      change hstat name="检查本地编码器参数"
+      change hstat limits=0,0
+    endif
+    for i=0,i<NACC,i=i+1
+      locacc[phase,i]=0.0
+      nlocacc[i]=0
+    enddo
+    for i=0,i<NCIRC,i=i+1
+      circlea[phase,i]=0.0
+      circleb[phase,i]=0.0
+      ncirc[i]=0
+    enddo
+  endif
+  coord=zeroposition+(phase-NLOC/2)*100000+count*200.0/NACC
+  if Moveandmeasure(coord,60)!=0 then
+    change hstat name="精准度测试中断"
+    step=-1
+  else if count<DMACC then             // First several steps are dummy
+    zerodiff=ycoord-xcoord
+  else
+    if ampla-zeroa==0 && amplb-zerob==0 then
+      fi=0.0
+    else
+      fi=Atan2(ampla-zeroa,amplb-zerob);
+    endif
+    i=fi/2.0/3.1415926536*NACC
+    if fi<0 i=i-1
+    if (i<0) i=i+NACC
+    if i>=NACC i=i-NACC
+    locacc[phase,i]=locacc[phase,i]+ycoord-xcoord-zerodiff
+    nlocacc[i]=nlocacc[i]+1
+    i=fi/2.0/3.1415926536*NCIRC
+    if fi<0 i=i-1
+    if (i<0) i=i+NCIRC
+    if i>=NCIRC i=i-NCIRC
+    circlea[phase,i]=circlea[phase,i]+ampla-zeroa
+    circleb[phase,i]=circleb[phase,i]+amplb-zerob
+    ncirc[i]=ncirc[i]+1
+    change hstat limits=phase*(10*NACC+DMACC)+count+1,(10*NACC+DMACC)*NLOC
+  endif
+  count=count+1
+  if count>=10*NACC+DMACC then         // Test 10 whole periods
+    accmax=-9999999.9
+    accmin=9999999.9
+    for i=0,i<NACC,i=i+1
+      if nlocacc[i]==0 then
+        locacc[phase,i]=UNDEFDATA
+      else
+        locacc[phase,i]=locacc[phase,i]/nlocacc[i]
+        accmax=Max(accmax,locacc[phase,i])
+        accmin=Min(accmin,locacc[phase,i])
+      endif
+    enddo
+    for i=0,i<NCIRC,i=i+1
+      if ncirc[i]==0 then
+        circlea[phase,i]=UNDEFDATA
+        circleb[phase,i]=UNDEFDATA
+      else
+        circlea[phase,i]=circlea[phase,i]/ncirc[i]
+        circleb[phase,i]=circleb[phase,i]/ncirc[i]
+      endif
+    enddo
+    accmean=(accmax+accmin)/2.0
+    accmax=accmax-accmean
+    accmin=accmin-accmean
+    for i=0,i<NACC,i=i+1
+      locacc[phase,i]=locacc[phase,i]-accmean
+    enddo
+    locacc[phase,NACC]=locacc[phase,0] // Cyclical curve
+    drawrequest=3                      // Request to draw encoder accuracy
+    currentdraw=-1
+    i=(phase-NLOC/2)*100
+    if phase==0 add htext text="Local encoder accuracy:\n"
+    acc[phase]=accmax
+    if accmax<5.0 then                 // Encoder is linear enough
+      Strcpy(s,"OK")
+    else if accmax<7.0 then            // Encoder is not very good
+      Strcpy(s,"POOR")
+    else                               // Encoder is not linear
+      Strcpy(s,"BAD")
+    endif
+    add htext text=format("  Acc[y=%4i]=%5.1f m    %s\n",i,accmax,s)
+    phase=phase+1
+    accvalid=phase
+    count=0
+    if phase>=NLOC then
+      phase=0; count=0; step=step+1    // Proceed with the next step
+      change hstat limits=0,0
+      change hstat name="精准度测试完成"
+    endif
+  endif
+end
+
+function int Loadtester()
+  int i,j,t,err,nframes
+  handle hload,hretry
+repeat:
+  change hstat limits=0,0
+  change hstat text="Initializing test device, please wait..."
+  delay 250
+  SYS.Softimm(0)
+  t=Time(); i=0
+  while $A[0].length==0 do
+    if Pressed(hexit) return -1        // Button "Exit" works as an interrupt
+    j=(Time()-t)/1000
+    if i!=j then
+      change hstat text=format("Waiting for answer - %i s",j)
+      i=j
+    endif
+    if j>9 then
+      change hstat text=format("No answer from crate, trying again...")
+      delay 1000
+      goto repeat
+    endif
+    wait
+  enddo
+  if $A[0].answer==S_ERROR &&                                                  \
+    ($A[0].subcmd==E_NOCRATDATA || $A[0].subcmd==E_NOFINGDATA) then
+    change hstat name="测试设备未加载"
+    $GLOBAL.headloaded=0
+    loadchanged=0
+    SYS.Start("LOADER",0,"ALL")
+    t=Time(); i=0
+    while 1 do
+      if Pressed(hexit) return -1
+      if $GLOBAL.headloaded==1 then
+        change hstat name=""
+        break
+      endif
+      if loadchanged return -1
+      j=(Time()-t)/1000
+      if i!=j then
+        change hstat text=format("Loading - %i s",j)
+        i=j
+      endif
+      wait
+    enddo
+  else if $A[0].answer!=S_RESET then
+    change hstat name="位置测试设备状态"
+  endif
+  return 0
+end
+
+function int main()
+  int i
+  Createcontrols()
+  globaccstep=300000.0/(NGACC-1)
+  globaccstart=(1-NGACC)/2.0*globaccstep
+  step=0
+  while 1 do
+    if (Pressed(hstst) || stoppressed || step<0) then
+      if step>0 change hstat name="测试中断"
+      stoppressed=0
+      step=(step==0)
+      if (step==0) then
+        change hstst name="开始"
+        enable hrail
+        enable hside
+        enable hname
+      endif
+      phase=0; count=0
+    endif
+    if (step==1) then
+      if Loadtester()<0 return
+      change hstst name="停止"
+      disable hrail
+      disable hside
+      disable hname
+      disable hwrit
+      Initialize()
+      starttime=Time()/1000
+      currtime=-1
+    else if (step==2) then
+      Scanzeropulse()
+    else if (step==3) then
+      Testglobal()
+    else if (step==4) then
+      Testlocal()
+    else if (step==5) then
+      delay 1000
+      enable hwrit
+      change hstat name="测试完成"
+      step=-1
+    endif
+    for i=0,i<5,i=i+1
+      if Pressed(hplot[i]) drawrequest=i+1
+    enddo
+    if drawrequest!=currentdraw Drawgraph(drawrequest)
+    if step!=0 then
+      i=Time()/1000-starttime
+      if i!=currtime then
+        currtime=i
+        change htime text=format("  Test time %i'%2i\"",i/60,i%60)
+      endif
+    endif
+    if Pressed(hwrit) Writeprotocol()
+    if Pressed(hexit) exitpressed=1
+    if (exitpressed) break
+    wait
+  enddo
+end
+

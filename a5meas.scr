@@ -1,0 +1,4168 @@
+#include "ls.icl"
+#include "or.icl"
+#cmdbuff 2
+
+#define VERSION        ""
+#define DESCRIPTION    "Manual control for measurement card"
+
+// 1.08: Automatically stops on error or hard reset.
+// 1.09: Support for sample-and-hold and boost switches, autorepeat.
+// 1.10: Autorepeat for HV 1/10 mA.
+// 1.11: Set of frequencies changed from 0.5-2-8-32 to 1-2-4-8 kHz.
+// 1.12: Second set and autorepeat for DAC0.
+// 1.13: Capacitor 1 nF to PLUS bus.
+// 1.14: External antennas.
+// 1.15: Zero DAC offset for waveforms.
+// 1.16: AD-DA delay.
+// 1.17: Option to toggle HV voltage.
+// 1.18: Option to disable temperature measurements.
+// 1.19: Option to toggle commutator to AGND-AGND.
+// 1.20: Option to toggle main DAC, with delayed strobe to osci.
+// 1.21: K109 now shortcuts U/I with PLUS bus.
+// 1.22: Button help displays names of corresponding bits in C code.
+// 1.23: Frequencies from 0.25 up to 128 kHz.
+// 1.24: Support of LATEST extention card.
+// 1.25: Strongly accelerated redraw.
+// 1.26: Corrected order of LATEST extention relays.
+// 1.27: Amplification bits for LATEST differential amplifier.
+// 1.28: LATEST multiplexer redesign.
+// 1.29: New version of LATEST card.
+// 1.30: New measurement card (with ADC filter).
+// 1.31: Support for dual measurement card.
+// 1.32: Autorepeat for the ADC filter.
+// 1.33: Autorepeat for the configuration buttons.
+// 1.34: Support for HV1000.
+// 1.35: New waveforms: unipolar rectangle and unipolar saw.
+// 1.36: Enable 300 mA switch.
+// 1.37: Support for modular multiplexer card (EL506).
+// 1.38: Take over current state of measurement card.
+// 1.39: Bug in autorepeat for additional voltage sources.
+// 1.40: Voltage display converted to graph to avoid blinking.
+// 1.41: Support for PGA204 after multiplexer.
+
+#define COMPLIMIT      3               // From this compact presentation
+
+#define NHEAD          24              // Max number of supported heads
+#define MAINDX         846             // Width of main window
+#define MAINDY         596             // Height of main window
+
+#define NCONFIG        8               // Number of auxiliary controls
+
+#define H_SWITCH       0               // Index of SWITCH in hmuxsw
+#define H_UI           1               // Index of U/I in hmuxsw
+#define H_ZERO         2               // Index of ZERO in hmuxsw
+#define H_SHORT        3               // Index of SHORT in hmuxsw
+
+// Type and layout of multiplexer.
+#define MUX_TYPEMASK   0xF0000000      // Mask to extract type of multiplexer
+#define   MUX_TYPE406  0x00000000      // EL406 (16 outputs)
+#define   MUX_TYPE506  0x10000000      // EL506 (modular)
+#define MUX_MODCOUNT   0x0F000000      // Mask to extract number of modules
+#define MUX_EXTERN5    0x00038000      // Mask for Card2:Ext2, MUXEXT_xxx
+#define MUX_EXTERN4    0x00007000      // Mask for Card2:Ext1, MUXEXT_xxx
+#define MUX_EXTERN3    0x00000E00      // Mask for Card1:Ext2, MUXEXT_xxx
+#define MUX_EXTERN2    0x000001C0      // Mask for Card1:Ext1, MUXEXT_xxx
+#define MUX_EXTERN1    0x00000038      // Mask for Card0:Ext2, MUXEXT_xxx
+#define MUX_EXTERN0    0x00000007      // Mask for Card0:Ext1, MUXEXT_xxx
+
+// Keep these parameters identical with the measurement software (meas.h)!
+// HV parameters for HV500.
+#define HVSRCFACT      81.9            // Conversion HV src volts->ADC bits
+#define ADCHV          51.3802         // Conversion HV volts -> ADC signed bits
+#define HVTODAC        16.00           // Conversion HV volts -> HV DAC bits
+// HV parameters for HV1000.
+#define HXSRCFACT      45.7            // Conversion HV src volts->ADC bits
+#define ADCHX          27.80           // Conversion HV volts -> ADC signed bits
+#define HXTODAC        6.94            // Conversion HV volts -> HV DAC bits
+
+typedef struct t_measstate             // Momentary state of measurement card
+  $float4 uadc;                        // ADC
+  int     udac;                        // DAC; smoo,unp,tgl,mod,frm,frq F3FF0000
+  int     k0k31;                       // State of relays K0..K31
+  int     k32k63;                      // State of relays K32..K63
+  int     k64k79;                      // 0000FFFF: State of relays K64..K79
+                                       // 000F0000: Overload flags
+                                       // 80000000: Disable temperature
+  int     k111k80;                     // State of relays K111..K80
+  int     h0h7;                        // State of on-heads 0..7
+  int     h8h15;                       // State of on-heads 8..15
+  int     offs;                        // AC DAC offset in lo, Q64..Q79 in hi
+  int     pgamux;                      // 00F:+commutator, 0F0:-commutator,
+                                       // 300:PGA, 1C00:filter, 80000000:GND-GND
+  int     dacineg;                     // Negative threshold for I source
+  int     dacipos;                     // Positive threashold for I source
+  int     dacilim;                     // I limit for I source
+  int     dacuhyst;                    // Hysteresis for U threshold
+  int     dachv;                       // HV in lo, 80000000: zeroing
+  int     delays;                      // SHdly-00001F, SHon-000020, Acc-003F00,
+                                       // Aon-004000, ADDAdly-3F0000
+  int     addr9;                       // Bits at FPGA address 9, HV and 300 mA
+  int     rback;                       // Feedback resistor
+  $float4 dbgsin;                      // Sine component of debug sum
+  $float4 dbgcos;                      // Cosine component of debug sum
+ends
+
+typedef struct t_measstateex           // Extended state of measurement card
+  $float4 uadc;                        // ADC
+  int     udac;                        // DAC; smoo,unp,tgl,mod,frm,frq F3FF0000
+  int     k0k31;                       // State of relays K0..K31
+  int     k32k63;                      // State of relays K32..K63
+  int     k64k79;                      // 0000FFFF: State of relays K64..K79
+                                       // 000F0000: Overload flags
+                                       // 80000000: Disable temperature
+  int     k111k80;                     // State of relays K111..K80
+  int     h0h7;                        // State of on-heads 0..7
+  int     h8h15;                       // State of on-heads 8..15
+  int     offs;                        // AC DAC offset in lo, Q64..Q79 in hi
+  int     pgamux;                      // 00F:+commutator, 0F0:-commutator,
+                                       // 300:PGA, 1C00:filter, 80000000:GND-GND
+  int     dacineg;                     // Negative threshold for I source
+  int     dacipos;                     // Positive threashold for I source
+  int     dacilim;                     // I limit for I source
+  int     dacuhyst;                    // Hysteresis for U threshold
+  int     dachv;                       // HV in lo, 80000000: zeroing
+  int     delays;                      // SHdly-00001F, SHon-000020, Acc-003F00,
+                                       // Aon-004000, ADDAdly-3F0000
+  int     addr9;                       // Bits at FPGA address 9, HV and 300 mA
+  int     rback;                       // Feedback resistor
+  $float4 dbgsin;                      // Sine component of debug sum
+  $float4 dbgcos;                      // Cosine component of debug sum
+  int     la0la31;                     // State of LATEST relays K0..K31
+  int     la32la37;                    // State of LATEST relays K32..K37
+  int     lamux;                       // LaAMPL-0030, LaMUX-000E, LaIOUT-0001
+  int     types;                       // Type of mux, on-head and HV source
+  int     q0q31;                       // State of relays Q0..Q31
+  int     q32q63;                      // State of relays Q32..Q63
+  int     h16h23;                      // State of on-heads 16..23
+  int     h24h31;                      // State of on-heads 24..31
+  int     extuout0;                    // External voltage U1 and U2, module 0
+  int     extuout1;                    // External voltage U3 and U4, module 0
+  int     extuout2;                    // External voltage U1 and U2, module 1
+  int     extuout3;                    // External voltage U3 and U4, module 1
+ends
+
+struct t_measstate   oldformat         // Temporary variable
+struct t_measstateex newformat         // Temporary variable
+struct t_measstateex out               // State requested by user
+struct t_measstateex inp               // Actual state of measurement card
+struct t_measstateex previnp           // Previous displayed state
+struct t_measstateex arep              // Autorepeat selections
+struct t_measstateex config[NCONFIG]   // Configurations
+
+int    compact                         // 1: compact presentation
+int    running                         // OK to request state of meas card
+int    card                            // 0: primary, 1: secondary card
+int    nhead                           // Number of available heads, 8/16/24
+int    half                            // Half of available heads, 4/8/12
+int    nmodule                         // 0: EL406; 1,2,3: no. of EL506 modules
+int    uoutmodule                      // Module selected in Uout window
+int    latestmode                      // 1: LATEST active
+int    repactive                       // Autorepeat mode active
+int    updateout                       // Send new data to measurement card
+int    updatebuttons                   // Update controls in window
+int    updateedits                     // Reread and actualize edit controls
+int    saveconfig                      // Save configuration activated
+int    autorepeat                      // Autorepeat selection activated
+int    selautorep                      // Index of selected autorepeat period
+int    autoconfig                      // List of hconfig buttons to repeat
+int    markconfig                      // List of configurations from meas card
+int    lastautoconf                    // Last repeated hconfig button
+int    adczeroset                      // Zero ADC level set
+float  adczerolevel                    // Zero ADC level
+float  shazerosin                      // Sine zero level of second harmonic
+float  shazerocos                      // Cosine zero level of second harmonic
+int    measset                         // Request to measure and send voltage
+int    maxhv                           // Max HV, 500 or 1000 volt
+
+handle hmain                           // Main window
+handle hamux                           // Multiplexer
+handle hlatest                         // LATEST card or NULL
+handle hmeas                           // Measurement card
+int    maindx                          // Width of client area of main window
+
+handle hcalllatest                     // Button that calls LATEST
+handle hzeromux                        // Zero all mux/head switches at once
+handle hmuxrelay[NHEAD,4]              // Bus-to-head multiplexer relays
+handle hauxrelay[6,4]                  // Bus-to-auxiliary relays
+handle hmuxsw[NHEAD,4]                 // Head switches
+handle hrback[4]                       // Feedback resistors
+handle htempoff                        // Disables temperature measurements
+handle huoutmod[3]                     // Mux module selected for Uout
+handle huoutraw[4]                     // Raw external voltages, bits
+handle huoutvolt[4]                    // Actual external voltages, volts
+handle huoutzero[4]                    // Set external voltage to zero
+handle huoutzall                       // Set all external voltages to zero
+handle huouton[2]                      // Connect voltage to output
+
+handle hcallamux                       // Button that calls multiplexer
+handle hzerolatest                     // Zero all LATEST switches at once
+handle hlatestrelay[NHEAD,4]           // Bus-to-head LATEST relays
+handle hlatestaux[4]                   // Auxiliary LATEST bus relays
+handle hlatestr[4]                     // 1 Ohm LATEST bus relays
+handle hbusaux[4]                      // K68-K71
+handle hlamux[9]                       // Multiplexer on the LATEST card
+
+int    lamuxbits[9] = {              \ // Multiplexer/amplifier settings
+  0x04,                              \ // Select output voltage
+  0x02,                              \ // Select output current
+  0x06,                              \ // Diff amplifier, amplification 0.167
+  0x0E,                              \ // Diff amplifier, amplification 0.333
+  0x16,                              \ // Diff amplifier, amplification 1
+  0x1E,                              \ // Diff amplifier, amplification 2
+  0x00,                              \ // Diff x0.33 + highpass filter
+  0x10,                              \ // Diff x2 + highpass filter
+  0x08 }                               // Select analog ground voltage
+
+handle hcard[2]                        // Card selection (master/slave)
+handle hcomm[16,2]                     // Commutator switches
+handle hcomgnd                         // Autorepeat commutator to ground
+handle hfilter[4]                      // Turn on ADC filters
+handle hsmooth                         // Mean ADC input
+handle hsetzero                        // Set internal zero of ADC
+handle hampl[4]                        // ADC PGA amplification switches
+handle hrelay[32]                      // Relays on measurement card
+handle hunprot                         // Unprotection button
+handle hresw                           // Reswitch mode button
+
+handle h300enable                      // Enable 300 mA source
+handle hsource                         // Main DAC
+handle hsrctoggle                      // Toggle main DAC
+handle hsrcscr                         // Main DAC - scroll
+handle hudac                           // Actual DAC output voltage
+handle hi300                           // Actual 300 mA current
+handle hihigh                          // Actual high current
+handle hilow                           // Actual low current
+handle hu                              // Actual voltage
+handle hdacineg[2]                     // Negative thresholds for I source
+handle hdacipos[2]                     // Positive thresholds for I source
+handle hdacilim[2]                     // I limits for I source
+handle hdacuhyst[2]                    // Hysteresises for U threshold
+handle htogineg                        // Toggle negative threshold
+handle htogipos                        // Toggle positive threshold
+handle htogilim                        // Toggle I limit
+handle htoguhyst                       // Toggle hysteresis
+handle hshon                           // Enable sample-and-hold
+handle hshdelay                        // Actual sample-and-hold delay
+handle hshscroll                       // Modify sample-and-hold delay
+handle hbooston                        // Enable relay acceleration
+handle hboost                          // Actual relay acceleration time
+handle hbooscroll                      // Modify relay acceleration time
+handle hadda                           // Actual AD-DA delay
+handle haddascroll                     // Modify AD-DA delay
+handle hsetall[2]                      // Set all thresholds at once
+handle hlimineg                        // Negative I limit indicator
+handle hlimipos                        // Positive I limit indicator
+handle hlimuneg                        // Negative U limit indicator
+handle hlimupos                        // Positive U limit indicator
+handle hactineg                        // Negative threshold for I source, bits
+handle hactinegv                       // Negative threshold for I source, volts
+handle hactipos                        // Positive threshold for I source, bits
+handle hactiposv                       // Positive threshold for I source, volts
+handle hactilim                        // I limit for I source, bits
+handle hactilimi                       // I limit for I source, amperes
+handle hactuhyst                       // Actual hysteresis for U threshold
+handle hform[8]                        // Form of the output wave
+handle hfreq[10]                       // Frequency of the output wave
+handle hacoffset                       // DAC offset for waveforms
+handle hacoffscr                       // DAC offset for waveforms - scroll
+handle hacofzero                       // Clear DAC offset
+
+handle hvcardtype                      // Type of HV card
+handle hvswitch                        // HV power switch
+handle hvvoltage                       // Control with HV voltage
+handle hvactual                        // Actual HV voltage
+handle hvtoggle                        // Toggle HV voltage
+handle hvcurrent[2][2]                 // HV source currents
+handle hvampl[4]                       // HV amplifications
+
+handle hconfig[NCONFIG]                // Configurations
+handle hsaveconfig                     // Save configuration
+handle hautorepeat                     // Add to autorepeat list
+handle hselautorep                     // Autorepeat frequency selector
+handle hautoclear                      // Clear autorepeat list
+handle hgetcurr                        // Get current state of relays
+handle hclipcopy                       // Copy configuration to clipboard
+handle hclippaste                      // Paste configuration from clipboard
+handle hzeroadc                        // Zero all ADC switches at once
+
+handle hfirsth                         // Force 1st harmonic in DC+sin
+handle hadc                            // ADC readings (volts and bits)
+handle hosc                            // Call oscilloscope
+
+#define AMUXDX         840             // Width of (old 16-chan) multiplexer
+#define AMUXDY         262             // Height of multiplexer
+#define TOPHEAD        40              // Down Y position of top heads
+#define BUSTOPY        65              // Y position of top analog bus
+#define BUSBOTY        145             // Y position of bottom analog bus
+#define BOTHEAD        220             // Top Y position of bottom heads
+#define HEADDY         24              // Height of on-head control block
+#define HEADDX         78              // X distance between heads, standard
+#define HEADCX         44              // X distance between heads, compact
+#define RLDX           16              // X distance between relays
+#define RLDY           16              // Y distance between relays
+#define BUSX0          5               // Where analog bus starts
+#define HEADX0         43              // Where first relay starts
+#define AUXX0          680             // Where first auxiliary control starts
+
+char busname[4][32] = {              \ // Bus names
+  "U/I",                             \
+  "MINUS",                           \
+  "PLUS",                            \
+  "GND" }
+
+char latestbusname[4][32] = {        \ // LATEST bus names
+  "IOUT",                            \
+  "MINUS",                           \
+  "PLUS",                            \
+  "AGND" }
+
+char laamplname[6][32] = {           \ // LATEST amplification names
+  ": 4",                             \
+  ": 2",                             \
+  "x1",                              \
+  "x2",                              \
+  "x4",                              \
+  "x8" }
+
+char lamuxname[9][32] = {            \ // LATEST multiplexer names
+  "U",                               \
+  "I",                               \
+  "DIF:6",                           \
+  "DIF:3",                           \
+  "DIFx1",                           \
+  "DIFx2",                           \
+  "FT:3",                            \
+  "FTx2",                            \
+  "AGND" }
+
+char ohbitname[4][32] = {            \ // On-head bus bit names
+  "OH_UI",                           \
+  "OH_MINUS",                        \
+  "OH_PLUS",                         \
+  "OH_GND" }
+
+char auxname406[4][32] = {           \ // Auxiliary names (EL406)
+  "Temperature Sensor",              \
+  "External Device",                 \
+  "External Antenna 1",              \
+  "External Antenna 2" }
+
+char auxname506[6][48] = {           \ // Auxiliary names (EL506)
+  "Module 0 External 1 (usually Temp Sensor)",                                 \
+  "Module 0 External 2 (usually Ext Antenna 1)",                               \
+  "Module 1 External 1 (usually Ext Device)",                                  \
+  "Module 1 External 2 (usually Ext Antenna 2)",                               \
+  "Module 2 External 1 (usually unassigned)",                                  \
+  "Module 2 External 2 (usually unassigned)" }
+
+char auxbitname[8][32] = {           \ // Auxiliary bit names
+  "AUX_TUI",                         \ // Temperature sensor to U/I bus
+  "AUX_TMINUS",                      \ // Temperature sensor to MINUS bus
+  "AUX_TPLUS",                       \ // Temperature sensor to PLUS bus
+  "AUX_TGND",                        \ // Temperature sensor to GND bus
+  "AUX_EUI",                         \ // External device to U/I bus
+  "AUX_EMINUS",                      \ // External device to MINUS bus
+  "AUX_EPLUS",                       \ // External device to PLUS bus
+  "AUX_EGND" }                       \ // External device to GND bus
+
+char rbackname[4][32] = {            \ // Feedback resistors
+  "1 M",                             \
+  "100 k",                           \
+  "10 k",                            \
+  "1 k" }
+
+char rbackbit[4][32] = {             \ // Feedback resistor key names
+  "OH_1000K",                        \
+  "OH_100K",                         \
+  "OH_10K",                          \
+  "OH_1K" }
+
+char commbit[8][32] = {              \ // Commutator-to-bus relay bit names
+  "M_UIMUX",                         \ // Connect multiplexer to U/I bus
+  "M_MINUSMUX",                      \ // Connect multiplexer to MINUS bus
+  "M_PLUSMUX",                       \ // Connect multiplexer to PLUS bus
+  "M_GNDMUX" }                         // Connect multiplexer to GND bus
+
+char gndbusbit[4][32] = {            \ // Bus-to-ground relay bit names
+  "M_UIGND",                         \ // Connect U/I bus to AGND
+  "M_MINUSGND",                      \ // Connect MINUS bus to AGND
+  "M_PLUSGND",                       \ // Connect PLUS bus to AGND
+  "M_GNDGND" }                         // Connect GND bus to AGND
+
+char shortbusbit[4][32] = {          \ // Bus-to-short relay bit names
+  "M_UISHORT",                       \ // Connect U/I bus to SHORT
+  "M_MINUSSHORT",                    \ // Connect MINUS bus to SHORT
+  "M_PLUSSHORT",                     \ // Connect PLUS bus to SHORT
+  "M_GNDSHORT" }                     \ // Connect GND bus to SHORT
+
+function int Answerproc(char *answer,int info)
+  int j,p,q,err
+  char buf[1000]
+  if answer[4]==0xF0 then              // Internal OLLYTEST message
+    if Stricmp(answer+5,"HARD RESET")==0 then
+      running=0
+    else if Stricmp(answer+5,"CHG LOAD")==0 && $GLOBAL.headloaded==1 then
+      running=1
+    else if Memicmp(answer+5,"SETMEAS ",8)==0 then
+      err=0
+      for j=0,j<Sizeof(out),j++ do
+        p=answer[j*2+13]-'0'; if p>9 p=p+10+'0'-'A'
+        if p<0 || p>15 err=1
+        q=answer[j*2+14]-'0'; if q>9 q=q+10+'0'-'A'
+        if q<0 || q>15 err=1
+        buf[j]=p*16+q
+      enddo
+      if err==0 then
+        Memcpy(out,buf,Sizeof(out))
+        j=(out.udac & 0xFFFF)-32768
+        change hsource text=format("%i",j)
+        change hsrcscr select=j/32768.0*250.0
+        updateout=1
+        autorepeat=0
+        measset=Time()
+      endif
+    endif
+  endif
+end
+
+// Service function, sets colours of hconfig buttons according to autorepeat
+// and markconfig.
+function int Sethconfigcolours()
+  int i
+  for i=0,i<NCONFIG,i++ do
+    if autoconfig & (1<<i) then
+      change hconfig[i] color=LIGHTRED
+    else
+      change hconfig[i] color=BLACK
+    endif
+    if autoconfig!=0 && lastautoconf==i then
+      change hconfig[i] bkcolor=YELLOW
+    else if markconfig & (1<<i) then
+      change hconfig[i] bkcolor=LIGHTGREEN
+    else
+      change hconfig[i] bkcolor=GRAY
+    endif
+  enddo
+end
+
+// Clears autorepeat settings.
+function int Clearautorepeat()
+  Memset(arep,0,Sizeof(arep))
+  autoconfig=0
+  lastautoconf=0
+  markconfig=0
+  Sethconfigcolours()
+  autorepeat=0
+end
+
+// Updates texts in raw U out controls.
+function int Updateuout()
+  if uoutmodule==0 then
+    change huoutraw[0] text=format("%i",(out.extuout0 & 0xFFF)-2048)
+    change huoutvolt[0] text=format(" %.2fV",                                  \
+      ((inp.extuout0 & 0x00000FFF)-2048.0)*0.0073242)
+    change huoutraw[1] text=format("%i",((out.extuout0>>16) & 0xFFF)-2048)
+    change huoutvolt[1] text=format(" %.2fV",                                  \
+      (((inp.extuout0>>16) & 0x00000FFF)-2048.0)*0.0073242)
+    change huoutraw[2] text=format("%i",out.extuout1 & 0xFFF)
+    change huoutvolt[2] text=format(" %.3fV",                                  \
+      (inp.extuout1 & 0x00000FFF)*0.0012207)
+    change huoutraw[3] text=format("%i",(out.extuout1>>16) & 0xFFF)
+    change huoutvolt[3] text=format(" %.3fV",                                  \
+      ((inp.extuout1>>16) & 0x00000FFF)*0.0012207)
+    change huouton[0] bkcolor=(inp.extuout0 & 0x80000000?LIGHTRED:LIGHTGRAY)
+    change huouton[1] bkcolor=(inp.extuout1 & 0x80000000?LIGHTRED:LIGHTGRAY)
+  else if uoutmodule==1 then
+    change huoutraw[0] text=format("%i",(out.extuout2 & 0xFFF)-2048)
+    change huoutvolt[0] text=format(" %.2fV",                                  \
+      ((inp.extuout2 & 0x00000FFF)-2048.0)*0.0073242)
+    change huoutraw[1] text=format("%i",((out.extuout2>>16) & 0xFFF)-2048)
+    change huoutvolt[1] text=format(" %.2fV",                                  \
+      (((inp.extuout2>>16) & 0x00000FFF)-2048.0)*0.0073242)
+    change huoutraw[2] text=format("%i",out.extuout3 & 0xFFF)
+    change huoutvolt[2] text=format(" %.3fV",                                  \
+      (inp.extuout3 & 0x00000FFF)*0.0012207)
+    change huoutraw[3] text=format("%i",(out.extuout3>>16) & 0xFFF)
+    change huoutvolt[3] text=format(" %.3fV",                                  \
+      ((inp.extuout3>>16) & 0x00000FFF)*0.0012207)
+    change huouton[0] bkcolor=(inp.extuout2 & 0x80000000?LIGHTRED:LIGHTGRAY)
+    change huouton[1] bkcolor=(inp.extuout3 & 0x80000000?LIGHTRED:LIGHTGRAY)
+  else
+    change huoutraw[0] text=""
+    change huoutvolt[0] text=""
+    change huoutraw[1] text=""
+    change huoutvolt[1] text=""
+    change huoutraw[2] text=""
+    change huoutvolt[2] text=""
+    change huoutraw[3] text=""
+    change huoutvolt[3] text=""
+    change huouton[0] bkcolor=LIGHTGRAY
+    change huouton[1] bkcolor=LIGHTGRAY
+  endif
+end
+
+function int Setuoutmodule(int module)
+  int i
+  if module<0 || module>=nmodule return
+  uoutmodule=module
+  for i=0,i<3,i++ do
+    if i==module then
+      change huoutmod[i] color=LIGHTRED
+      change huoutmod[i] bkcolor=YELLOW
+    else
+      change huoutmod[i] color=BLACK
+      change huoutmod[i] bkcolor=LIGHTGRAY
+    endif
+  enddo
+  for i=0,i<4,i++ do
+    change huoutraw[i] help=format(                                            \
+      "Raw voltage, %i..%i bits, (%i..%i V) to apply to U%i.%i",               \
+      (i<2?-2048:0),(i<2?2047:4095),(i<2?-15:0),(i<2?15:5),module,i+1)
+    change huoutvolt[i] help=format(                                           \
+      "Actual voltage, volts, on output U%i.%i",module,i+1)
+    change huoutzero[i] help=format(                                           \
+      "Toggle U%i.%i between zero and specified voltage",module,i+1)
+    ;
+  enddo
+  for i=0,i<2,i++ do
+    change huouton[i] help=format(                                             \
+    "Connect U%i.%i and U%i.%i to the outputs",module,i*2+1,module,i*2+2)
+  enddo
+end
+
+// Creates multiplexer window.
+function int Createamux()
+  int i,j,k,x,y,base[NHEAD],extbase[3]
+  char s[256]
+  draw window=hamux
+  draw color=LIGHTGRAY bkcolor=LIGHTGRAY
+  // Create button that calls LATEST.
+  hcalllatest=control BUTTON
+    window=hamux
+    position=5,TOPHEAD-HEADDY+1,31,HEADDY
+    name="LA"
+    help="切换到LA测试控制"
+    bkcolor=PINK
+    font=MEDIUMFONT
+  endc
+  // Calculate base X coordinates of heads and external outputs.
+  for j=0,j<half,j++ do
+    base[j]=HEADX0+(compact?HEADCX:HEADDX)*j-3
+    if nmodule>0 base[j]=base[j]+(j/4)*HEADDX
+    base[j+half]=base[j]
+  enddo
+  if nmodule==0 then
+    extbase[0]=AUXX0+HEADDX*0-3
+    extbase[1]=AUXX0+HEADDX*1-3
+    extbase[2]=AUXX0+HEADDX*2-3
+  else
+    extbase[0]=base[3]+(compact?HEADCX:HEADDX)
+    extbase[1]=base[7]+(compact?HEADCX:HEADDX)
+    extbase[2]=base[11]+(compact?HEADCX:HEADDX)
+  endif
+  // Draw areas.
+  for j=0,j<half,j++ do
+    x=base[j]
+    draw color=BLACK bkcolor=(compact?YELLOW:LIGHTYELLOW)
+    // Draw rectangles with bus relays.
+    if compact then
+      draw at x,BUSTOPY-10 fillrect x+RLDX*2+6,BUSTOPY+RLDX*4-4
+      draw at x,BUSBOTY-10 fillrect x+RLDX*2+6,BUSBOTY+RLDX*4-4
+    else
+      draw at x,BUSTOPY-10 fillrect x+RLDX*4+8,BUSTOPY+RLDX*4-4
+      draw at x,BUSBOTY-10 fillrect x+RLDX*4+8,BUSBOTY+RLDX*4-4
+    endif
+    // Draw on-head controls.
+    draw color=BLACK bkcolor=(compact?STRANGE:WHITECYAN)
+    if compact then
+      draw at x,TOPHEAD+11 fillrect x+RLDX*2+6,TOPHEAD-HEADDY-9
+      draw at x,BOTHEAD-10 fillrect x+RLDX*2+6,BOTHEAD+HEADDY+10
+    else
+      draw at x,TOPHEAD+1 fillrect x+RLDX*4+8,TOPHEAD-HEADDY+1
+      draw at x,BOTHEAD fillrect x+RLDX*4+8,BOTHEAD+HEADDY
+    endif
+  enddo
+  // Draw auxiliary controls.
+  for j=0,j<(nmodule==0?2:nmodule),j++ do
+    x=extbase[j]
+    draw color=BLACK bkcolor=WHITEGREEN
+    // Draw rectangles with bus relays.
+    draw at x,BUSTOPY-10 fillrect x+RLDX*4+8,BUSTOPY+RLDX*4-4
+    draw at x,BUSBOTY-10 fillrect x+RLDX*4+8,BUSBOTY+RLDX*4-4
+  enddo
+  // Create on-head switches.
+  for j=0,j<nhead,j++ do
+    x=base[j]+3
+    y=(j<half?TOPHEAD-HEADDY+4:BOTHEAD+3)-(compact?10:0)
+    hmuxsw[j,H_SWITCH]=control BUTTON
+      window=hamux
+      position=x,y,15,18
+      text="A"
+      help=format(                                                             \
+        "Toggles SW line (Direct/Amplifier) for head %i (bit OH_DIR)",j)
+      font=SMALLFONT
+      bkcolor=LIGHTGRAY
+    endc
+    hmuxsw[j,H_UI]=control BUTTON
+      window=hamux
+      position=x+17,y,15,18
+      text="U"
+      help=format("切换头%i的U / I和CRT / DIR模式(位OH_UI)",j)
+      font=SMALLFONT
+      bkcolor=LIGHTGRAY
+    endc
+    hmuxsw[j,H_ZERO]=control BUTTON
+      window=hamux
+      position=x+(compact?0:34),y+(compact?20:0),15,18
+      text="Z"
+      help=format("切换测试头%i的零位(位OH_ZERO)",j)
+      font=SMALLFONT
+      bkcolor=LIGHTYELLOW
+    endc
+    hmuxsw[j,H_SHORT]=control BUTTON
+      window=hamux
+      position=x+(compact?17:51),y+(compact?20:0),15,18
+      text="S"
+      help=format("测试头 %i 模拟线路短路",j)
+      font=SMALLFONT
+      bkcolor=LIGHTGRAY
+    endc
+  enddo
+  draw font=SMALLFONT mode=M_LEFT
+  // Draw top bus.
+  for i=0,i<4,i++ do
+    if nmodule==0 then
+      x=AMUXDX-7
+    else
+      x=extbase[nmodule-1]+HEADDX+3
+    endif
+    y=BUSTOPY+i*RLDY
+    draw color=BLACK
+    // Draw buses.
+    draw at BUSX0,y to x,y
+    draw at BUSX0,y+1 to x,y+1
+    draw at BUSX0,y+1 text=busname[i]
+    // Create heads.
+    for j=0,j<half,j++ do
+      // Create bus relays.
+      if compact then
+        x=base[j]+RLDX*(i/2)+RLDX/2+2
+      else
+        x=base[j]+RLDX*i+RLDX/2+3
+      endif
+      if nmodule==0 then
+        sprintf(s,"K%i, connects head %i plug J%i with %s bus (bit %s)",       \
+        j*4+i,j,1+j*2+i/2,busname[i],ohbitname[i])
+      else
+        sprintf(s,                                                             \
+        "Module %i relay K%i, connects head %i plug J%i with %s bus (bit %s)", \
+        j/4,((j&3)+(j&2))*4+i,j,(j&3)+(j&2)+(i&2)*4,busname[i],ohbitname[i])
+      endif
+      hmuxrelay[j,i]=control BUTTON
+        window=hamux
+        position=x-RLDX/2+2,y-RLDY/2+2,RLDX-2,RLDY-2
+        help=s
+        bkcolor=LIGHTGRAY
+      endc
+      // Draw connections.
+      if compact!=0 then
+        draw at x,y to x,TOPHEAD+10
+        draw at x+1,y to x+1,TOPHEAD+10
+        draw at x,TOPHEAD-HEADDY-10 to x,TOPHEAD-HEADDY-13
+        draw at x+1,TOPHEAD-HEADDY-10 to x+1,TOPHEAD-HEADDY-13
+      else if (i & 3)==0 then
+        draw at x,y to x,TOPHEAD+7
+        draw to x+RLDX,TOPHEAD+7
+        draw at x+1,y to x+1,TOPHEAD+6
+        draw to x+RLDX,TOPHEAD+6
+      else if (i & 3)==3 then
+        draw at x,y to x,TOPHEAD+6
+        draw to x-RLDX,TOPHEAD+6
+        draw at x+1,y to x+1,TOPHEAD+7
+        draw to x-RLDX,TOPHEAD+7
+      else
+        draw at x,y to x,TOPHEAD
+        draw at x+1,y to x+1,TOPHEAD
+        draw at x,TOPHEAD-HEADDY to x,TOPHEAD-HEADDY-13
+        draw at x+1,TOPHEAD-HEADDY to x+1,TOPHEAD-HEADDY-13
+      endif
+    enddo
+    // Create top auxiliary controls (K406: temperature sensor and external
+    // device).
+    for j=0,j<(nmodule==0?2:nmodule),j++ do
+      // Draw connections to auxiliary controls.
+      x=extbase[j]+RLDX*i+RLDX/2+3
+      draw at x,y to x,TOPHEAD
+      draw at x+1,y to x+1,TOPHEAD
+      // Create bus relays.
+      if nmodule==0 then
+        sprintf(s,"K%i, connects %s plug J%i with %s bus (bit %s)",            \
+          64+j*4+i,auxname406[j],33+4*j+i,busname[i],auxbitname[j*4+i])
+        k=j
+      else
+        sprintf(s,"%s, connects J%i with %s bus",                              \
+          auxname506[j*2],64+i,busname[i])
+        k=j*2
+      endif
+      hauxrelay[k,i]=control BUTTON
+        window=hamux
+        position=x-RLDX/2+2,y-RLDY/2+2,RLDX-2,RLDY-2
+        help=s
+        bkcolor=LIGHTGRAY
+      endc
+    enddo
+  enddo
+  // Draw temperature measurement resistor and connecting wires.
+  x=extbase[0]+RLDX/2+3
+  draw at x,TOPHEAD-2 to x,TOPHEAD-18 to x+13,TOPHEAD-18
+  draw at x+1,TOPHEAD-2 to x+1,TOPHEAD-19 to x+13,TOPHEAD-19
+  draw at x+2,TOPHEAD-8 to x+RLDX+1,TOPHEAD-8 to x+RLDX+1,TOPHEAD-1
+  draw at x+2,TOPHEAD-9 to x+RLDX,TOPHEAD-9 to x+RLDX,TOPHEAD-1
+  draw at x+RLDX*3,TOPHEAD-2 to x+RLDX*3,TOPHEAD-19 to x+35,TOPHEAD-19
+  draw at x+RLDX*3+1,TOPHEAD-2 to x+RLDX*3+1,TOPHEAD-18 to x+35,TOPHEAD-18
+  draw at x+RLDX*3-1,TOPHEAD-8 to x+RLDX*2,TOPHEAD-8 to x+RLDX*2,TOPHEAD-1
+  draw at x+RLDX*3-1,TOPHEAD-9 to x+RLDX*2+1,TOPHEAD-9 to x+RLDX*2+1,TOPHEAD-1
+  htempoff=control BUTTON
+    window=hamux
+    position=x+13,TOPHEAD-23,23,10
+    help="按下以启用或禁用温度测量"
+    bkcolor=WHITE
+    font=SMALLFONT
+  endc
+  // Draw bottom bus.
+  for i=0,i<4,i++ do
+    if nmodule==0 then
+      x=AMUXDX-7
+    else
+      x=extbase[nmodule-1]+HEADDX+3
+    endif
+    y=BUSBOTY+i*RLDY
+    draw color=BLACK
+    // Draw buses.
+    draw at BUSX0,y to x,y
+    draw at BUSX0,y+1 to x,y+1
+    draw at BUSX0,y+1 text=busname[i]
+    // Create heads.
+    for j=0,j<half,j++ do
+      // Create bus relays.
+      if compact then
+        x=base[j]+RLDX*(i/2)+RLDX/2+2
+      else
+        x=base[j]+RLDX*i+RLDX/2+3
+      endif
+      if nmodule==0 then
+        sprintf(s,"K%i, connects head %i plug J%i with %s bus (bit %s)",       \
+        (j+half)*4+i,j+half,17+j*2+i/2,busname[i],ohbitname[i])
+      else sprintf(s,                                                          \
+        "Module %i relay K%i, connects head %i plug J%i with %s bus (bit %s)", \
+        j/4,((j&3)+(j&2))*4+8+i,j+half,(j&3)+(j&2)+(i&2)*4+2,                  \
+        busname[i],ohbitname[i])
+      endif
+      hmuxrelay[j+half,i]=control BUTTON
+        window=hamux
+        position=x-RLDX/2+2,y-RLDY/2+2,RLDX-2,RLDY-2
+        help=s
+        bkcolor=LIGHTGRAY
+      endc
+      // Draw connections.
+      if compact!=0 then
+        draw at x,y to x,BOTHEAD-10
+        draw at x+1,y to x+1,BOTHEAD-10
+        draw at x,BOTHEAD+HEADDY+10 to x,BOTHEAD+HEADDY+13
+        draw at x+1,BOTHEAD+HEADDY+10 to x+1,BOTHEAD+HEADDY+13
+      else if (i & 3)==0 then
+        draw at x,y to x,BOTHEAD-7
+        draw to x+RLDX,BOTHEAD-7
+        draw at x+1,y to x+1,BOTHEAD-6
+        draw to x+RLDX,BOTHEAD-6
+      else if (i & 3)==3 then
+        draw at x,y to x,BOTHEAD-6
+        draw to x-RLDX,BOTHEAD-6
+        draw at x+1,y to x+1,BOTHEAD-7
+        draw to x-RLDX,BOTHEAD-7
+      else
+        draw at x,y to x,BOTHEAD
+        draw at x+1,y to x+1,BOTHEAD
+        draw at x,BOTHEAD+HEADDY to x,BOTHEAD+HEADDY+13
+        draw at x+1,BOTHEAD+HEADDY to x+1,BOTHEAD+HEADDY+13
+      endif
+    enddo
+    // Create bottom auxiliary controls (K406: external antennas).
+    for j=0,j<(nmodule==0?2:nmodule),j++ do
+      // Draw connections to auxiliary controls.
+      x=extbase[j]+RLDX*i+RLDX/2+3
+      draw at x,y to x,BOTHEAD-9
+      draw at x+1,y to x+1,BOTHEAD-9
+      // Create bus relays.
+      if nmodule==0 then
+        sprintf(s,"K%i, connects %s plug J%i with %s bus",                     \
+          72+j*4+i,auxname406[j+2],41+j*4+i,busname[i])
+        k=j+2
+      else
+        sprintf(s,"%s, connects J%i with %s bus",                              \
+          auxname506[j*2+1],68+i,busname[i])
+        k=j*2+1
+      endif
+      hauxrelay[k,i]=control BUTTON
+        window=hamux
+        position=x-RLDX/2+2,y-RLDY/2+2,RLDX-2,RLDY-2
+        help=s
+        bkcolor=LIGHTGRAY
+      endc
+    enddo
+  enddo
+  // Draw connections to external antennas.
+  for j=0,j<2,j++ do
+    x=extbase[j]+RLDX/2+3
+    y=BOTHEAD-7
+    draw at x,y to x,y+4 to x+RLDX,y+4
+    draw at x+1,y to x+1,y+5 to x+RLDX,y+5
+    draw at x+RLDX,y to x+RLDX,y+12
+    draw at x+RLDX+1,y to x+RLDX+1,y+12
+    draw at x+RLDX*2,y to x+RLDX*2,y+12
+    draw at x+RLDX*2+1,y to x+RLDX*2+1,y+12
+    draw at x+RLDX*3,y to x+RLDX*3,y+5 to x+RLDX*2,y+5
+    draw at x+RLDX*3+1,y to x+RLDX*3+1,y+4 to x+RLDX*2,y+4
+  enddo
+  // Create feedback resistor controls.
+  for i=0,i<4,i++ do
+    x=maindx-37*4-19+37*i
+    hrback[i]=control BUTTON
+      window=hamux
+      position=x,BUSBOTY+90,37,18
+      name=rbackname[i]
+      help=format("激活I / U前置反馈电阻%s(key %s)",      \
+        rbackname[i],rbackbit[i])
+      font=SMALLFONT
+      bkcolor=LIGHTGRAY
+    endc
+  enddo
+  // Create external voltage controls, EL506 only.
+  if nmodule>0 then
+    draw color=BLACK bkcolor=LIGHTYELLOW font=SMALLFONT
+    x=maindx-167
+    draw at x,BUSTOPY-20 fillrect maindx-19,BUSBOTY+RLDX*4-4
+    draw at x+6,BUSTOPY+7 text="UExt:"
+    for i=0,i<3,i++ do
+      huoutmod[i]=control BUTTON
+        window=hamux
+        position=x+37+36*i,BUSTOPY-9,33,18
+        name=format("M%i",i)
+        help=format("控制模块%i上的U输出",i)
+        font=SMALLFONT
+        bkcolor=LIGHTGRAY
+      endc
+      // Currently embedded software supports external voltage outputs only
+      // on the modules 0 and 1.
+      if i==2 || i>=nmodule then
+        disable huoutmod[i]
+      endif
+    enddo
+    for i=0,i<4,i++ do
+      y=BUSTOPY+i*24+18
+      draw at x+3,y+15 text=format("U%i",i+1)
+      huoutraw[i]=control EDIT
+        window=hamux
+        position=x+18,y,40,17
+        font=SMALLFONT
+      endc
+      huoutvolt[i]=control TEXT
+        window=hamux
+        position=x+60,y,42,17
+        font=SMALLFONT
+        bkcolor=WHITEGREEN
+        mode=M_BORDER
+      endc
+      huoutzero[i]=control BUTTON
+        window=hamux
+        position=x+104,y,17,17
+        bkcolor=LIGHTGRAY
+      endc
+    enddo
+    huoutzall=control BUTTON
+      window=hamux
+      position=x+74,BUSTOPY+4*24+18,47,17
+      text="Zero all"
+      help="将所有模块上的电压输出切换为零"
+      bkcolor=LIGHTGRAY
+      font=SMALLFONT
+    endc
+    for i=0,i<2,i++ do
+      huouton[i]=control BUTTON
+        window=hamux
+        position=x+128,BUSTOPY+i*48-RLDY/2+39,RLDX-2,RLDY-2
+        bkcolor=LIGHTGRAY
+      endc
+    enddo
+    Setuoutmodule(0)
+    Updateuout()
+  endif
+  // Create master multiplexer reset.
+  hzeromux=control BUTTON
+    window=hamux
+    position=maindx-RLDX*4-27,BUSTOPY-52,RLDX*4+8,22
+    name="重置MUX"
+    help="主多路卡重置"
+    bkcolor=PINK
+    font=SMALLFONT
+  endc
+  draw show
+end
+
+// Creates LATEST window.
+function int Createlatest()
+  int i,j,k,x0,x,y,poly[8],base[NHEAD],extbase[3]
+  char s[256]
+  if hlatest==NULL return
+  draw window=hlatest
+  draw color=DARKGRAY font=MEDIUMFONT mode=M_CENTERED
+  draw at MAINDX/2-4,25 text="LATEST extention"
+  // Create button that calls multiplexer.
+  hcallamux=control BUTTON
+    window=hlatest
+    position=5,TOPHEAD-HEADDY+1,31,HEADDY
+    name="MX"
+    help="切换到多路卡控制"
+    bkcolor=PINK
+    font=MEDIUMFONT
+  endc
+  // Create master LATEST reset.
+  hzerolatest=control BUTTON
+    window=hlatest
+    position=maindx-RLDX*4-27,BUSTOPY-52,RLDX*4+8,22
+    name="重置 LAT"
+    help="主LA测试重置"
+    bkcolor=PINK
+    font=SMALLFONT
+  endc
+  // Calculate base X coordinates of heads and external outputs.
+  for j=0,j<half,j++ do
+    base[j]=HEADX0+(compact?HEADCX:HEADDX)*j-3
+    if nmodule>0 base[j]=base[j]+(j/4)*HEADDX
+    base[j+half]=base[j]
+  enddo
+  if nmodule==0 then
+    extbase[0]=AUXX0+HEADDX*0-3
+    extbase[1]=AUXX0+HEADDX*1-3
+    extbase[2]=AUXX0+HEADDX*2-3
+  else
+    extbase[0]=base[3]+(compact?HEADCX:HEADDX)
+    extbase[1]=base[7]+(compact?HEADCX:HEADDX)
+    extbase[2]=base[11]+(compact?HEADCX:HEADDX)
+  endif
+  // Draw areas.
+  for j=0,j<half,j++ do
+    x=base[j]
+    draw color=BLACK bkcolor=(compact?YELLOW:LIGHTYELLOW)
+    // Draw rectangles with bus relays.
+    if compact then
+      draw at x,BUSTOPY-10 fillrect x+RLDX*2+6,BUSTOPY+RLDX*4-4
+      draw at x,BUSBOTY-10 fillrect x+RLDX*2+6,BUSBOTY+RLDX*4-4
+    else
+      draw at x,BUSTOPY-10 fillrect x+RLDX*4+8,BUSTOPY+RLDX*4-4
+      draw at x,BUSBOTY-10 fillrect x+RLDX*4+8,BUSBOTY+RLDX*4-4
+    endif
+  enddo
+  draw font=SMALLFONT mode=M_LEFT
+  if nmodule==0 then
+    x0=AUXX0
+  else
+    x0=extbase[nmodule-1]+HEADDX+3
+  endif
+  for i=0,i<4,i++ do
+    y=BUSTOPY+i*RLDY
+    // Draw top bus.
+    draw color=(i==0 || i==3?LIGHTRED:BLACK)
+    draw at BUSX0,y to x0+RLDX*(i+4)+28,y
+    draw at BUSX0,y+1 to x0+RLDX*(i+4)+28,y+1
+    draw at BUSX0,y+1 text=latestbusname[i]
+    // Draw top head relays and connections.
+    for j=0,j<half,j++ do
+      if compact then
+        x=base[j]+RLDX*(i/2)+RLDX/2+2
+      else
+        x=base[j]+RLDX*i+RLDX/2+3
+      endif
+      if (i==0 || i==3) then
+        if nmodule==0 then
+          sprintf(s,"LATEST_K%i, connects head %i plug J%i with %s bus",       \
+          j*2+i/2,j,j*2+2-i/2,latestbusname[i])
+        else
+          sprintf(s,                                                           \
+          "Module %i LATEST_K%i, connects head %i plug JP%i with %s bus",      \      //CHECK!!! MAY BE WRONG!
+          j/4,((j&3)+(j&2))*4+i,j,(j&3)+(j&2)+(i&2)*4,latestbusname[i])
+        endif
+      else
+        if nmodule==0 then
+          sprintf(s,"K%i, connects head %i plug J%i with %s bus (bit %s)",     \
+          j*4+i,j,1+j*2+i/2,busname[i],ohbitname[i])
+        else
+          sprintf(s,                                                           \
+          "Module %i relay K%i, connects head %i plug J%i with %s (bit %s)",   \
+          j/4,((j&3)+(j&2))*4+i,j,(j&3)+(j&2)+(i&2)*4,busname[i],ohbitname[i])
+        endif
+      endif
+      hlatestrelay[j,i]=control BUTTON
+        window=hlatest
+        position=x-RLDX/2+2,y-RLDY/2+2,RLDX-2,RLDY-2
+        help=s
+        bkcolor=LIGHTGRAY
+      endc
+      // Draw connections.
+      if compact!=0 then
+        draw at x,y to x,TOPHEAD+10
+        draw at x+1,y to x+1,TOPHEAD+10
+      else if (i & 3)==0 then
+        draw at x,y to x,TOPHEAD+7
+        draw to x+RLDX,TOPHEAD+7
+        draw at x+1,y to x+1,TOPHEAD+6
+        draw to x+RLDX,TOPHEAD+6
+      else if (i & 3)==3 then
+        draw at x,y to x,TOPHEAD+6
+        draw to x-RLDX,TOPHEAD+6
+        draw at x+1,y to x+1,TOPHEAD+7
+        draw to x-RLDX,TOPHEAD+7
+      else
+        draw at x,y to x,TOPHEAD
+        draw at x+1,y to x+1,TOPHEAD
+      endif
+    enddo
+    // Create relays that connect resistor 1 Ohm to bus.
+    x=x0+RLDX*(i+1)+RLDX/2-8
+    draw color=LIGHTRED
+    draw at x,y to x,TOPHEAD+7
+    draw at x+1,y to x+1,TOPHEAD+7
+    if (i==0 || i==3) then
+      if nmodule==0 then
+        sprintf(s,"LATEST_K36/K37, connect 1 Ohm resistor to AGND/IOUT buses")
+      else
+        sprintf(s,"LATEST_K0, connect 1 Ohm resistor to AGND/IOUT buses")
+      endif
+    else
+      if nmodule==0 then
+        sprintf(s,"LATEST_K38/K39, connect 1 Ohm resistor to PLUS/MINUS buses")
+      else
+        sprintf(s,"LATEST_K1, connect 1 Ohm resistor to PLUS/MINUS buses")
+      endif
+    endif
+    hlatestr[i]=control BUTTON
+      window=hlatest
+      position=x-RLDX/2+2,y-RLDY/2+2,RLDX-2,RLDY-2
+      help=s
+      bkcolor=LIGHTGRAY
+    endc
+    // Create auxiliary LATEST outputs.
+    x=x0+RLDX*(i+5)+RLDX/2-2
+    draw color=LIGHTRED
+    draw at x,y to x,TOPHEAD+7
+    draw at x+1,y to x+1,TOPHEAD+7
+    draw bkcolor=YELLOW at x-2,TOPHEAD+8 fillrect x+4,TOPHEAD+2
+    if nmodule==0 then
+      if (i==0) then
+        sprintf(s,"LATEST_K32, connects plug J49 with IOUT bus")
+      else if (i==1) then
+        sprintf(s,"LATEST_K35, connects plug J52 with MINUS bus")
+      else if (i==2) then
+        sprintf(s,"LATEST_K33, connects plug J50 with PLUS bus")
+      else
+        sprintf(s,"LATEST_K34, connects plug J51 with AGND bus")
+      endif
+    else
+      if (i==0) then
+        sprintf(s,"LATEST_K2, connects plug JP10 with IOUT bus")
+      else if (i==1) then
+        sprintf(s,"LATEST_K5, connects plug JP12 with MINUS bus")
+      else if (i==2) then
+        sprintf(s,"LATEST_K3, connects plug JP11 with PLUS bus")
+      else
+        sprintf(s,"LATEST_K4, connects plug JP13 with AGND bus")
+      endif
+    endif
+    hlatestaux[i]=control BUTTON
+      window=hlatest
+      position=x-RLDX/2+2,y-RLDY/2+2,RLDX-2,RLDY-2
+      help=s
+      bkcolor=LIGHTGRAY
+    endc
+  enddo
+  // Draw wires.
+  draw color=LIGHTRED
+  x=x0+RLDX+RLDX/2-8
+  y=BUSTOPY+RLDY
+  draw at x0+RLDX-11,y to x0+RLDX*5+28,y
+  draw at x0+RLDX-11,y+1 to x0+RLDX*5+28,y+1
+  draw at x-1,y-1 rect x+3,y+3
+  draw at x,y to x,BUSBOTY-10
+  draw at x+1,y to x+1,BUSBOTY-10
+  x=x0+RLDX*2+RLDX/2-8
+  y=BUSTOPY+2*RLDY
+  draw at x0+RLDX-11,y to x0+RLDX*6+28,y
+  draw at x0+RLDX-11,y+1 to x0+RLDX*6+28,y+1
+  draw at x-1,y-1 rect x+3,y+3
+  draw at x,y to x,BUSBOTY-10
+  draw at x+1,y to x+1,BUSBOTY-10
+  // Draw built-in 1 Ohm LATEST resistor.
+  x=x0+RLDX+RLDX/2-8
+  draw color=LIGHTRED bkcolor=WHITE
+  draw at x+RLDX*2-19,TOPHEAD-8 fillrect x+RLDX*2+4,TOPHEAD+2
+  draw at x+RLDX+1,TOPHEAD+7 to x,TOPHEAD+7
+  draw to x,TOPHEAD-3 to x+RLDX*2-19,TOPHEAD-3
+  draw at x+RLDX,TOPHEAD+6 to x+1,TOPHEAD+6
+  draw to x+1,TOPHEAD-4 to x+RLDX*2-19,TOPHEAD-4
+  draw at x+RLDX*2,TOPHEAD+7 to x+RLDX*3+1,TOPHEAD+7
+  draw to x+RLDX*3+1,TOPHEAD-3 to x+RLDX*2+3,TOPHEAD-3
+  draw at x+RLDX*2+1,TOPHEAD+6 to x+RLDX*3,TOPHEAD+6
+  draw to x+RLDX*3,TOPHEAD-4 to x+RLDX*2+3,TOPHEAD-4
+  for i=0,i<4,i++ do
+    y=BUSBOTY+i*RLDY
+    // Draw bottom bus.
+    draw color=(i==0 || i==3?LIGHTRED:BLACK)
+    draw at BUSX0,y to (i==0 || i==3?x0:x0-RLDX*4-19),y
+    draw at BUSX0,y+1 to (i==0 || i==3?x0:x0-RLDX*4-19),y+1
+    draw at BUSX0,y+1 text=latestbusname[i]
+    // Draw bottom head relays and connections.
+    for j=0,j<half,j++ do
+      if compact then
+        x=base[j]+RLDX*(i/2)+RLDX/2+2
+      else
+        x=base[j]+RLDX*i+RLDX/2+3
+      endif
+      k=j+half
+      if (i==0 || i==3) then
+        if nmodule==0 then
+          sprintf(s,"LATEST_K%i, connects head %i plug J%i with %s bus",       \
+          k*2+i/2,k,k*2+2-i/2,latestbusname[i])
+        else
+          sprintf(s,                                                           \
+          "Module %i LATEST_K%i, connects head %i plug JP%i with %s bus",      \      //CHECK!!! WRONG!!!
+          j/4,((j&3)+(j&2))*4+i,k,(j&3)+(j&2)+(i&2)*4,latestbusname[i])
+        endif
+      else
+        if nmodule==0 then
+          sprintf(s,"K%i, connects head %i plug J%i with %s bus (bit %s)",     \
+          (j+half)*4+i,j+half,17+j*2+i/2,busname[i],ohbitname[i])
+        else sprintf(s,                                                        \
+          "Module %i relay K%i, connects head %i plug J%i with %s (bit %s)",   \
+          j/4,((j&3)+(j&2))*4+8+i,j+half,(j&3)+(j&2)+(i&2)*4+2,                \
+          busname[i],ohbitname[i])
+        endif
+      endif
+      hlatestrelay[k,i]=control BUTTON
+        window=hlatest
+        position=x-RLDX/2+2,y-RLDY/2+2,RLDX-2,RLDY-2
+        help=s
+        bkcolor=LIGHTGRAY
+      endc
+      // Draw connections.
+      if compact!=0 then
+        draw at x,y to x,BOTHEAD-10
+        draw at x+1,y to x+1,BOTHEAD-10
+      else if (i & 3)==0 then
+        draw at x,y to x,BOTHEAD-7
+        draw to x+RLDX,BOTHEAD-7
+        draw at x+1,y to x+1,BOTHEAD-6
+        draw to x+RLDX,BOTHEAD-6
+      else if (i & 3)==3 then
+        draw at x,y to x,BOTHEAD-6
+        draw to x-RLDX,BOTHEAD-6
+        draw at x+1,y to x+1,BOTHEAD-7
+        draw to x-RLDX,BOTHEAD-7
+      else
+        draw at x,y to x,BOTHEAD
+        draw at x+1,y to x+1,BOTHEAD
+      endif
+    enddo
+  enddo
+  // Create relays that connect measurement analog bus to LATEST card.
+  hbusaux[0]=control BUTTON
+    window=hlatest
+    position=x0+RLDX*5+20,BUSBOTY+RLDY+RLDY/2+1,RLDX-2,RLDY-2
+    help=(nmodule==0?"K68, 将LA测试连接到U / I总线":                        \
+      "Connects LATEST to U/I bus")
+    bkcolor=LIGHTGRAY
+  endc
+  hbusaux[1]=control BUTTON
+    window=hlatest
+    position=x0-9,BUSTOPY+RLDY-RLDY/2+2,RLDX-2,RLDY-2
+    help=(nmodule==0?"K69, 将MINUS总线连接到LA测试":                      \
+      "Connects MINUS bus to LATEST")
+    bkcolor=LIGHTGRAY
+  endc
+  hbusaux[2]=control BUTTON
+    window=hlatest
+    position=x0-9,BUSTOPY+2*RLDY-RLDY/2+2,RLDX-2,RLDY-2
+    help=(nmodule==0?"K70, 将PLUS总线连接到LA测试":                       \
+      "Connects PLUS bus to LATEST")
+    bkcolor=LIGHTGRAY
+  endc
+  hbusaux[3]=control BUTTON
+    window=hlatest
+    position=x0-25,BUSBOTY+RLDY*4+26,RLDX-2,RLDY-2
+    help=(nmodule==0?"K71, 将GND总线连接到LA测试":                        \
+      "Connects GND bus to LATEST")
+    bkcolor=LIGHTGRAY
+  endc
+  // Create multiplexer.
+  draw color=BLACK bkcolor=LIGHTYELLOW
+  draw at x0,BUSBOTY-10 fillrect x0+RLDX*5+8,BUSBOTY+RLDX*5-4
+  // Multiplexer connections.
+  draw color=LIGHTRED                  // Wire from multiplexer to U/I bus
+  draw at x0+RLDX*5+8,BUSBOTY+2*RLDY-1
+  draw to x0+RLDX*5+20,BUSBOTY+2*RLDY-1
+  draw at x0+RLDX*5+8,BUSBOTY+2*RLDY
+  draw to x0+RLDX*5+20,BUSBOTY+2*RLDY
+  draw color=BLACK
+  draw at x0+RLDX*6+18,BUSBOTY+2*RLDY-1
+  draw to x0+RLDX*6+60,BUSBOTY+2*RLDY-1
+  draw at x0+RLDX*6+18,BUSBOTY+2*RLDY
+  draw to x0+RLDX*6+60,BUSBOTY+2*RLDY
+  draw at x0+RLDX*6+60,BUSBOTY+2*RLDY-1 mode=M_RIGHT text=busname[0]
+  for i=0,i<9,i++ do
+    x=(i & 1?x0+RLDX*2+RLDX/2+4:x0+4)
+    y=BUSBOTY+RLDY*(i/2)-7
+    hlamux[i]=control BUTTON
+      window=hlatest
+      position=x,y,(i<8?RLDX*2+RLDX/2:RLDX*5),RLDY
+      name=lamuxname[i]
+      help=format("重新切换LA测试多路卡到%s",lamuxname[i])
+      font=SMALLFONT
+      bkcolor=LIGHTGRAY
+    endc
+  enddo
+  // Draw current source.
+  x=x0+RLDX*5+15
+  y=BUSBOTY+RLDY*4+RLDY/2+24
+  draw color=BLACK                     // GND wire
+  draw at BUSX0,y to x0-15,y
+  draw at BUSX0,y+1 to x0-15,y+1
+  draw mode=M_LEFT at BUSX0,y text=busname[3]
+  draw color=LIGHTRED                  // Wire from GND switch to I source
+  draw at x0+RLDX-27,y to x,y
+  draw at x0+RLDX-27,y+1 to x,y+1
+  poly[0]=x; poly[1]=y-16              // Current source
+  poly[2]=x+21; poly[3]=y
+  poly[4]=x+21; poly[5]=y+1
+  poly[6]=x; poly[7]=y+17
+  draw color=BLACK polygon=poly,4
+  draw at x+3,y+8 font=FIXEDSYS text="I"
+  draw color=LIGHTRED                  // Wire from I source to IOUT bus
+  draw at x+22,y to x0+RLDX*6+60,y
+  draw at x+22,y+1 to x0+RLDX*6+60,y+1
+  draw at x0+RLDX*6+60,y font=SMALLFONT mode=M_RIGHT text="IOUT"
+  draw show
+end
+
+#define ABUSY          20              // Analog bus on measurement card
+#define GNDY           150             // Ground wire on measurement card
+#define SHORTY         86              // Short wire on measurement card
+
+#define FUTUREX        (HEADX0+12)     // X position of future extention
+
+#define IUX0           (HEADX0+224)    // X position of I/U converter
+
+#define SRCLX          8               // X left base of U/I sources
+#define SRCDX          40              // Width of single source
+#define SRCX           (SRCLX+47)      // X source base of U/I sources
+#define SRCY           133             // Y base of U/I sources
+
+#define HVX0           (HEADX0+270)    // X base of HV source and relays
+#define HVSRCY         (ABUSY+183)     // Y position of HV source
+#define HVSRCDX        (4*RLDX)        // Width of unipolar HV source
+
+#define COMMY0         10              // Y base of commutator
+#define COMMDX         156             // Width of commutator
+#define COMMX0         (ADCX0-COMMDX-13) // X position of commutator/ADC
+#define COMMDY         286             // Height of commutator/ADC
+#define INPDX          70              // Width of input button on commutator
+#define INPDY          16              // Height of input button on commutator
+
+#define ADCDX          88              // Width of ADC
+#define ADCX0          (MAINDX-ADCDX-13) // X position of ADC
+#define ADCY0          10              // Y base of ADC
+#define ADCDY          286             // Height of ADC
+
+char commname[16][4][32] = {        \ // Commutator and software names
+  { "Bus U/I",      "Bus U/I",      "XP_UIBUS",      "XM_UIBUS" },             \
+  { "Bus PLUS",     "Bus PLUS",     "XP_PLUSBUS",    "XM_PLUSBUS"  },          \
+  { "Bus MINUS",    "Bus MINUS",    "XP_MINUSBUS",   "XM_MINUSBUS"  },         \
+  { "Bus GND",      "Bus GND",      "XP_GNDBUS",     "XM_GNDBUS"  },           \
+  { "I-U conv",     "I-U conv",     "XP_IUCONV",     "XM_IUCONV"  },           \
+  { "DAC16",        "DAC16",        "XP_DAC16",      "XM_DAC16"  },            \
+  { "DAC0 A",       "DAC0 B",       "XP_DAC0A",      "XM_DAC0B"  },            \
+  { "DAC0 C",       "DAC0 D",       "XP_DAC0C",      "XM_DAC0D"  },            \
+  { "DAC1 A",       "DAC1 B",       "XP_DAC1A",      "XM_DAC1B"  },            \
+  { "HV I +",       "HV I -",       "XP_HVIPLUS",    "XM_HVIMINUS"  },         \
+  { "+HV src",      "-HV src",      "XP_300VPLUS",   "XM_300VMINUS"  },        \
+  { "HV Out +",     "HV Out -",     "XP_HVUPLUS",    "XM_HVUMINUS"  },         \
+  { "HV Ireg +",    "HV Ireg -",    "XP_IREGPLUS",   "XM_IREGMINUS"  },        \
+  { "+5V A",        "+5V Ref",      "XP_5VANALOG",   "XM_5VREF"  },            \
+  { "+2.5V",        "+2.5V",        "XP_2V5REF",     "XM_2V5REF"  },           \
+  { "AGND",         "AGND",         "XP_GND",        "XM_GND"  } }
+
+char ampl204[4][2][32] = {           \ // Names of amplifications for PGA204
+  { "x1",    "XA_1" },               \
+  { "x10",   "XA_10" },              \
+  { "x100",  "XA_100" },             \
+  { "x1000", "XA_1000" } }
+
+char ampl207[4][2][32] = {           \ // Names of amplifications for PGA207
+  { "x1",    "XA_1" },               \
+  { "x2",    "XA_2" },               \
+  { "x5",    "XA_5" },               \
+  { "x10",   "XA_10" } }
+
+char rname[4][32] = {                \ // Names of ground-to-short resistors
+  "R104 - 1 MOhm",                   \
+  "R105 - 100 Ohm",                  \
+  "C106 - 10 nF",                    \
+  "R107 - 1 KOhm" }
+
+char rnamebit[4][32] = {             \ // Names of ground-to-short resistor bits
+  "M_1MSHORT",                       \ // Connect SHORT over R1 (1 M) to AGND
+  "M_R100SHORT",                     \ // Connect SHORT over R2 (100 R) to AGND
+  "M_C10NSHORT",                     \ // Connect SHORT over C3 (10 nF) to AGND
+  "M_1KSHORT" }                        // Connect SHORT over R4 (1 k) to AGND
+
+char hvtypename[2][32] = {           \ // Names of HV sources
+  "positive", "negative" }
+
+char form[8][32] = {                 \ // Names of output wave forms
+  "DC", "Sine", "Rectangle", "Saw",  \
+  "DC+sin", "Unipolar Rectangle", "Unipolar Saw", "Limited DC" }
+char shortform[8][8] = {             \ // Short names of output wave forms
+  "DC", "Sine", "R", "W", "D+s", "+R", "+W", "Lim"  }
+
+char freq[10][32] = {                \ // Names of output frequencies
+  ".25", ".5", "1", "2", "4", "8", "16", "32", "64", "128" }
+
+int busorder[4] = {                  \ // Bus disorder
+  0, 2, 1, 3 }
+
+int disorder[4] = {                  \ // Swap least significant bits
+  0, 2, 1, 3 }
+
+int filterbits[8][3] = {             \ // ADC filter bits, ranges & frequencies
+  { 0x1800,  0,  0   },              \ // Bypass
+  { 0x1000,  0,  0   },              \ // Bypass
+  { 0x0800,  0,  0   },              \ // Bypass
+  { 0x0000,  0,  0   },              \ // Bypass
+  { 0x1C00,  1,  500 },              \ // Lowest level (15 pF, 500 kHz)
+  { 0x1400,  2,  100 },              \ // Middle level (62 pF, 100 kHz)
+  { 0x0C00,  3,  20  },              \ // High level (345 pF, 20 kHz )
+  { 0x0400,  3,  18  } }               // 392 pF, 18 kHz - similar to 345 pF
+
+// Creates measurement card window.
+function int Createmeas()
+  int i,j,n,x,x0,x1,x2,y,dx,v
+  char s[256]
+  draw window=hmeas color=BLACK
+  // Create primary/secondary card buttons.
+  hcard[0]=control BUTTON
+    window=hmeas
+    position=5,SRCY-2*HEADDY-8,36,HEADDY
+    name="MA"
+    help="切换到主要测量卡"
+    color=YELLOW
+    bkcolor=LIGHTRED
+    font=MEDIUMFONT
+  endc
+  hcard[1]=control BUTTON
+    window=hmeas
+    position=5,SRCY-HEADDY-6,36,HEADDY
+    name="SL"
+    help="切换到从属测量卡"
+    color=DARKGRAY
+    bkcolor=LIGHTGRAY
+    font=MEDIUMFONT
+  endc
+  // Create I/U relays.
+  hrelay[24]=control BUTTON            // IU_MINUS relay
+    window=hmeas
+    position=IUX0+2,ABUSY+RLDY-RLDY/2+2,RLDX-2,RLDY-2
+    help="K87，将I / U转换器连接到MINUS模拟总线((bit M_IUMINUS)"
+    bkcolor=LIGHTGRAY
+  endc
+  hrelay[25]=control BUTTON            // IU_PLUS relay
+    window=hmeas
+    position=IUX0+RLDY+2,ABUSY+2*RLDY-RLDY/2+2,RLDX-2,RLDY-2
+    help="K86，将I / U转换器连接到PLUS模拟总线 (bit M_IUPLUS)"
+    bkcolor=LIGHTGRAY
+  endc
+  // Draw I/U wires and converter.
+  y=ABUSY+RLDY*3+12
+  x1=IUX0+RLDX/2
+  draw at x1,ABUSY+RLDY to x1,y
+  draw at x1+1,ABUSY+RLDY to x1+1,y
+  x2=IUX0+RLDX+RLDX/2
+  draw at x2,ABUSY+2*RLDY to x2,y
+  draw at x2+1,ABUSY+2*RLDY to x2+1,y
+  draw at x1,y to x2+2,y
+  draw at x1,y+1 to x2+2,y+1
+  x=(x1+x2)/2
+  draw at x,y to x,y+10
+  draw at x+1,y to x+1,y+10
+  draw color=BLACK bkcolor=LIGHTYELLOW mode=M_CENTERED font=SMALLFONT
+  draw at x-15,y+10 fillrect x+17,y+40
+  draw at x+2,y+31 text="I - U"
+  // Draw source box.
+  draw color=BLACK bkcolor=LIGHTYELLOW mode=M_CENTERED font=SMALLFONT
+  draw at SRCLX-3,SRCY fillrect SRCX+6*SRCDX+10,COMMY0+COMMDY
+  draw at SRCX-1,SRCY+1 to SRCX-1,SRCY+17
+  draw at SRCX+SRCDX-1,SRCY+1 to SRCX+SRCDX-1,SRCY+17
+  draw at SRCX+SRCDX*2-1,SRCY+1 to SRCX+SRCDX*2-1,SRCY+17
+  draw at SRCX+SRCDX*3-1,SRCY+1 to SRCX+SRCDX*3-1,SRCY+17
+  draw at SRCX+SRCDX*4-1,SRCY+1 to SRCX+SRCDX*4-1,SRCY+17
+  draw at SRCX+SRCDX*5-1,SRCY+1 to SRCX+SRCDX*5-1,SRCY+17
+  draw at SRCLX+24,SRCY+15 text="DAC"
+  draw at SRCX+SRCDX/2,SRCY+15 text="2.5 V"
+  draw at SRCX+SRCDX*2+SRCDX/2,SRCY+15 text="100 mA"
+  draw at SRCX+SRCDX*3+SRCDX/2,SRCY+15 text="2.5 mA"
+  draw at SRCX+SRCDX*4+SRCDX/2,SRCY+15 text="10 V"
+  // Create 300 mA button.
+  h300enable=control BUTTON
+    window=hmeas
+    position=SRCX+SRCDX-1,SRCY,SRCDX+1,18
+    text="300mA"
+    help="启用或禁用300 mA，在较旧的测量卡上不起作用"
+    font=SMALLFONT
+    bkcolor=WHITEBLUE
+    color=BLACK
+  endc
+  // Create source controls.
+  hsource=control EDIT                 // Main DAC
+    window=hmeas
+    position=SRCLX-3,SRCY+17,50,20
+    help="写入主DAC的值，带符号的位"
+  endc
+  hudac=control TEXT
+    window=hmeas
+    position=SRCX-1,SRCY+17,SRCDX+1,20
+    help="实际低功耗精密DAC电压"
+    font=SMALLFONT
+    bkcolor=PINK
+    mode=M_BORDER|M_CENTERED
+  endc
+  hi300=control TEXT
+    window=hmeas
+    position=SRCX+SRCDX-1,SRCY+17,SRCDX+1,20
+    help="实际电流设置为300mA输出"
+    font=SMALLFONT
+    bkcolor=PINK
+    mode=M_BORDER|M_CENTERED
+  endc
+  hihigh=control TEXT
+    window=hmeas
+    position=SRCX+2*SRCDX-1,SRCY+17,SRCDX+1,20
+    help="实际电流设置为100mA输出"
+    font=SMALLFONT
+    bkcolor=PINK
+    mode=M_BORDER|M_CENTERED
+  endc
+  hilow=control TEXT
+    window=hmeas
+    position=SRCX+3*SRCDX-1,SRCY+17,SRCDX+1,20
+    help="实际电流设置为2.5mA输出"
+    font=SMALLFONT
+    bkcolor=PINK
+    mode=M_BORDER|M_CENTERED
+  endc
+  hu=control TEXT
+    window=hmeas
+    position=SRCX+4*SRCDX-1,SRCY+17,SRCDX+1,20
+    help="实际电压"
+    font=SMALLFONT
+    bkcolor=PINK
+    mode=M_BORDER|M_CENTERED
+  endc
+  hsrcscr=control HSCROLL              // Also main DAC
+    window=hmeas
+    position=SRCLX,SRCY+41,SRCX+5*SRCDX-SRCLX-21,20
+    limits=-250,250
+    help="写入主DAC的值"
+  endc
+  hsrctoggle=control BUTTON            // Toggle main DAC
+    window=hmeas
+    position=SRCX+5*SRCDX-18,SRCY+41,18,20
+    help="在0和指定值之间切换DAC，选通手动osciwhen on"
+    bkcolor=LIGHTGRAY
+  endc
+  draw mode=M_LEFT font=SMALLFONT
+  draw at SRCLX,SRCY+82 text="I neg"
+  draw at SRCLX,SRCY+100 text="I pos"
+  draw at SRCLX,SRCY+118 text="I lim"
+  draw at SRCLX,SRCY+136 text="Ulim"
+  for i=0,i<2,i++ do
+    hdacineg[i]=control EDIT           // Negative thresholds for I source
+      window=hmeas
+      position=SRCLX+25+i*38,SRCY+67,36,17
+      help=format("对负电流传感器设置阈值%i",i)
+      bkcolor=(i==0?WHITEGREEN:WHITEMAGENTA)
+      font=SMALLFONT
+    endc
+    hdacipos[i]=control EDIT           // Positive thresholds for I source
+      window=hmeas
+      position=SRCLX+25+i*38,SRCY+85,36,17
+      help=format("对正电流传感器设置阈值%i",i)
+      bkcolor=(i==0?WHITEGREEN:WHITEMAGENTA)
+      font=SMALLFONT
+    endc
+    hdacilim[i]=control EDIT           // I limits for U source
+      window=hmeas
+      position=SRCLX+25+i*38,SRCY+103,36,17
+      help=format("为电压源设置电流限制%i",i)
+      bkcolor=(i==0?WHITEGREEN:WHITEMAGENTA)
+      font=SMALLFONT
+    endc
+    hdacuhyst[i]=control EDIT          // Hysteresises for U threshold
+      window=hmeas
+      position=SRCLX+25+i*38,SRCY+121,36,17
+      help=format("设置迟滞%i用于电压源中的电流极限检测",i)
+      bkcolor=(i==0?WHITEGREEN:WHITEMAGENTA)
+      font=SMALLFONT
+    endc
+    hsetall[i]=control BUTTON
+      window=hmeas
+      position=SRCLX+121,SRCY+83+i*22,20,17
+      name=format("%i>",i)
+      help=format("从设置%i一次设置所有限制",i)
+      bkcolor=LIGHTGRAY
+      font=SMALLFONT
+    endc
+  enddo
+  htogineg=control BUTTON              // Toggle negative threshold
+    window=hmeas
+    position=SRCLX+101,SRCY+67,17,17
+    help="负电流传感器的切换阈值"
+    bkcolor=LIGHTGRAY
+    font=SMALLFONT
+  endc
+  htogipos=control BUTTON              // Toggle positive threshold
+    window=hmeas
+    position=SRCLX+101,SRCY+85,17,17
+    help="正电流传感器的切换阈值"
+    bkcolor=LIGHTGRAY
+    font=SMALLFONT
+  endc
+  htogilim=control BUTTON              // Toggle I limit
+    window=hmeas
+    position=SRCLX+101,SRCY+103,17,17
+    help="切换电压源的电流限制"
+    bkcolor=LIGHTGRAY
+    font=SMALLFONT
+  endc
+  htoguhyst=control BUTTON             // Toggle hysteresis
+    window=hmeas
+    position=SRCLX+101,SRCY+121,17,17
+    help="在电压源中切换迟滞以进行电流极限检测"
+    bkcolor=LIGHTGRAY
+    font=SMALLFONT
+  endc
+  hlimineg=control GRAPH               // Negative I limit indicator
+    window=hmeas
+    position=SRCLX+149,SRCY+67,17,17
+    help="指示是否达到负电压限制"
+    color=LIGHTYELLOW
+    bkcolor=LIGHTYELLOW
+    size=100
+  endc
+  draw window=hlimineg color=BLACK bkcolor=LIGHTYELLOW clear
+  draw at 8,8 fillellipse 15,15
+  hlimipos=control GRAPH               // Positive I limit indicator
+    window=hmeas
+    position=SRCLX+149,SRCY+85,17,17
+    help="指示是否达到正电压限制"
+    color=LIGHTYELLOW
+    bkcolor=LIGHTYELLOW
+    size=100
+  endc
+  draw window=hlimipos color=BLACK bkcolor=LIGHTYELLOW clear
+  draw at 8,8 fillellipse 15,15
+  hlimupos=control GRAPH               // Positive U limit indicator
+    window=hmeas
+    position=SRCLX+149,SRCY+103,17,17
+    help="指示是否达到正电流限制"
+    color=LIGHTYELLOW
+    bkcolor=LIGHTYELLOW
+    size=100
+  endc
+  draw window=hlimupos color=BLACK bkcolor=LIGHTYELLOW clear
+  draw at 8,8 fillellipse 15,15
+  hlimuneg=control GRAPH               // Negative U limit indicator
+    window=hmeas
+    position=SRCLX+149,SRCY+121,17,17
+    help="指示是否达到负电流限制"
+    color=LIGHTYELLOW
+    bkcolor=LIGHTYELLOW
+    size=100
+  endc
+  draw window=hlimuneg color=BLACK bkcolor=LIGHTYELLOW clear
+  draw at 8,8 fillellipse 15,15
+  hactineg=control TEXT                // Negative threshold for I source, bits
+    window=hmeas
+    position=SRCLX+174,SRCY+67,36,17
+    help="负电流传感器的实际阈值，位"
+    font=SMALLFONT
+    bkcolor=PINK
+    mode=M_BORDER
+  endc
+  hactinegv=control TEXT               // Negative threshold for I source, volts
+    window=hmeas
+    position=SRCLX+209,SRCY+67,38,17
+    help="负电流传感器的实际阈值，电压"
+    font=SMALLFONT
+    bkcolor=PINK
+    mode=M_BORDER
+  endc
+  hactipos=control TEXT                // Positive threshold for I source, bits
+    window=hmeas
+    position=SRCLX+174,SRCY+85,36,17
+    help="正电流传感器的实际阈值，位"
+    font=SMALLFONT
+    bkcolor=PINK
+    mode=M_BORDER
+  endc
+  hactiposv=control TEXT               // Positive threshold for I source, volts
+    window=hmeas
+    position=SRCLX+209,SRCY+85,38,17
+    help="正电流传感器的实际阈值，电压"
+    font=SMALLFONT
+    bkcolor=PINK
+    mode=M_BORDER
+  endc
+  hactilim=control TEXT                // I limit for U source, bits
+    window=hmeas
+    position=SRCLX+174,SRCY+103,36,17
+    help="电压源电流限制的实际阈值，位"
+    font=SMALLFONT
+    bkcolor=PINK
+    mode=M_BORDER
+  endc
+  hactilimi=control TEXT               // I limit for U source, amperes
+    window=hmeas
+    position=SRCLX+209,SRCY+103,38,17
+    help="电压源电流限制的实际阈值，安培(不精确)"
+    font=SMALLFONT
+    bkcolor=PINK
+    mode=M_BORDER
+  endc
+  hactuhyst=control TEXT               // Actual hysteresis for U threshold
+    window=hmeas
+    position=SRCLX+174,SRCY+121,36,17
+    help="电压磁滞的实际阈值"
+    font=SMALLFONT
+    bkcolor=PINK
+    mode=M_BORDER
+  endc
+  // Create signal form buttons.
+  draw window=hmeas color=BLACK font=SMALLFONT
+  draw at SRCX+5*SRCDX+13,SRCY+14 text="Form"
+  for i=0,i<8,i++ do
+    x=SRCX+5*SRCDX+3+(i<5?0:SRCDX/2+1)
+    dx=(i==0 || i==1?SRCDX+3:SRCDX/2+2)
+    y=SRCY+14+(i<5?i:i-3)*13
+    hform[i]=control BUTTON
+      window=hmeas
+      position=x,y,dx,14
+      name=shortform[i]
+      help=format("将输出波形设置为%s",form[i])
+      font=SMALLFONT
+      bkcolor=LIGHTGRAY
+    endc
+  enddo
+  // Create frequency buttons.
+  draw at SRCX+5*SRCDX+3,SRCY+94 text="Freq, kHz"
+  v=1
+  for i=0,i<10,i++ do
+    n=sprintf(s,"Press to set output frequency to %s kHz",freq[i])
+    sprintf(s+n,", or limit DC growth to %i bits/us",v)
+    hfreq[i]=control BUTTON
+      window=hmeas
+      position=SRCX+5*SRCDX+3+(i<5?0:21),SRCY+94+(i%5)*13,22,14
+      name=freq[i]
+      help=s
+      font=SMALLFONT
+      bkcolor=LIGHTGRAY
+    endc
+    v=v*2
+  enddo
+  // Create AC offset scroll.
+  hacoffset=control TEXT
+    window=hmeas
+    position=SRCLX,SRCY+142,SRCDX+2,18
+    help="波形的DAC偏移或DC + sin的调制，百分比"
+    font=SMALLFONT
+    mode=M_BORDER
+  endc
+  hacoffscr=control HSCROLL
+    window=hmeas
+    position=SRCLX+SRCDX+5,SRCY+142,SRCDX*4+8,18
+    limits=0,8191
+    help="波形的DAC偏移或DC + sin的调制"
+  endc
+  hacofzero=control BUTTON
+    window=hmeas
+    position=SRCX+6*SRCDX-71,SRCY+142,31,18
+    text="Zero"
+    help="零位DAC补偿或调制"
+    font=SMALLFONT
+  endc
+  // Create source relays.
+  hrelay[4]=control BUTTON             // DAC voltage relay
+    window=hmeas
+    position=SRCX+SRCDX/2-RLDX/2+2,ABUSY+3*RLDY-RLDY/2+2,RLDX-2,RLDY-2
+    help="K107，将DAC 2.5 V输出连接到GND总线(bit M_-DACGND，可选"
+    bkcolor=LIGHTGRAY
+  endc
+  hrelay[26]=control BUTTON            // I_SOURCE relay
+    window=hmeas
+    position=SRCX+2*SRCDX+SRCDX/2-RLDX/2+2,ABUSY-RLDY/2+2,RLDX-2,RLDY-2
+    help="K85，将电流源连接到U/I模拟总线(bit M_I)"
+    bkcolor=LIGHTGRAY
+  endc
+  hrelay[7]=control BUTTON             // U_SRCR100 relay
+    window=hmeas
+    position=SRCX+4*SRCDX+SRCDX/2-RLDX-RLDX/2+2,ABUSY-RLDY/2+2,RLDX-2,RLDY-2
+    help="K104，通过100欧姆电阻器(bit M_U100R)将电压源连接到U/I总线"
+    bkcolor=LIGHTGRAY
+  endc
+  hrelay[27]=control BUTTON            // U_SOURCE relay
+    window=hmeas
+    position=SRCX+4*SRCDX+SRCDX/2-RLDX/2+RLDX+2,ABUSY-RLDY/2+2,RLDX-2,RLDY-2
+    help="K84，将电压源直接连接到U/I模拟总线(bit M_U)"
+    bkcolor=LIGHTGRAY
+  endc
+  // Draw source wires.
+  draw window=hmeas color=BLACK
+  x=SRCX+SRCDX/2
+  y=ABUSY+3*RLDY
+  draw at x,y to x,SRCY                // DAC voltage wire
+  draw at x+1,y to x+1,SRCY
+  x=SRCX+2*SRCDX+SRCDX/2
+  x0=x-SRCDX
+  x1=x
+  x2=x+SRCDX
+  draw at x,ABUSY to x,SRCY-40         // Common I wire
+  draw at x+1,ABUSY to x+1,SRCY-40
+  draw at x-1,SRCY-41 rect x+3,SRCY-37 // Junction
+  draw at x0,SRCY-40 to x2+2,SRCY-40
+  draw at x0,SRCY-39 to x2+2,SRCY-39
+  draw at x0,SRCY-40 to x0,SRCY        // Individual I wires
+  draw at x0+1,SRCY-40 to x0+1,SRCY
+  draw at x1,SRCY-40 to x1,SRCY
+  draw at x1+1,SRCY-40 to x1+1,SRCY
+  draw at x2,SRCY-40 to x2,SRCY
+  draw at x2+1,SRCY-40 to x2+1,SRCY
+  x=SRCX+4*SRCDX+SRCDX/2-RLDX          // U 100 Ohm, U direct and resistor
+  y=ABUSY+RLDY*3+50
+  draw at x,ABUSY to x,y+1 to x+2*RLDX+1,y+1 to x+2*RLDX+1,ABUSY
+  draw at x+1,ABUSY to x+1,y to x+2*RLDX,y to x+2*RLDX,ABUSY
+  draw at x-4,ABUSY+RLDX*3+20 fillrect x+6,ABUSY+RLDX*3+42
+  draw at x+RLDX-1,y-1 rect x+RLDX+3,y+3
+  draw at x+RLDX,y to x+RLDX,SRCY
+  draw at x+RLDX+1,y to x+RLDX+1,SRCY
+  // Create I selection relays.
+  hrelay[6]=control BUTTON
+    window=hmeas
+    position=x0-RLDX/2+2,SRCY-24,RLDX-2,RLDY-2
+    help="K105，选择可选的300毫安电流输出 (bit M_I300MA)"
+    bkcolor=LIGHTGRAY
+  endc
+  hrelay[1]=control BUTTON             // 100 mA relay
+    window=hmeas
+    position=x1-RLDX/2+2,SRCY-24,RLDX-2,RLDY-2
+    help="K110，选择100毫安电流输出(bit M_HIGH)"
+    bkcolor=LIGHTGRAY
+  endc
+  hrelay[0]=control BUTTON             // 2.5 mA relay
+    window=hmeas
+    position=x2-RLDX/2+2,SRCY-24,RLDX-2,RLDY-2
+    help="K111，选择2.5 mA电流输出(bit M_LOW)"
+    bkcolor=LIGHTGRAY
+  endc
+  // Create HV relays.
+  x=HVX0
+  hrelay[23]=control BUTTON            // HV_M relay
+    window=hmeas
+    position=x+HVSRCDX+2,ABUSY+RLDY-RLDY/2+2,RLDX-2,RLDY-2
+    help="K88，将HV_M与MINUS模拟总线连接(bit M_HVMINUS)"
+    bkcolor=LIGHTGRAY
+  endc
+  hrelay[22]=control BUTTON            // HV_P relay
+    window=hmeas
+    position=x+2,ABUSY+2*RLDY-RLDY/2+2,RLDX-2,RLDY-2
+    help="K89，将HV_P与PLUS模拟总线连接(bit M_HVPLUS)"
+    bkcolor=LIGHTGRAY
+  endc
+  hrelay[21]=control BUTTON            // R 100K to MINUS relay
+    window=hmeas
+    position=x+HVSRCDX-RLDX+2  ,ABUSY+RLDY-RLDY/2+2,RLDX-2,RLDY-2
+    help="K90，将R102 100 K与MINUS模拟总线连接(bit M_100KMINUS)"
+    bkcolor=LIGHTGRAY
+  endc
+  hrelay[20]=control BUTTON            // R 100K to PLUS relay
+    window=hmeas
+    position=x+RLDX+2,ABUSY+2*RLDY-RLDY/2+2,RLDX-2,RLDY-2
+    help="K91，将R103 100K与PLUS模拟总线连接(bit M_100KPLUS)"
+    bkcolor=LIGHTGRAY
+  endc
+  // Draw HV+ wires, 1 K I sense resistor and amplifier.
+  draw color=BLACK
+  x=HVX0+RLDX/2
+  x1=x+HVSRCDX*2+9
+  draw bkcolor=WHITE
+  draw at x,ABUSY+2*RLDY to x,HVSRCY
+  draw at x+1,ABUSY+2*RLDY to x+1,HVSRCY
+  draw at x-4,HVSRCY-30 fillrect x+6,HVSRCY-8
+  draw at x+9,HVSRCY-30 to x+9,HVSRCY-9 to x+19,HVSRCY-19
+  draw to x+19,HVSRCY-20 to x+9,HVSRCY-30
+  draw at x+20,HVSRCY-20 to x1+1,HVSRCY-20 to x1+1,HVSRCY
+  draw at x+20,HVSRCY-19 to x1,HVSRCY-19 to x1,HVSRCY
+  // Draw HV- wires, 1 K I sense resistor and amplifier.
+  x=HVX0+HVSRCDX+RLDX/2
+  x1=x1+HVSRCDX/2+4
+  draw at x,ABUSY+RLDY to x,HVSRCY
+  draw at x+1,ABUSY+RLDY to x+1,HVSRCY
+  draw at x-4,HVSRCY-50 fillrect x+6,HVSRCY-28
+  draw at x+9,HVSRCY-50 to x+9,HVSRCY-29 to x+19,HVSRCY-39
+  draw to x+19,HVSRCY-40 to x+9,HVSRCY-50
+  draw at x+20,HVSRCY-40 to x1+1,HVSRCY-40 to x1+1,HVSRCY
+  draw at x+20,HVSRCY-39 to x1,HVSRCY-39 to x1,HVSRCY
+  // Draw wires and 100 K resistors.
+  y=ABUSY+RLDY*3+50
+  x=HVX0+RLDX+RLDX/2
+  draw at x,ABUSY+2*RLDY to x,y
+  draw at x+1,ABUSY+2*RLDY to x+1,y
+  draw at x-4,ABUSY+RLDX*3+20 fillrect x+6,ABUSY+RLDX*3+42
+  x=HVX0+HVSRCDX+RLDX/2-RLDX
+  draw at x,ABUSY+RLDY to x,y
+  draw at x+1,ABUSY+RLDY to x+1,y
+  draw at x-4,ABUSY+RLDX*3+20 fillrect x+6,ABUSY+RLDX*3+42
+  // Draw R-R connection and ground.
+  x1=HVX0+RLDX+RLDX/2
+  x2=HVX0+HVSRCDX+RLDX/2-RLDX+2
+  x=(x1+x2)/2-1
+  draw at x1,y to x2,y
+  draw at x1,y+1 to x2,y+1
+  draw at x,y to x,y+8
+  draw at x+1,y to x+1,y+8
+  draw at x-5,y+8 to x+7,y+8
+  draw at x-5,y+9 to x+7,y+9
+  // Draw HV source.
+  draw color=BLACK bkcolor=LIGHTYELLOW font=MEDIUMFONT mode=M_CENTERED
+  draw at HVX0-3,HVSRCY fillrect HVX0+HVSRCDX*2+3,COMMY0+COMMDY
+  // Create card type selector.
+  hvcardtype=control TEXT
+    window=hmeas
+    position=HVX0+1,HVSRCY+4,HVSRCDX*2-RLDX-5,18
+    text="HV500"
+    bkcolor=LIGHTYELLOW
+  endc
+  // Create HV switch.
+  hvswitch=control BUTTON
+    window=hmeas
+    position=HVX0+HVSRCDX*2-RLDX+1,HVSRCY+4,RLDX-2,RLDY-2
+    help="高压电源开关"
+    bkcolor=LIGHTGRAY
+  endc
+  // Create HV source controls.
+  for i=0,i<2,i++ do
+    hvcurrent[i][0]=control BUTTON
+      window=hmeas
+      position=HVX0+HVSRCDX*i+1,HVSRCY+54,HVSRCDX-2,18
+      name="1 mA"
+      help=format("按下可以为%s HV源设置1 mA极限",hvtypename[i])
+      font=SMALLFONT
+      bkcolor=LIGHTGRAY
+    endc
+    hvcurrent[i][1]=control BUTTON
+      window=hmeas
+      position=HVX0+HVSRCDX*i+1,HVSRCY+72,HVSRCDX-2,18
+      name="10 mA"
+      help=format("按下为%s HV源设置10 mA极限",hvtypename[i])
+      font=SMALLFONT
+      bkcolor=LIGHTGRAY
+    endc
+  enddo
+  hvvoltage=control COMBOEDIT
+    window=hmeas
+    position=HVX0+1,HVSRCY+26,HVSRCDX-2,120
+    name="A5measHV"
+    help="高压电源的输出电压"
+  endc
+  hvactual=control TEXT
+    window=hmeas
+    position=HVX0+HVSRCDX+1,HVSRCY+26,HVSRCDX-20,17
+    help="高压电源的实际电压"
+    bkcolor=PINK
+    font=SMALLFONT
+    mode=M_BORDER|M_CENTERED
+  endc
+  hvtoggle=control BUTTON
+    window=hmeas
+    position=HVX0+HVSRCDX*2-18,HVSRCY+26,17,17
+    help="在0和指定值之间切换高压"
+    bkcolor=LIGHTGRAY
+  endc
+  // Draw HV amplifier.
+  draw color=BLACK bkcolor=LIGHTYELLOW font=MEDIUMFONT mode=M_CENTERED
+  draw at HVX0+HVSRCDX*2+6,HVSRCY fillrect HVX0+HVSRCDX*3+13,COMMY0+COMMDY
+  draw at HVX0+HVSRCDX*2+HVSRCDX/4+2,HVSRCY+22 color=RED text="+"
+  draw at HVX0+HVSRCDX*2+(HVSRCDX*3)/4+6,HVSRCY+20 color=BLUE text="-"
+  // Create HV amplifier controls.
+  x=HVX0+HVSRCDX*2+10
+  for j=0,j<4,j++ do
+    y=HVSRCY+26+16*j
+    hvampl[j]=control BUTTON
+      window=hmeas
+      position=x,y,HVSRCDX-1,16
+      name=ampl204[j][0]
+      help=format("设置HV放大器的%s放大率",           \
+        ampl204[j][0])
+      font=SMALLFONT
+      bkcolor=LIGHTGRAY
+    endc
+  enddo
+  // Draw analog bus and create bus relays.
+  draw color=BLACK font=SMALLFONT mode=M_LEFT
+  for i=0,i<4,i++ do
+    j=busorder[i]
+    y=ABUSY+i*RLDY
+    draw at BUSX0,y to COMMX0,y
+    draw at BUSX0,y+1 to COMMX0,y+1
+    draw at BUSX0,y+1 text=busname[i]
+    hrelay[31-j]=control BUTTON
+      window=hmeas
+      position=COMMX0-RLDX-5,y-RLDY/2+2,RLDX-2,RLDY-2
+      help=format("K%i，将换向器连接到%s总线(bit %s)",              \
+        80+j,busname[i],commbit[i])
+      bkcolor=LIGHTGRAY
+    endc
+  enddo
+  // Create unprotection button.
+  hunprot=control BUTTON
+    window=hmeas
+    position=COMMX0-53,SHORTY+117,48,RLDY+2
+    name="安全"
+    help="按下允许危险的继电器组合。请小心!"
+    bkcolor=LIGHTGRAY
+    font=SMALLFONT
+  endc
+  // Create reswitching mode button.
+  hresw=control BUTTON
+    window=hmeas
+    position=COMMX0-53,SHORTY+142,48,RLDY+2
+    name="Resw A"
+    help="在全部切换(A)和仅改变继电器(C)之间切换"
+    bkcolor=LIGHTGRAY
+    font=SMALLFONT
+  endc
+  // Draw shortcut between U/I and PLUS.
+  x=SRCX+SRCDX/2
+  y=ABUSY
+  y=ABUSY
+  hrelay[2]=control BUTTON
+    window=hmeas
+    position=x-RLDX/2+2,y-RLDY/2+2,RLDX-2,RLDY-2
+    help="K109， U/I 和PLUS总线短路(bit M_UIPLUS)"
+    bkcolor=LIGHTGRAY
+  endc
+  draw at x,y to x,ABUSY+2*RLDY
+  draw at x+1,y to x+1,ABUSY+2*RLDY
+  draw at x-1,ABUSY+2*RLDY-1 rect x+3,ABUSY+2*RLDY+3
+  // Create ground, short and calibration relays and draw wires and resistors.
+  for i=0,i<4,i++ do
+    j=busorder[i]
+    x=COMMX0-HEADDX*2+RLDX*i-12
+    y=ABUSY+i*RLDY
+    hrelay[19-j]=control BUTTON        // Short_GND relays
+      window=hmeas
+      position=x-RLDY/2+2,y-RLDY/2+2,RLDX-2,RLDY-2
+      help=format("K%i，将%s总线接地(bit %s)",                 \
+        92+j,busname[i],gndbusbit[i])
+      bkcolor=LIGHTGRAY
+    endc
+    draw at x,y to x,GNDY              // Wires to ground
+    draw at x+1,y to x+1,GNDY
+    if i>0 then
+      draw at x-1,GNDY-1               // Connections to ground
+      draw rect x+3,GNDY+3
+    endif
+    x=x+RLDX*4
+    hrelay[15-j]=control BUTTON        // Short relays
+      window=hmeas
+      position=x-RLDY/2+2,y-RLDY/2+2,RLDX-2,RLDY-2
+      help=format("K%i, 将 %s 总线连接到短接电阻 (bit %s)",                  \
+        96+j,busname[i],shortbusbit[i])
+      bkcolor=LIGHTGRAY
+    endc
+    draw at x,y to x,GNDY              // Wires to short and ground
+    draw at x+1,y to x+1,GNDY
+    draw at x-1,SHORTY-1               // Connections to short
+    draw rect x+3,SHORTY+3
+    draw at x-1,GNDY-1                 // Connections to ground
+    draw rect x+3,GNDY+3
+    hrelay[11-i]=control BUTTON        // Resistor relays
+      window=hmeas
+      position=x-RLDY/2+2,SHORTY+12,RLDX-2,RLDY-2
+      help=format("K%i, 短接到 %s (bit %s)",100+i,                  \
+        rname[i],rnamebit[i])
+      bkcolor=LIGHTGRAY
+    endc
+    if i==2 then
+      draw bkcolor=BLACK               // Condensator 10 nF
+      draw at x-5,GNDY-16 fillrect x+7,GNDY-19
+      draw at x-5,GNDY-20 fillrect x+7,GNDY-23
+      draw color=WHITE
+      draw at x-5,GNDY-20 to x+7,GNDY-20
+      draw color=BLACK
+    else
+      draw bkcolor=WHITE               // Resistors
+      draw at x-4,GNDY-30 fillrect x+6,GNDY-8
+    endif
+  enddo
+  // Create 1 nF relay and draw capacitor.
+  x=COMMX0-HEADDX*2+RLDX*8-12
+  y=ABUSY+2*RLDY
+  hrelay[5]=control BUTTON             // K106, connects 1 nF to PLUS bus
+    window=hmeas
+    position=x-RLDY/2+2,y-RLDY/2+2,RLDX-2,RLDY-2
+    help="K106,连接PLUS总线至1 nF的电容 (bit M_C1NPLUS)"
+    bkcolor=LIGHTGRAY
+  endc
+  draw at x,y to x,GNDY                // Wire to ground
+  draw at x+1,y to x+1,GNDY
+  draw at x-1,GNDY-1                   // Connections to ground
+  draw rect x+3,GNDY+3
+  draw bkcolor=BLACK                   // Condensator 1 nF
+  draw at x-5,GNDY-16 fillrect x+7,GNDY-19
+  draw at x-5,GNDY-20 fillrect x+7,GNDY-23
+  draw color=WHITE
+  draw at x-5,GNDY-20 to x+7,GNDY-20
+  draw color=BLACK
+  // Draw shortcut and ground.
+  x=COMMX0-HEADDX*2-12                 // Ground wire to commutator
+  draw at x,GNDY to x+RLDX*8,GNDY
+  draw at x,GNDY+1 to x+RLDX*8,GNDY+1
+  x=x+RLDX*4                           // Shortcut wire
+  draw at x,SHORTY to x+RLDX*3,SHORTY
+  draw at x,SHORTY+1 to x+RLDX*3,SHORTY+1
+  x=x+RLDX*4
+  draw at x,GNDY to x,GNDY+8
+  draw at x+1,GNDY to x+1,GNDY+8
+  draw at x-5,GNDY+8 to x+7,GNDY+8
+  draw at x-5,GNDY+9 to x+7,GNDY+9
+  // Draw commutator.
+  draw color=BLACK bkcolor=LIGHTYELLOW
+  draw at COMMX0,COMMY0 fillrect COMMX0+COMMDX,COMMY0+COMMDY
+  // Create commutator switches.
+  for j=0,j<16,j++ do
+    if j==1 then y=COMMY0+INPDY*2+5    // Swap Bus PLUS and Bus MINUS
+    else if j==2 then y=COMMY0+INPDY+5;
+    else y=COMMY0+INPDY*j+5; endif;
+    for i=0,i<2,i++ do
+      x=COMMX0+(INPDX+5)*i+6
+      hcomm[j,i]=control BUTTON
+        window=hmeas
+        position=x,y,INPDX,INPDY
+        name=commname[j,i]
+        help=format("选择%s在%s上输入(key %s)",                \
+          commname[j,i],i==0?"positive":"negative",commname[j,i+2])
+        font=SMALLFONT
+        bkcolor=LIGHTGRAY
+      endc
+    enddo
+  enddo
+  hcomgnd=control BUTTON
+    window=hmeas
+    position=COMMX0+INPDX-RLDY/2+10,COMMY0+INPDY*16+10,RLDX-2,RLDY-2
+    help="在所选输入和AGND之间切换"
+    bkcolor=LIGHTGRAY
+  endc
+  draw mode=M_CENTERED font=LARGEFONT
+  draw at COMMX0+INPDX/2+6,COMMY0+COMMDY+7 color=RED text="+"
+  draw at COMMX0+INPDX+INPDX/2+12,COMMY0+COMMDY-10 color=BLUE text="_"
+  // Draw connection between commutator and ADC.
+  draw at COMMX0+COMMDX,COMMY0+10 to ADCX0,COMMY0+10
+  draw at COMMX0+COMMDX,COMMY0+11 to ADCX0,COMMY0+11
+  draw at COMMX0+COMMDX,COMMY0+RLDY+10 to ADCX0,COMMY0+RLDY+10
+  draw at COMMX0+COMMDX,COMMY0+RLDY+11 to ADCX0,COMMY0+RLDY+11
+  // Draw ADC.
+  draw color=BLACK bkcolor=LIGHTYELLOW
+  draw at ADCX0,ADCY0 fillrect ADCX0+ADCDX-6,ADCY0+197
+  draw at ADCX0,ADCY0+25 rect ADCX0+ADCDX-6,ADCY0+58
+  hrelay[3]=control BUTTON             // ADC power on relay
+    window=hmeas
+    position=ADCX0+ADCDX-RLDX-9,ADCY0+5,RLDX-2,RLDY-2
+    help="K108，打开ADC电源(bit M_ADCPOWER)"
+    bkcolor=LIGHTGRAY
+  endc
+  // Create ADC. It must not blink.
+  hadc=control GRAPH
+    window=hmeas
+    position=ADCX0+1,ADCY0+26,ADCDX-8,31
+    help="主ADC(转换为有符号电压并采用原始格式) "
+    color=BLACK
+    bkcolor=WHITE
+  endc
+  draw window=hmeas
+/*
+  hadcv=control TEXT
+    color=LIGHTRED
+    bkcolor=WHITE
+    mode=M_CENTERED
+    font=MEDIUMFONT
+  endc
+  hadcb=control TEXT
+    window=hmeas
+    position=ADCX0+1,ADCY0+44,ADCDX-8,13
+    help="主ADC(原始无符号格式)"
+    color=DARKGRAY
+    bkcolor=WHITE
+    mode=M_CENTERED
+    font=SMALLFONT
+  endc
+*/
+  // Create filtering and zeroing buttons.
+  hsmooth=control BUTTON
+    window=hmeas
+    position=ADCX0+5,ADCY0+70,ADCDX/2-8,16
+    name="中值"
+    help="显示最近128个样本的平均ADC读数"
+    bkcolor=LIGHTGRAY
+    font=SMALLFONT
+  endc
+  hsetzero=control BUTTON
+    window=hmeas
+    position=ADCX0+5+ADCDX/2-8,ADCY0+70,ADCDX/2-8,16
+    name="置零"
+    help="按下可将当前值设置为ADC零或查看直接读数"
+    bkcolor=LIGHTGRAY
+    font=SMALLFONT
+  endc
+  draw font=SMALLFONT mode=M_CENTERED
+  draw at ADCX0+ADCDX/2-3,ADCY0+106 text="Filter"
+  for i=0,i<4,i++ do
+    for j=0,j<8,j++ do
+      if filterbits[j][1]==i break
+    enddo
+    if filterbits[j][2]==0 then
+      sprintf(s,"Press to turn off ADC filtering")
+    else
+      sprintf(s,"Press to turn on ADC filtering with cutoff %i kHz",           \
+      filterbits[j][2])
+    endif
+    hfilter[i]=control BUTTON
+      window=hmeas
+      position=ADCX0+5+i*18,ADCY0+107,18,16
+      name=format("%i",i)
+      help=s
+      bkcolor=LIGHTGRAY
+      font=SMALLFONT
+    endc
+  enddo
+  // Create amplification switch.
+  draw at ADCX0+ADCDX/2-3,ADCY0+137 text="Amplification"
+  for i=0,i<4,i++ do
+    hampl[i]=control BUTTON
+      window=hmeas
+      position=ADCX0+5+(ADCDX/2-8)*(i/2),ADCY0+138+16*(i%2),ADCDX/2-8,16
+      name=ampl207[i][0]
+      help=format("按下选择ADC PGA放大%s (key %s)",         \
+        ampl207[i][0],ampl207[i][1])
+      bkcolor=LIGHTGRAY
+      font=SMALLFONT
+    endc
+  enddo
+  // Create oscilloscope call.
+  hosc=control BUTTON
+    window=hmeas
+    position=ADCX0+5,ADCY0+177,ADCDX-16,16
+    name="OSCI"
+    help="调用示波器，可以查看快速ADC数据"
+    bkcolor=LIGHTGRAY
+    font=SMALLFONT
+  endc
+  // Create sample-and-hold adjustment.
+  hshon=control BUTTON
+    window=hmeas
+    position=ADCX0,ADCY0+206,25,17
+    name="SH"
+    help="按下以启用或禁用采样保持"
+    font=SMALLFONT
+  endc
+  hshdelay=control TEXT                // Actual sample-and-hold delay
+    window=hmeas
+    position=ADCX0+29,ADCY0+206,25,17
+    help="实际采样保持延迟，CPU时钟"
+    font=SMALLFONT
+    mode=M_BORDER|M_CENTERED
+  endc
+  hshscroll=control HSCROLL            // Modify sample-and-hold delay
+    window=hmeas
+    position=ADCX0+54,ADCY0+206,28,17
+    help="按下可以更改采样保持延迟"
+    limits=-1,1
+  endc
+  // Create relay acceleration adjustment.
+  hbooston=control BUTTON
+    window=hmeas
+    position=ADCX0,ADCY0+225,25,17
+    name="AC"
+    help="按下以启用或禁用继电助推器"
+    font=SMALLFONT
+  endc
+  hboost=control TEXT                  // Actual relay acceleration time
+    window=hmeas
+    position=ADCX0+29,ADCY0+225,25,17
+    help="实际继电器提升时间，任意单位"
+    font=SMALLFONT
+    mode=M_BORDER|M_CENTERED
+  endc
+  hbooscroll=control HSCROLL           // Modify relay acceleration time
+    window=hmeas
+    position=ADCX0+54,ADCY0+225,28,17
+    help="按下可以更改继电器升压时间"
+    limits=-1,1
+  endc
+  draw at ADCX0,ADCY0+244 color=DARKGRAY rect ADCX0+25,ADCY0+261
+  draw at ADCX0+13,ADCY0+259 font=SMALLFONT color=BLACK mode=M_CENTERED
+  draw text="AD"
+  hadda=control TEXT                   // Actual AD-DA delay
+    window=hmeas
+    position=ADCX0+29,ADCY0+244,25,17
+    help="实际AD-DA延迟，CPU时钟"
+    font=SMALLFONT
+    mode=M_BORDER|M_CENTERED
+  endc
+  haddascroll=control HSCROLL          // Modify AD-DA delay
+    window=hmeas
+    position=ADCX0+54,ADCY0+244,28,17
+    help="按下以更改AD-DA延迟"
+    limits=-1,1
+  endc
+  // Create master reset of measurement card.
+  hzeroadc=control BUTTON
+    window=hmeas
+    position=ADCX0,ADCY0+267,ADCDX-6,19
+    name="重置 MEAS"
+    help="复位测量卡"
+    bkcolor=PINK
+    font=SMALLFONT
+  endc
+  draw show
+end
+
+int rbackorder[4] = {                \ // Order of feedback resistors
+  0, 3, 2, 1 };
+
+int laextorder[4] = {                \ // Order of LATEST extention relays
+  0, 3, 1, 2 };
+
+int areptime[10] = {                 \ // Autorepeat halftime, milliseconds
+  10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000 };
+
+// Main program.
+function int main()
+  int i,j,k,p,q,err,mask,firsttime,nextarep,udac,setoscman
+  int lim1,lim2,lim3,lim4,prevrepactive
+  float r,u,acoffset;
+  char s[1024],buf[1024],key[64]
+  handle hquit
+  out.k111k80=0x00000008               // Default: ADC on
+  if ($int4($EXTLAY+674) & MUX_TYPEMASK)==MUX_TYPE506 then
+    nmodule=($int4($EXTLAY+674) & MUX_MODCOUNT)>>24
+    nmodule=Max(1,Min(nmodule,3))
+    nhead=nmodule*8
+    if nmodule<COMPLIMIT then
+      compact=0
+      maindx=Max(MAINDX,nmodule*(HEADDX*5+5)+210)
+    else
+      compact=1
+      maindx=Max(MAINDX,nmodule*(HEADCX*4+HEADDX+5)+210)
+    endif
+  else
+    nmodule=0
+    nhead=16
+    compact=0
+    maindx=MAINDX
+  endif
+  half=nhead/2
+  hmain=control WINDOW
+    window=NULL
+    position=10,10,maindx,MAINDY
+    name=format("测试卡测试%s",VERSION)
+    help=" "
+    BKCOLOR=GRAY
+  endc
+  hamux=control CHILD
+    window=hmain
+    position=4,4,maindx-8,AMUXDY
+    help=" "
+    mode=M_BORDER
+    color=BLACK
+    bkcolor=WHITE
+    size=16384
+  endc
+  hlatest=control CHILD
+    window=hmain
+    position=4+1000,4,maindx-8,AMUXDY
+    help=" "
+    mode=M_BORDER
+    color=BLACK
+    bkcolor=WHITE
+    size=16384
+  endc
+  hmeas=control CHILD
+    window=hmain
+    position=4,AMUXDY+5,maindx-8,MAINDY-31-AMUXDY
+    help=" "
+    mode=M_BORDER
+    color=BLACK
+    bkcolor=WHITE
+    size=16384
+  endc
+  // Fill window with images and buttons.
+  Createamux()
+  Createlatest()
+  Createmeas()
+  // Create configuration buttons.
+  hsaveconfig=control BUTTON
+    window=hmain
+    position=3,MAINDY-23,100,21
+    name="保存 ->"
+    help="按下，配置按钮保存当前配置"
+    font=SMALLFONT
+    bkcolor=WHITE
+  endc
+  for i=0,i<NCONFIG,i++ do
+    hconfig[i]=control BUTTON
+      window=hmain
+      position=110+30*i+8*(i/4),MAINDY-23,28,21
+      name=format("%i",i+1)
+      help=format("选择配置%i",i+1)
+    endc
+  enddo
+  Sethconfigcolours()
+  hautorepeat=control BUTTON
+    window=hmain
+    position=380,MAINDY-23,70,21
+    name="自动重复"
+    help="按下，然后继电器或配置按钮可以自动切换"
+    font=SMALLFONT
+    bkcolor=WHITE
+  endc
+  hselautorep=control COMBOLIST
+    window=hmain
+    position=453,MAINDY-23,55,220
+    help="选择自动重复周期(全开/关循环)，秒---不精确!"
+    font=SMALLFONT
+  endc
+  add hselautorep text="0.02 s"
+  add hselautorep text="0.05 s"
+  add hselautorep text="0.1 s"
+  add hselautorep text="0.2 s"
+  add hselautorep text="0.5 s"
+  add hselautorep text="1.0 s"
+  add hselautorep text="2.0 s"
+  add hselautorep text="5.0 s"
+  add hselautorep text="10 s"
+  add hselautorep text="20 s"
+  change hselautorep select=selautorep
+  hautoclear=control BUTTON
+    window=hmain
+    position=511,MAINDY-23,70,21
+    name="重置"
+    help="按下可以禁用自动重复"
+    font=SMALLFONT
+  endc
+  hgetcurr=control BUTTON
+    window=hmain
+    position=590,MAINDY-23,60,21
+    name="获取状态"
+    help="按下以接替测量卡的当前状态"
+    font=SMALLFONT
+  endc
+  // Create clipboard buttons.
+  hclipcopy=control BUTTON
+    window=hmain
+    position=670,MAINDY-23,21,21
+    name="?"
+    help="按下可将配置复制到剪贴板"
+    font=LARGEFONT
+    bkcolor=WHITE
+  endc
+  hclippaste=control BUTTON
+    window=hmain
+    position=696,MAINDY-23,21,21
+    name="P"
+    help="按此即可从剪贴板粘贴配置"
+    font=MEDIUMFONT
+    bkcolor=WHITE
+  endc
+  // Create Exit button.
+  hquit=control BUTTON
+    window=hmain
+    position=maindx-83,MAINDY-23,80,21
+    name="退出"
+    help="退出H5测量卡测试"
+  endc
+  if hquit==NULL then                  // Unable to create all controls
+    lprintf(LIGHTRED,"A5MEAS: resources low, close some scripts!")
+    return
+  endif
+  // Restore configurations from .ini file.
+  lim1=0; lim2=0; lim3=0; lim4=0
+  getini("A5meas","Limits","%i,%i,%i,%i",&lim1,&lim2,&lim3,&lim4);
+  change hdacineg[0] name=format("%i",lim1)
+  change hdacipos[0] name=format("%i",lim2)
+  change hdacilim[0] name=format("%i",lim3)
+  change hdacuhyst[0] name=format("%i",lim4)
+  lim1=0; lim2=0; lim3=0; lim4=0
+  getini("A5meas","Limits2","%i,%i,%i,%i",&lim1,&lim2,&lim3,&lim4);
+  change hdacineg[1] name=format("%i",lim1)
+  change hdacipos[1] name=format("%i",lim2)
+  change hdacilim[1] name=format("%i",lim3)
+  change hdacuhyst[1] name=format("%i",lim4)
+  for i=0,i<NCONFIG,i++ do
+    sprintf(key,"Config[%i]",i)
+    getini("A5meas",key,s)
+    err=0
+    for j=0,j<Sizeof(out),j++ do
+      p=s[j*2]-'0'; if p>9 p=p+10+'0'-'A'
+      if p<0 || p>15 err=1
+      q=s[j*2+1]-'0'; if q>9 q=q+10+'0'-'A'
+      if q<0 || q>15 err=1
+      buf[j]=p*16+q
+    enddo
+    if err==0 Memcpy(config[i],buf,Sizeof(out))
+  enddo
+  // Prepare for the operation.
+  updateout=0; running=1
+  firsttime=1                          // Don't destroy actual state!
+  updatebuttons=1
+  updateedits=0
+  saveconfig=0
+  autorepeat=0
+  prevrepactive=-1
+  nextarep=Time()
+  adczeroset=0; adczerolevel=0
+  maxhv=500
+  $A[0].length=9999
+  // Main loop.
+  while 1 do
+    // Check for delayed strobe to measurement oscilloscope.
+    if setoscman!=0 && Time()-setoscman>50 then
+      SYS.Broadcast(8,"OSC MAN")
+      setoscman=0
+    endif
+    // Check for buttons - LOTS of buttons!
+    if Pressed(hcard[0]) then
+      SYS.Killimm(0)
+      card=0
+      change hcard[0] color=YELLOW
+      change hcard[0] bkcolor=LIGHTRED
+      change hcard[1] color=DARKGRAY
+      change hcard[1] bkcolor=LIGHTGRAY
+      enable hcalllatest
+      firsttime=1
+      running=1
+      $A[0].length=9999
+      $A[0].answer=S_NOP
+    else if Pressed(hcard[1]) then
+      SYS.Killimm(0)
+      card=1
+      change hcard[0] color=DARKGRAY
+      change hcard[0] bkcolor=LIGHTGRAY
+      change hcard[1] color=YELLOW
+      change hcard[1] bkcolor=LIGHTRED
+      change hlatest position=3+2000,3,maindx-8,AMUXDY
+      change hamux position=3,3,maindx-8,AMUXDY
+      disable hcalllatest
+      latestmode=0
+      firsttime=1
+      running=1
+      $A[0].length=9999
+      $A[0].answer=S_NOP
+    else if Pressed(hcalllatest) && card==0 then
+      change hamux position=3+1000,3,maindx-8,AMUXDY
+      change hlatest position=3,3,maindx-8,AMUXDY
+      latestmode=1
+      updateout=1
+    else if Pressed(hcallamux) then
+      change hlatest position=3+1000,3,maindx-8,AMUXDY
+      change hamux position=3,3,maindx-8,AMUXDY
+      latestmode=0
+      updateout=1
+    else if Pressed(hzeromux) || Pressed(hzerolatest) then
+      out.k0k31=0                      // Clear head multiplexer
+      out.k32k63=0
+      out.q0q31=0
+      out.q32q63=0
+      out.h0h7=0x11111111              // Set on-head switches to direct
+      out.h8h15=0x11111111
+      out.h16h23=0x11111111
+      out.h24h31=0x11111111
+      out.k64k79=0                     // Clear auxiliary relays
+      out.offs=32768
+      out.rback=3;                     // 100 K feedback resistor
+      out.la0la31=0                    // Clear LATEST
+      out.la32la37=0
+      out.lamux=0x8
+      out.extuout0=0x08000800
+      out.extuout1=0x00000000
+      out.extuout2=0x08000800
+      out.extuout3=0x00000000
+      Setuoutmodule(0)
+      Updateuout()
+      saveconfig=0
+      Clearautorepeat()
+      updateout=1
+      updatebuttons=1
+    else if Pressed(hzeroadc) then
+      out.udac=0
+      out.k111k80=0x00000008           // Clear relays on measurement card
+      out.pgamux=0x000000FF            // GND x1, no filter
+      out.dacineg=0                    // Zero negative threshold for I source
+      out.dacipos=0                    // Zero positive threshold for I source
+      out.dacilim=0                    // Zero I limit for I source
+      out.dacuhyst=0
+      out.dachv=0                      // Zero HV
+      out.delays=18+(32<<8)+(19<<16)   // 19 looks better for LATEST, old 32
+      out.addr9=0
+      saveconfig=0
+      Clearautorepeat()
+      updateout=1
+      updatebuttons=1
+    else if Pressed(hosc) then
+      SYS.Compile("a5mosc.scr",1);
+      SYS.Start("A5MOSC",0,"");
+    else if Pressed(hsaveconfig) then
+      saveconfig=!saveconfig
+      autorepeat=0
+      updatebuttons=1
+      updateedits=1
+    else if Pressed(hautorepeat) then
+      autorepeat=!autorepeat
+      saveconfig=0
+      updatebuttons=1
+      updateedits=1
+    else if Pressed(hautoclear) then
+      saveconfig=0
+      Clearautorepeat()
+      out.pgamux=out.pgamux & 0x7FFFFFFF
+      out.udac=out.udac & 0xBFFFFFFF
+      out.dachv=out.dachv & 0x7FFFFFFF
+      updatebuttons=1
+      updateedits=1
+    else if Pressed(hgetcurr) then
+      Memcpy(out,inp,Sizeof(out))
+      autorepeat=0
+      saveconfig=0
+      updatebuttons=1
+      updateedits=1
+    else if Pressed(hclipcopy) then
+      Memcpy(buf,out,Sizeof(out))
+      i=0
+      for j=0,j<Sizeof(out),j++ do
+        i=i+sprintf(s+i,"%02X",buf[j])
+      enddo
+      Clipcopy(s)
+    else if Pressed(hclippaste) then
+      Clippaste(s)
+      err=0
+      for j=0,j<Sizeof(out),j++ do
+        p=Toupper(s[j*2])-'0'; if p>9 p=p+10+'0'-'A'
+        if p<0 || p>15 err=1
+        q=Toupper(s[j*2+1])-'0'; if q>9 q=q+10+'0'-'A'
+        if q<0 || q>15 err=1
+        buf[j]=p*16+q
+      enddo
+      if err==0 then
+        Memcpy(out,buf,Sizeof(out))
+        j=(out.udac & 0xFFFF)-32768
+        change hsource text=format("%i",j)
+        change hsrcscr select=j/32768.0*250.0
+        Updateuout()
+        updateout=1
+      endif
+    else if Pressed(hquit) then
+      break
+    endif
+    mask=1
+    // Check for the first 8 groups of top and bottom bus relays (K0..K31 and
+    // K32..K63).
+    for j=0,j<half && j<8,j++ do
+      for i=0,i<4,i++ do
+        if Pressed(hmuxrelay[j,i]) ||                                          \
+          ((i==1 || i==2) && Pressed(hlatestrelay[j,i])) then
+          if autorepeat then
+            arep.k0k31=arep.k0k31^mask
+          else
+            out.k0k31=out.k0k31^mask
+          endif
+          saveconfig=0; autorepeat=0; updateout=1
+        else if Pressed(hmuxrelay[j+half,i]) ||                                \
+          ((i==1 || i==2) && Pressed(hlatestrelay[j+half,i])) then
+          if autorepeat then
+            arep.k32k63=arep.k32k63^mask
+          else
+            out.k32k63=out.k32k63^mask
+          endif
+          saveconfig=0; autorepeat=0; updateout=1
+        else if Pressed(hmuxsw[j,i]) then
+          if autorepeat then
+            arep.h0h7=arep.h0h7^mask
+          else
+            out.h0h7=out.h0h7^mask
+          endif
+          saveconfig=0; autorepeat=0; updateout=1
+        else if Pressed(hmuxsw[j+half,i]) then
+          if autorepeat then
+            arep.h8h15=arep.h8h15^mask
+          else
+            out.h8h15=out.h8h15^mask
+          endif
+          saveconfig=0; autorepeat=0; updateout=1
+        endif
+        mask=mask<<1
+      enddo
+    enddo
+    // Check remaining top or bottom bus relays (Q0..Q31 and Q32..Q63). LATEST
+    // is not yet supported!
+    mask=1
+    for j=8,j<half,j++ do
+      for i=0,i<4,i++ do
+        if Pressed(hmuxrelay[j,i]) then
+          if autorepeat then
+            arep.q0q31=arep.q0q31^mask
+          else
+            out.q0q31=out.q0q31^mask
+          endif
+          saveconfig=0; autorepeat=0; updateout=1
+        else if Pressed(hmuxrelay[j+half,i]) then
+          if autorepeat then
+            arep.q32q63=arep.q32q63^mask
+          else
+            out.q32q63=out.q32q63^mask
+          endif
+          saveconfig=0; autorepeat=0; updateout=1
+        else if Pressed(hmuxsw[j,i]) then
+          if autorepeat then
+            arep.h16h23=arep.h16h23^mask
+          else
+            out.h16h23=out.h16h23^mask
+          endif
+          saveconfig=0; autorepeat=0; updateout=1
+        else if Pressed(hmuxsw[j+half,i]) then
+          if autorepeat then
+            arep.h24h31=arep.h24h31^mask
+          else
+            out.h24h31=out.h24h31^mask
+          endif
+          saveconfig=0; autorepeat=0; updateout=1
+        endif
+        mask=mask<<1
+      enddo
+    enddo
+    // Check high-current LATEST relays LA0..LA31.
+    mask=1
+    for j=0,j<half && j<8,j++ do
+      for i=0,i<=3,i=i+3 do
+        if Pressed(hlatestrelay[j,i]) then
+          if autorepeat then
+            arep.la0la31=arep.la0la31^mask
+          else
+            out.la0la31=out.la0la31^mask
+          endif
+          saveconfig=0; autorepeat=0; updateout=1
+        else if Pressed(hlatestrelay[j+half,i]) then
+          if autorepeat then
+            arep.la0la31=arep.la0la31^(mask<<16)
+          else
+            out.la0la31=out.la0la31^(mask<<16)
+          endif
+          saveconfig=0; autorepeat=0; updateout=1
+        endif
+        mask=mask<<1
+      enddo
+    enddo
+    // Check first 4 auxiliary relays K64..K79.
+    mask=1
+    for j=0,j<nhead/4 && j<4,j++ do
+      for i=0,i<4,i++ do
+        if Pressed(hauxrelay[j,i]) ||                                          \
+          (j==1 && Pressed(hbusaux[i])) then
+          if autorepeat then
+            arep.k64k79=arep.k64k79^mask
+          else
+            out.k64k79=out.k64k79^mask
+          endif
+          saveconfig=0; autorepeat=0; updateout=1
+        endif
+        mask=mask<<1
+      enddo
+    enddo
+    // Check remaining auxiliary relays.
+    mask=0x00010000
+    for j=4,j<nhead/4,j++ do
+      for i=0,i<4,i++ do
+        if Pressed(hauxrelay[j,i]) ||                                          \
+          (nmodule==0 && j==1 && Pressed(hbusaux[i])) then
+          if autorepeat then
+            arep.offs=arep.offs^mask
+          else
+            out.offs=out.offs^mask
+          endif
+          saveconfig=0; autorepeat=0; updateout=1
+        endif
+        mask=mask<<1
+      enddo
+    enddo
+    // Check feedback resistors.
+    for j=0,j<4,j++ do
+      if Pressed(hrback[j]) then
+        out.rback=rbackorder[j]
+        saveconfig=0; autorepeat=0; updateout=1
+      endif
+    enddo
+    // Check external voltages, currently only module 0.
+    if nmodule!=0 then
+      // Module selection.
+      for j=0,j<3,j++ do
+        if Pressed(huoutmod[j]) then
+          Setuoutmodule(j)
+          Updateuout()
+          updateout=1
+        endif
+      enddo
+      // External voltages.
+      for j=0,j<4,j++ do
+        if Pressed(huoutraw[j]) updateedits=1
+      enddo
+      // Zero external voltage.
+      if Pressed(huoutzero[0]) then
+        if uoutmodule==0 then
+          if autorepeat then
+            arep.extuout0=arep.extuout0^0x00001000
+          else
+            out.extuout0=out.extuout0^0x00001000
+          endif
+          saveconfig=0; autorepeat=0; updateout=1
+        else if uoutmodule==1 then
+          if autorepeat then
+            arep.extuout2=arep.extuout2^0x00001000
+          else
+            out.extuout2=out.extuout2^0x00001000
+          endif
+          saveconfig=0; autorepeat=0; updateout=1
+        endif
+      else if Pressed(huoutzero[1]) then
+        if uoutmodule==0 then
+          if autorepeat then
+            arep.extuout0=arep.extuout0^0x10000000
+          else
+            out.extuout0=out.extuout0^0x10000000
+          endif
+          saveconfig=0; autorepeat=0; updateout=1
+        else if uoutmodule==1 then
+          if autorepeat then
+            arep.extuout2=arep.extuout2^0x10000000
+          else
+            out.extuout2=out.extuout2^0x10000000
+          endif
+          saveconfig=0; autorepeat=0; updateout=1
+        endif
+      else if Pressed(huoutzero[2]) then
+        if uoutmodule==0 then
+          if autorepeat then
+            arep.extuout1=arep.extuout1^0x00001000
+          else
+            out.extuout1=out.extuout1^0x00001000
+          endif
+          saveconfig=0; autorepeat=0; updateout=1
+        else if uoutmodule==1 then
+          if autorepeat then
+            arep.extuout3=arep.extuout3^0x00001000
+          else
+            out.extuout3=out.extuout3^0x00001000
+          endif
+          saveconfig=0; autorepeat=0; updateout=1
+        endif
+      else if Pressed(huoutzero[3]) then
+        if uoutmodule==0 then
+          if autorepeat then
+            arep.extuout1=arep.extuout1^0x10000000
+          else
+            out.extuout1=out.extuout1^0x10000000
+          endif
+          saveconfig=0; autorepeat=0; updateout=1
+        else if uoutmodule==1 then
+          if autorepeat then
+            arep.extuout3=arep.extuout3^0x10000000
+          else
+            out.extuout3=out.extuout3^0x10000000
+          endif
+          saveconfig=0; autorepeat=0; updateout=1
+        endif
+      else if Pressed(huoutzall) then
+        if autorepeat then
+          arep.extuout0=arep.extuout0^0x20000000
+        else
+          out.extuout0=out.extuout0^0x20000000
+        endif
+        saveconfig=0; autorepeat=0; updateout=1
+      endif
+       // External voltage connection relays.
+      if Pressed(huouton[0]) then
+        if uoutmodule==0 then
+          if autorepeat then
+            arep.extuout0=arep.extuout0^0x80000000
+          else
+            out.extuout0=out.extuout0^0x80000000
+          endif
+          saveconfig=0; autorepeat=0; updateout=1
+        else if uoutmodule==1 then
+          if autorepeat then
+            arep.extuout2=arep.extuout2^0x80000000
+          else
+            out.extuout2=out.extuout2^0x80000000
+          endif
+          saveconfig=0; autorepeat=0; updateout=1
+        endif
+      else if Pressed(huouton[1]) then
+        if uoutmodule==0 then
+          if autorepeat then
+            arep.extuout1=arep.extuout1^0x80000000
+          else
+            out.extuout1=out.extuout1^0x80000000
+          endif
+          saveconfig=0; autorepeat=0; updateout=1
+        else if uoutmodule==1 then
+          if autorepeat then
+            arep.extuout3=arep.extuout3^0x80000000
+          else
+            out.extuout3=out.extuout3^0x80000000
+          endif
+          saveconfig=0; autorepeat=0; updateout=1
+        endif
+      endif
+    endif
+    // Auxiliary LATEST relays K32..K35.
+    for i=0,i<4,i++ do
+      if Pressed(hlatestaux[i]) then
+        if autorepeat then
+          arep.la32la37=arep.la32la37^(1<<laextorder[i])
+        else
+          out.la32la37=out.la32la37^(1<<laextorder[i])
+        endif
+        saveconfig=0; autorepeat=0; updateout=1
+      endif
+    enddo
+    // Auxiliary LATEST relay pair K36.
+    if Pressed(hlatestr[0]) || Pressed(hlatestr[3]) then
+      if autorepeat then
+        arep.la32la37=arep.la32la37^0x10
+      else
+        out.la32la37=out.la32la37^0x10
+      endif
+      saveconfig=0; autorepeat=0; updateout=1
+    endif
+    // Auxiliary LATEST relay pair K37.
+    if Pressed(hlatestr[1]) || Pressed(hlatestr[2]) then
+      if autorepeat then
+        arep.la32la37=arep.la32la37^0x20
+      else
+        out.la32la37=out.la32la37^0x20
+      endif
+      saveconfig=0; autorepeat=0; updateout=1
+    endif
+    // LATEST multiplexer.
+    for i=0,i<9,i++ do
+      if Pressed(hlamux[i]) then
+        out.lamux=(out.lamux & 0x01) | lamuxbits[i]
+        saveconfig=0; autorepeat=0; updateout=1
+      endif
+    enddo
+    // Toggle temperature measurements.
+    if Pressed(htempoff) then
+      out.k64k79=out.k64k79^0x80000000
+      saveconfig=0; autorepeat=0; updateout=1
+    endif
+    // Check relays on measurement card.
+    mask=1
+    for j=0,j<32,j++ do
+      if Pressed(hrelay[j]) then
+        if autorepeat then
+          arep.k111k80=arep.k111k80^mask
+        else
+          out.k111k80=out.k111k80^mask
+        endif
+        saveconfig=0; autorepeat=0; updateout=1
+      endif
+      mask=mask<<1
+    enddo
+    // Check auxiliary low-voltage DACs on measurement card.
+    for i=0,i<2,i++ do
+      if Pressed(hdacineg[i]) then
+        Text(hdacineg[i],s); j=0; sscanf(s,"%i",&j);
+        j=Max(0,Min(4095,j))
+        change hdacineg[i] name=format("%i",j)
+        out.dacineg=j
+        updateedits=1
+      else if Pressed(hdacipos[i]) then
+        Text(hdacipos[i],s); j=0; sscanf(s,"%i",&j);
+        j=Max(0,Min(4095,j))
+        change hdacipos[i] name=format("%i",j)
+        out.dacipos=j
+        updateedits=1
+      else if Pressed(hdacilim[i]) then
+        Text(hdacilim[i],s); j=0; sscanf(s,"%i",&j);
+        j=Max(0,Min(4095,j))
+        change hdacilim[i] name=format("%i",j)
+        out.dacilim=j
+        updateedits=1
+      else if Pressed(hdacuhyst[i]) then
+        Text(hdacuhyst[i],s); j=0; sscanf(s,"%i",&j);
+        j=Max(0,Min(4095,j))
+        change hdacuhyst[i] name=format("%i",j)
+        out.dacuhyst=j
+        updateedits=1
+      else if Pressed(hsetall[i]) then
+        if autorepeat then
+          arep.dacineg=arep.dacineg^1
+          arep.dacipos=arep.dacipos^1
+          arep.dacilim=arep.dacilim^1
+          arep.dacuhyst=arep.dacuhyst^1
+        else
+          Text(hdacineg[i],s); j=0; sscanf(s,"%i",&j);
+          j=Max(0,Min(4095,j))
+          change hdacineg[i] name=format("%i",j)
+          out.dacineg=j
+          Text(hdacipos[i],s); j=0; sscanf(s,"%i",&j);
+          j=Max(0,Min(4095,j))
+          change hdacipos[i] name=format("%i",j)
+          out.dacipos=j
+          Text(hdacilim[i],s); j=0; sscanf(s,"%i",&j);
+          j=Max(0,Min(4095,j))
+          change hdacilim[i] name=format("%i",j)
+          out.dacilim=j
+          Text(hdacuhyst[i],s); j=0; sscanf(s,"%i",&j);
+          j=Max(0,Min(4095,j))
+          change hdacuhyst[i] name=format("%i",j)
+          out.dacuhyst=j
+        endif
+        autorepeat=0; updateedits=1
+      endif
+    enddo
+    if Pressed(htogineg) then
+      if autorepeat arep.dacineg=arep.dacineg^1
+      Text(hdacineg[0],s); j=0; sscanf(s,"%i",&j); j=Max(0,Min(4095,j))
+      change hdacineg[0] name=format("%i",j)
+      Text(hdacineg[1],s); k=0; sscanf(s,"%i",&k); k=Max(0,Min(4095,k))
+      change hdacineg[1] name=format("%i",k)
+      out.dacineg=(out.dacineg==j?k:j)
+      autorepeat=0; updateedits=1
+    else if Pressed(htogipos) then
+      if autorepeat arep.dacipos=arep.dacipos^1
+      Text(hdacipos[0],s); j=0; sscanf(s,"%i",&j); j=Max(0,Min(4095,j))
+      change hdacipos[0] name=format("%i",j)
+      Text(hdacipos[1],s); k=0; sscanf(s,"%i",&k); k=Max(0,Min(4095,k))
+      change hdacipos[1] name=format("%i",k)
+      out.dacipos=(out.dacipos==j?k:j)
+      autorepeat=0; updateedits=1
+    else if Pressed(htogilim) then
+      if autorepeat arep.dacilim=arep.dacilim^1
+      Text(hdacilim[0],s); j=0; sscanf(s,"%i",&j); j=Max(0,Min(4095,j))
+      change hdacilim[0] name=format("%i",j)
+      Text(hdacilim[1],s); k=0; sscanf(s,"%i",&k); k=Max(0,Min(4095,k))
+      change hdacilim[1] name=format("%i",k)
+      out.dacilim=(out.dacilim==j?k:j)
+      autorepeat=0; updateedits=1
+    else if Pressed(htoguhyst) then
+      if autorepeat arep.dacuhyst=arep.dacuhyst^1
+      Text(hdacuhyst[0],s); j=0; sscanf(s,"%i",&j); j=Max(0,Min(4095,j))
+      change hdacuhyst[0] name=format("%i",j)
+      Text(hdacuhyst[1],s); k=0; sscanf(s,"%i",&k); k=Max(0,Min(4095,k))
+      change hdacuhyst[1] name=format("%i",k)
+      out.dacuhyst=(out.dacuhyst==j?k:j)
+      autorepeat=0; updateedits=1
+    endif
+    // Check main DAC controls.
+    if Pressed(h300enable) then
+      if autorepeat then
+        arep.addr9=arep.addr9^0x00000080
+      else
+        out.addr9=out.addr9^0x00000080
+      endif
+      saveconfig=0; autorepeat=0; updateout=1
+    else if Pressed(hsource) then
+      Text(hsource,s); r=0.0; sscanf(s,"%f",&r);
+      r=Max(-32768.0,Min(32768.0,r))
+      change hsource text=format("%.0f",r)
+      change hsrcscr select=r/32768.0*250.0
+      updateedits=1
+    else if Pressed(hsrcscr) then
+      r=Status(hsrcscr)/250.0*32768.0
+      change hsource text=format("%.0f",r)
+      updateedits=1
+      continue                         // What you see is what you WILL get
+    else if Pressed(hsrctoggle) then
+      if autorepeat arep.udac=arep.udac^0x40000000
+      out.udac=out.udac^0x40000000
+      // If user releases DAC, I wait 50 milliseconds and send strobe to osci.
+      if (out.udac & 0x40000000)==0 setoscman=Time()
+      updateedits=1
+      autorepeat=0
+    else if Pressed(hacoffscr) then
+      out.offs=(out.offs & 0xFFFF0000) | (Status(hacoffscr)*8 & 0x0000FFFF)
+      r=((out.offs & 0x0000FFFF)-32768)/64.0
+      if ((out.udac>>20)&0xF)==4 then  // Modulation
+        change hacoffset text=format(" %.2f%%",Abs(r/5.12))
+      else                             // Offset
+        change hacoffset text=format(" %.1f",r)
+      endif
+      updateedits=1
+      continue
+    else if Pressed(hacofzero) then
+      out.offs=(out.offs & 0xFFFF0000)+32768
+      r=(out.offs & 0x0000FFFF)/8
+      change hacoffscr select=r
+      r=(r*8-32768)/64.0
+      if ((out.udac>>20)&0xF)==4 then  // Modulation
+        change hacoffset text=format(" %.2f%%",Abs(r/5.12))
+      else                             // Offset
+        change hacoffset text=format(" %.1f",r)
+      endif
+      updateedits=1
+    else if Pressed(hshon) then
+      if autorepeat then
+        arep.delays=arep.delays^0x20;
+      else
+        out.delays=out.delays^0x20;
+      endif
+      saveconfig=0; autorepeat=0; updateout=1
+    else if Pressed(hshscroll) then
+      j=Max(0,Min(28,(out.delays & 0x1F)+Status(hshscroll)))
+      out.delays=(out.delays & 0xFFFFFFE0) | j
+      change hshscroll select=0
+      saveconfig=0; autorepeat=0; updateout=1
+    else if Pressed(hbooston) then
+      if autorepeat then
+        arep.delays=arep.delays^0x4000;
+      else
+        out.delays=out.delays^0x4000;
+      endif
+      saveconfig=0; autorepeat=0; updateout=1
+    else if Pressed(hbooscroll) then
+      j=Max(0,Min(63,((out.delays>>8) & 0x3F)+Status(hbooscroll)))
+      out.delays=(out.delays & 0xFFFFC0FF) | (j<<8)
+      change hbooscroll select=0
+      saveconfig=0; autorepeat=0; updateout=1
+    else if Pressed(haddascroll) then
+      j=Max(0,Min(63,((out.delays>>16) & 0x3F)+Status(haddascroll)))
+      out.delays=(out.delays & 0xFFC0FFFF) | (j<<16)
+      change haddascroll select=0
+      saveconfig=0; autorepeat=0; updateout=1
+    endif
+    // Check waveform controls.
+    for j=0,j<8,j++ do
+      if Pressed(hform[j]) then
+        out.udac=(out.udac & 0xFF0FFFFF) | (j<<20)
+        saveconfig=0; autorepeat=0; updateout=1
+      endif
+    enddo
+    // Check frequency settings.
+    for j=0,j<10,j++ do
+      if Pressed(hfreq[j]) then
+        out.udac=(out.udac & 0xFFF0FFFF) | (j<<16)
+        saveconfig=0; autorepeat=0; updateout=1
+      endif
+    enddo
+    // Check HV controls.
+    if Pressed(hvswitch) then
+      if autorepeat then
+        arep.addr9=arep.addr9^0x00000002
+      else
+        out.addr9=out.addr9^0x00000002
+      endif
+      saveconfig=0; autorepeat=0; updateout=1
+    else if Pressed(hvvoltage) then
+      out.dachv=out.dachv & 0x7FFFFFFF
+      updateedits=1
+    else if Pressed(hvtoggle) then
+      if autorepeat arep.dachv=arep.dachv^0x80000000
+      out.dachv=out.dachv^0x80000000
+      updateedits=1
+      autorepeat=0
+    endif
+    // Check HV current limits.
+    if Pressed(hvcurrent[0][0]) then
+      if autorepeat then
+        arep.addr9=arep.addr9^0x00000020
+      else
+        out.addr9=out.addr9 & 0xFFFFFFDF
+      endif
+      saveconfig=0; autorepeat=0; updateout=1
+    else if Pressed(hvcurrent[0][1]) then
+      if autorepeat then
+        arep.addr9=arep.addr9^0x00000020
+      else
+        out.addr9=out.addr9 | 0x00000020
+      endif
+      saveconfig=0; autorepeat=0; updateout=1
+    else if Pressed(hvcurrent[1][0]) then
+      if autorepeat then
+        arep.addr9=arep.addr9^0x00000040
+      else
+        out.addr9=out.addr9 & 0xFFFFFFBF
+      endif
+      saveconfig=0; autorepeat=0; updateout=1
+    else if Pressed(hvcurrent[1][1]) then
+      if autorepeat then
+        arep.addr9=arep.addr9^0x00000040
+      else
+        out.addr9=out.addr9 | 0x00000040
+      endif
+      saveconfig=0; autorepeat=0; updateout=1
+    endif
+    // Check HV amplification.
+    for j=0,j<4,j++ do
+      if Pressed(hvampl[j]) then
+        out.addr9=(out.addr9 & 0xFFFFFFF3) | (disorder[j]<<2)
+        saveconfig=0; autorepeat=0; updateout=1
+      endif
+    enddo
+    // Check fool protection.
+    if Pressed(hunprot) then
+      j=out.udac & 0x30000000
+      if j==0x20000000 then      j=0x30000000
+      else if j==0x30000000 then j=0x00000000
+      else                       j=0x20000000
+      endif
+      out.udac=(out.udac & 0xCFFFFFFF)|j
+      saveconfig=0; autorepeat=0; updateout=1
+    endif
+    // Check relay reswitching mode.
+    if Pressed(hresw) then
+      out.udac=out.udac^0x02000000
+      saveconfig=0; autorepeat=0; updateout=1
+    endif
+    // Check ADC commutator.
+    for j=0,j<16,j++ do
+      if Pressed(hcomm[j,0]) then
+        out.pgamux=(out.pgamux & 0xFFFFFFF0) | j
+        saveconfig=0; autorepeat=0; updateout=1
+      endif
+      if Pressed(hcomm[j,1]) then
+        out.pgamux=(out.pgamux & 0xFFFFFF0F) | (j<<4)
+        saveconfig=0; autorepeat=0; updateout=1
+      endif
+    enddo
+    if Pressed(hcomgnd) then
+      if autorepeat arep.pgamux=arep.pgamux^0x80000000
+      out.pgamux=out.pgamux^0x80000000
+      saveconfig=0; autorepeat=0; updateout=1
+    endif
+    // Second harmonic control appears if DC+Sin waveform is selected.
+    if hfirsth!=NULL && Pressed(hfirsth) then
+      out.udac=out.udac^0x01000000
+      change hfirsth text=(out.udac & 0x01000000?"1st harm":"2nd harm")
+      change hfirsth bkcolor=(out.udac & 0x01000000?LIGHTGREEN:LIGHTGRAY)
+      saveconfig=0; autorepeat=0; updateout=1
+    endif
+    // Check ADC filter.
+    for j=0,j<4,j++ do
+      if Pressed(hfilter[j]) then
+        for i=0,i<8,i++ do
+          if filterbits[i][1]==j break
+        enddo
+        if autorepeat then
+          out.pgamux=out.pgamux & 0xFFFFE3FF
+          arep.pgamux=(arep.pgamux & 0xFFFFE3FF) | filterbits[i][0]
+        else
+          out.pgamux=(out.pgamux & 0xFFFFE3FF) | filterbits[i][0]
+        endif
+        saveconfig=0; autorepeat=0; updateout=1
+      endif
+    enddo
+    // Check ADC-related controls.
+    if Pressed(hsmooth) then
+      out.udac=out.udac^0x80000000
+      saveconfig=0; autorepeat=0; updateout=1
+    else if Pressed(hsetzero) then
+      if adczeroset then
+        adczerolevel=0
+        shazerosin=0.0
+        shazerocos=0.0
+        adczeroset=0
+        change hsetzero color=BLACK
+        change hsetzero bkcolor=LIGHTGRAY
+      else
+        adczeroset=1
+        if (inp.udac & 0x00F00000)==0x00400000 then
+          shazerosin=inp.dbgsin
+          shazerocos=inp.dbgcos
+        endif
+        adczerolevel=inp.uadc
+        change hsetzero color=YELLOW
+        change hsetzero bkcolor=LIGHTRED
+      endif
+      saveconfig=0
+      autorepeat=0
+      updateedits=1
+      updatebuttons=1
+    endif
+    // Check ADC PGA amplification.
+    for j=0,j<4,j++ do
+      if Pressed(hampl[j]) then
+        out.pgamux=(out.pgamux & 0xFFFEFCFF) | (j<<8)
+        if (inp.types & 0x00010000)!=0 && j>=2 out.pgamux=out.pgamux|0x00010000
+        saveconfig=0; autorepeat=0; updateout=1
+      endif
+    enddo
+    // Check configuration buttons.
+    for i=0,i<NCONFIG,i++ do
+      if Pressed(hconfig[i]) then
+        if saveconfig then
+          Memcpy(config[i],out,Sizeof(out))
+          markconfig=markconfig & (~(1<<i))
+          saveconfig=0
+          updatebuttons=1
+          updateedits=1
+        else
+          Memcpy(out,config[i],Sizeof(out))
+          j=(out.udac & 0xFFFF)-32768
+          change hsource text=format("%i",j)
+          change hsrcscr select=j/32768.0*250.0
+          if maxhv==1000 then
+            change hvvoltage text=format("%i",out.dachv/HXTODAC+0.5)
+          else
+            change hvvoltage text=format("%i",out.dachv/HVTODAC+0.5)
+          endif
+          Updateuout()
+          if autorepeat then
+            autoconfig=autoconfig^(1<<i)
+            lastautoconf=i
+            Sethconfigcolours()
+          endif
+          updateout=1
+        endif
+        autorepeat=0
+      endif
+    enddo
+    // If possible, update acual state.
+    if running && $A[0].length!=0 then
+      if $A[0].answer==S_DEBUG then
+        if $A[0].length==Sizeof(oldformat)+5 then
+          Memset(newformat,0,Sizeof(newformat))
+          Memcpy(newformat,$A[0]+5,Sizeof(oldformat))
+        else
+          Memcpy(newformat,$A[0]+5,Sizeof(newformat))
+        endif
+        if (newformat.types & 0x00000080)!=0 then
+          // Saved configuration.
+          i=(newformat.types>>4) & 0x7
+          newformat.types=newformat.types & 0xFFFFFF0F
+          Memcpy(config[i],newformat,Sizeof(newformat))
+          markconfig=markconfig | (1<<i)
+          Sethconfigcolours()
+        else if Memcmp(newformat,inp,Sizeof(inp))!=0 then
+          Memcpy(inp,newformat,Sizeof(inp))
+          if firsttime then
+            Memcpy(out,inp,Sizeof(inp))
+            for i=0,i<Sizeof(inp),i++ do
+              $char(previnp+i)=~$char(inp+i)
+            enddo
+            // Aux and LATEST relays are rarely used, switch them off.
+            out.k64k79=out.k64k79 & 0x80000000
+            out.offs=out.offs & 0x0000FFFF
+            out.la0la31=0
+            out.la32la37=0
+            out.lamux=0x8
+            r=(inp.udac & 0x0000FFFF)-32768
+            change hsource text=format("%.0f",r)
+            change hsrcscr select=r/32768.0*250.0
+            r=(inp.offs & 0x0000FFFF)/8
+            change hacoffscr select=r
+            r=(r*8-32768)/64.0
+            if ((inp.udac>>20) & 0x0F)==4 then
+              change hacoffset text=format(" %.2f%%",Abs(r/5.12))
+            else
+              change hacoffset text=format(" %.1f",r)
+            endif
+            Updateuout()
+            firsttime=0
+          endif
+          updatebuttons=1
+        endif
+      else if $A[0].length!=9999 then
+        running=0                      // Error returned, stop asking
+      endif
+      // Query state of A5 measurement card.
+      buf[0]=S_DEBUG
+      buf[1]=0x18
+      buf[2]=card
+      SYS.Sendimm(0,3,buf)
+      // Check if next autorepeat is necessary.
+      if Time()>nextarep then
+        if autoconfig!=0 then
+          while 1 do
+            lastautoconf++
+            if lastautoconf>=NCONFIG lastautoconf=0
+            if (autoconfig & (1<<lastautoconf))!=0 break
+          enddo
+          Memcpy(out,config[lastautoconf],Sizeof(out))
+          j=(out.udac & 0xFFFF)-32768
+          change hsource text=format("%i",j)
+          change hsrcscr select=j/32768.0*250.0
+          if maxhv==1000 then
+            change hvvoltage text=format("%i",out.dachv/HXTODAC+0.5)
+          else
+            change hvvoltage text=format("%i",out.dachv/HVTODAC+0.5)
+          endif
+          Updateuout()
+          Sethconfigcolours()
+          updateout=1; repactive=1
+        else
+          repactive=0
+          if arep.k0k31!=0 then
+            out.k0k31=out.k0k31^arep.k0k31; updateout=1; repactive=1; endif
+          if arep.k32k63!=0 then
+            out.k32k63=out.k32k63^arep.k32k63; updateout=1; repactive=1; endif
+          if arep.q0q31!=0 then
+            out.q0q31=out.q0q31^arep.q0q31; updateout=1; repactive=1; endif
+          if arep.q32q63!=0 then
+            out.q32q63=out.q32q63^arep.q32q63; updateout=1; repactive=1; endif
+          if arep.k64k79!=0 then
+            out.k64k79=out.k64k79^arep.k64k79; updateout=1; repactive=1; endif
+          if (arep.offs & 0xFFFF0000)!=0 then
+            out.offs=out.offs^(arep.offs & 0xFFFF0000)
+            updateout=1; repactive=1; endif
+          if arep.k111k80!=0 then
+            out.k111k80=out.k111k80^arep.k111k80; updateout=1; repactive=1;
+            endif
+          if arep.h0h7!=0 then
+            out.h0h7=out.h0h7^arep.h0h7; updateout=1; repactive=1; endif
+          if arep.h8h15!=0 then
+            out.h8h15=out.h8h15^arep.h8h15; updateout=1; repactive=1; endif
+          if arep.h16h23!=0 then
+            out.h16h23=out.h16h23^arep.h16h23; updateout=1; repactive=1; endif
+          if arep.h24h31!=0 then
+            out.h24h31=out.h24h31^arep.h24h31; updateout=1; repactive=1; endif
+          if arep.pgamux & 0x80000000 then
+            out.pgamux=out.pgamux^0x80000000; updateout=1; repactive=1; endif
+          if arep.pgamux & 0x00001C00 then
+            out.pgamux=out.pgamux^arep.pgamux & 0x00001C00
+            updateout=1; repactive=1
+          endif
+          if arep.dacineg!=0 then
+            Text(hdacineg[0],s); j=0; sscanf(s,"%i",&j); j=Max(0,Min(4095,j))
+            change hdacineg[0] name=format("%i",j)
+            Text(hdacineg[1],s); k=0; sscanf(s,"%i",&k); k=Max(0,Min(4095,k))
+            change hdacineg[1] name=format("%i",k)
+            out.dacineg=(out.dacineg==j?k:j); updateout=1; repactive=1; endif
+          if arep.dacipos!=0 then
+            Text(hdacipos[0],s); j=0; sscanf(s,"%i",&j); j=Max(0,Min(4095,j))
+            change hdacipos[0] name=format("%i",j)
+            Text(hdacipos[1],s); k=0; sscanf(s,"%i",&k); k=Max(0,Min(4095,k))
+            change hdacipos[1] name=format("%i",k)
+            out.dacipos=(out.dacipos==j?k:j); updateout=1; repactive=1; endif
+          if arep.dacilim!=0 then
+            Text(hdacilim[0],s); j=0; sscanf(s,"%i",&j); j=Max(0,Min(4095,j))
+            change hdacilim[0] name=format("%i",j)
+            Text(hdacilim[1],s); k=0; sscanf(s,"%i",&k); k=Max(0,Min(4095,k))
+            change hdacilim[1] name=format("%i",k)
+            out.dacilim=(out.dacilim==j?k:j); updateout=1; repactive=1; endif
+          if arep.dacuhyst!=0 then
+            Text(hdacuhyst[0],s); j=0; sscanf(s,"%i",&j); j=Max(0,Min(4095,j))
+            change hdacuhyst[0] name=format("%i",j)
+            Text(hdacuhyst[1],s); k=0; sscanf(s,"%i",&k); k=Max(0,Min(4095,k))
+            change hdacuhyst[1] name=format("%i",k)
+            out.dacuhyst=(out.dacuhyst==j?k:j); updateout=1; repactive=1; endif
+          if arep.dachv & 0x80000000 then
+            out.dachv=out.dachv^0x80000000; updateout=1; repactive=1; endif
+          if arep.delays!=0 then
+            out.delays=out.delays^arep.delays; updateout=1; repactive=1; endif
+          if arep.addr9!=0 then
+            out.addr9=out.addr9^arep.addr9; updateout=1; repactive=1; endif
+          if arep.udac & 0x40000000 then
+            out.udac=out.udac^0x40000000; updateout=1; repactive=1
+          endif
+          if arep.la0la31!=0 then
+            out.la0la31=out.la0la31^arep.la0la31; updateout=1; repactive=1
+          endif
+          if arep.la32la37!=0 then
+            out.la32la37=out.la32la37^arep.la32la37; updateout=1; repactive=1
+          endif
+          if (arep.lamux & 1)!=0 then
+            out.lamux=out.lamux^1; updateout=1; repactive=1
+          endif
+          if (arep.extuout0 & 0x90001000)!=0 then
+            out.extuout0=out.extuout0^(arep.extuout0 & 0x90001000)
+            updateout=1; repactive=1
+          endif
+          if (arep.extuout1 & 0x90001000)!=0 then
+            out.extuout1=out.extuout1^(arep.extuout1 & 0x90001000)
+            updateout=1; repactive=1
+          endif
+          if (arep.extuout2 & 0x90001000)!=0 then
+            out.extuout2=out.extuout2^(arep.extuout2 & 0x90001000)
+            updateout=1; repactive=1
+          endif
+          if (arep.extuout3 & 0x90001000)!=0 then
+            out.extuout3=out.extuout3^(arep.extuout3 & 0x90001000)
+            updateout=1; repactive=1
+          endif
+        endif
+        nextarep=nextarep+areptime[Status(hselautorep)]
+      endif
+      if repactive!=prevrepactive then
+        if repactive then
+          change hautoclear color=LIGHTRED
+          change hautoclear bkcolor=YELLOW
+        else
+          change hautoclear color=BLACK
+          change hautoclear bkcolor=GRAY
+        endif
+        prevrepactive=repactive
+      endif
+    endif
+    if running==0 then
+      nextarep=Time()
+    endif
+    // Re-read and if necessary, update edit controls.
+    if updateout || updateedits then
+      Text(hsource,s); r=0.0; sscanf(s,"%f",&r); q=r+32768.0
+      q=Max(0,Min(65535,q)); out.udac=(out.udac & 0xFFFF0000) | q
+      if out.udac & 0x40000000 then
+        out.udac=(out.udac & 0xFFFF0000)+32768
+        change hsrctoggle bkcolor=LIGHTRED
+      else
+        change hsrctoggle bkcolor=LIGHTGRAY
+      endif
+      r=((out.offs & 0x0000FFFF)-32768)/64.0
+      if ((out.udac>>20)&0xF)==4 then  // Modulation
+        change hacoffset text=format(" %.2f%%",Abs(r/5.12))
+      else                             // Offset
+        change hacoffset text=format(" %.1f",r)
+      endif
+      if out.dachv & 0x80000000 then
+        out.dachv=0x80000000
+        change hvtoggle bkcolor=LIGHTRED
+      else
+        Text(hvvoltage,s); r=0.0; sscanf(s,"%f",&r);
+        if maxhv==1000 then
+          q=Max(0,Min(4095,r*HXTODAC))
+        else
+          q=Max(0,Min(4095,r*HVTODAC))
+        endif
+        out.dachv=q
+        change hvtoggle bkcolor=LIGHTGRAY
+      endif
+      if out.pgamux & 0x80000000 then
+        change hcomgnd bkcolor=LIGHTRED
+      else
+        change hcomgnd bkcolor=LIGHTGRAY
+      endif
+      Text(huoutraw[0],s); i=0; sscanf(s,"%i",&i)
+      i=Max(0,Min(i+2048,4095))
+      change huoutraw[0] text=format("%i",i-2048)
+      if uoutmodule==0 then
+        out.extuout0=(out.extuout0 & 0xFFFFF000) | i
+        if out.extuout0 & 0x00001000 then
+          change huoutzero[0] bkcolor=LIGHTRED
+        else if out.extuout0 & 0x20000000 then
+          change huoutzero[0] bkcolor=YELLOW
+        else
+          change huoutzero[0] bkcolor=LIGHTGRAY
+        endif
+      else if uoutmodule==1 then
+        out.extuout2=(out.extuout2 & 0xFFFFF000) | i
+        if out.extuout2 & 0x00001000 then
+          change huoutzero[0] bkcolor=LIGHTRED
+        else if out.extuout0 & 0x20000000 then
+          change huoutzero[0] bkcolor=YELLOW
+        else
+          change huoutzero[0] bkcolor=LIGHTGRAY
+        endif
+      endif
+      Text(huoutraw[1],s); i=0; sscanf(s,"%i",&i)
+      i=Max(0,Min(i+2048,4095))
+      change huoutraw[1] text=format("%i",i-2048)
+      if uoutmodule==0 then
+        out.extuout0=(out.extuout0 & 0xF000FFFF) | (i<<16)
+        if out.extuout0 & 0x10000000 then
+          change huoutzero[1] bkcolor=LIGHTRED
+        else if out.extuout0 & 0x20000000 then
+          change huoutzero[1] bkcolor=YELLOW
+        else
+          change huoutzero[1] bkcolor=LIGHTGRAY
+        endif
+      else if uoutmodule==1 then
+        out.extuout2=(out.extuout2 & 0xF000FFFF) | (i<<16)
+        if out.extuout2 & 0x10000000 then
+          change huoutzero[1] bkcolor=LIGHTRED
+        else if out.extuout0 & 0x20000000 then
+          change huoutzero[1] bkcolor=YELLOW
+        else
+          change huoutzero[1] bkcolor=LIGHTGRAY
+        endif
+      endif
+      Text(huoutraw[2],s); i=0; sscanf(s,"%i",&i)
+      i=Max(0,Min(i,4095))
+      change huoutraw[2] text=format("%i",i)
+      if uoutmodule==0 then
+        out.extuout1=(out.extuout1 & 0xFFFFF000) | i
+        if out.extuout1 & 0x00001000 then
+          change huoutzero[2] bkcolor=LIGHTRED
+        else if out.extuout0 & 0x20000000 then
+          change huoutzero[2] bkcolor=YELLOW
+        else
+          change huoutzero[2] bkcolor=LIGHTGRAY
+        endif
+      else if uoutmodule==1 then
+        out.extuout3=(out.extuout3 & 0xFFFFF000) | i
+        if out.extuout3 & 0x00001000 then
+          change huoutzero[2] bkcolor=LIGHTRED
+        else if out.extuout0 & 0x20000000 then
+          change huoutzero[2] bkcolor=YELLOW
+        else
+          change huoutzero[2] bkcolor=LIGHTGRAY
+        endif
+      endif
+      Text(huoutraw[3],s); i=0; sscanf(s,"%i",&i)
+      i=Max(0,Min(i,4095))
+      change huoutraw[3] text=format("%i",i)
+      if uoutmodule==0 then
+        out.extuout1=(out.extuout1 & 0xF000FFFF) | (i<<16)
+        if out.extuout1 & 0x10000000 then
+          change huoutzero[3] bkcolor=LIGHTRED
+        else if out.extuout0 & 0x20000000 then
+          change huoutzero[3] bkcolor=YELLOW
+        else
+          change huoutzero[3] bkcolor=LIGHTGRAY
+        endif
+      else if uoutmodule==1 then
+        out.extuout3=(out.extuout3 & 0xF000FFFF) | (i<<16)
+        if out.extuout3 & 0x10000000 then
+          change huoutzero[3] bkcolor=LIGHTRED
+        else if out.extuout0 & 0x20000000 then
+          change huoutzero[3] bkcolor=YELLOW
+        else
+          change huoutzero[3] bkcolor=LIGHTGRAY
+        endif
+      endif
+      if out.extuout0 & 0x20000000 then
+        change huoutzall color=YELLOW
+        change huoutzall bkcolor=LIGHTRED
+      else
+        change huoutzall color=BLACK
+        change huoutzall bkcolor=LIGHTGRAY
+      endif
+      updateedits=0
+      updateout=1
+    endif
+    // Send new data to measurement card, if necessary.
+    if updateout then
+      running=1                        // User wants it
+      buf[0]=S_DEBUG
+      buf[1]=0x17                      // Set state of A5 measurement card
+      buf[2]=card                      // Measurement card
+      j=out.pgamux
+      if j & 0x80000000 out.pgamux=j|0xFF
+      out.dbgsin=inp.dbgsin            // Used to calculate mean
+      out.dbgcos=inp.dbgcos
+      if latestmode==0 && nmodule==0 then
+        // Old format, compatible with ancient versions.
+        Memcpy(buf+3,out,Sizeof(oldformat))
+        SYS.Sendimm(1,3+Sizeof(oldformat),buf)
+      else
+        // New format, contains LATEST parameters and EL506 data. High byte
+        // of types contains type of the multiplexer, as in extended layout.
+        // This is necessary for the bootstrap loader. Mux type is ignored by
+        // all other programs.
+        out.types=(out.types & 0x008FFFFF) |                                   \
+          ($int4($EXTLAY+674) & 0xFF000000) |                                  \
+          (($LAY.config & 0x00001C00)<<10)
+        Memcpy(buf+3,out,Sizeof(out))
+        SYS.Sendimm(1,3+Sizeof(out),buf)
+      endif
+      out.pgamux=j
+      updateout=0
+    endif
+    // Update buttons, if necessary.
+    if updatebuttons then
+      // Save configuration and autorepeat buttons.
+      change hsaveconfig bkcolor=(saveconfig?LIGHTRED:WHITE)
+      change hautorepeat bkcolor=(autorepeat?LIGHTRED:WHITE)
+      // Relays K0..K31 and corresponding on-head switches.
+      if inp.k0k31!=previnp.k0k31 || inp.h0h7!=previnp.h0h7 then
+        mask=1
+        for j=0,j<half && j<8,j++ do
+          for i=0,i<4,i++ do
+            change hmuxrelay[j,i]                                              \
+              bkcolor=(inp.k0k31 & mask?LIGHTRED:LIGHTGRAY)
+            if i==1 || i==2 then
+              change hlatestrelay[j,i]                                         \
+              bkcolor=(inp.k0k31 & mask?LIGHTRED:LIGHTGRAY)
+            endif
+            if i==H_ZERO then
+              change hmuxsw[j,i] bkcolor=(inp.h0h7 & mask?LIGHTRED:LIGHTYELLOW)
+            else
+              change hmuxsw[j,i] bkcolor=(inp.h0h7 & mask?LIGHTRED:LIGHTGRAY)
+              if i==H_SWITCH then
+                change hmuxsw[j,i] text=(inp.h0h7 & mask?"D":"A")
+              else if i==H_UI then
+                change hmuxsw[j,i] text=(inp.h0h7 & mask?"U":"I")
+              endif
+            endif
+            change hmuxsw[j,i] color=(inp.h0h7 & mask?YELLOW:BLACK)
+            mask=mask<<1
+          enddo
+        enddo
+      endif
+      // Relays Q0..Q31 and corresponding on-head switches. LATEST is not
+      // supported.
+      if inp.q0q31!=previnp.q0q31 || inp.h16h23!=previnp.h16h23 then
+        mask=1
+        for j=8,j<half,j++ do
+          for i=0,i<4,i++ do
+            change hmuxrelay[j,i]                                              \
+              bkcolor=(inp.q0q31 & mask?LIGHTRED:LIGHTGRAY)
+            if i==H_ZERO then
+              change hmuxsw[j,i]                                               \
+              bkcolor=(inp.h16h23 & mask?LIGHTRED:LIGHTYELLOW)
+            else
+              change hmuxsw[j,i] bkcolor=(inp.h16h23 & mask?LIGHTRED:LIGHTGRAY)
+              if i==H_SWITCH then
+                change hmuxsw[j,i] text=(inp.h16h23 & mask?"D":"A")
+              else if i==H_UI then
+                change hmuxsw[j,i] text=(inp.h16h23 & mask?"U":"I")
+              endif
+            endif
+            change hmuxsw[j,i] color=(inp.h16h23 & mask?YELLOW:BLACK)
+            mask=mask<<1
+          enddo
+        enddo
+      endif
+      // Relays K32..K63 and corresponding on-head switches.
+      if inp.k32k63!=previnp.k32k63 || inp.h8h15!=previnp.h8h15 then
+        mask=1
+        for j=0,j<half && j<8,j++ do
+          for i=0,i<4,i++ do
+            change hmuxrelay[j+half,i]                                         \
+              bkcolor=(inp.k32k63 & mask?LIGHTRED:LIGHTGRAY)
+            if i==1 || i==2 then
+              change hlatestrelay[j+half,i]                                    \
+              bkcolor=(inp.k32k63 & mask?LIGHTRED:LIGHTGRAY)
+            endif
+            if i==H_ZERO then
+              change hmuxsw[j+half,i]                                          \
+              bkcolor=(inp.h8h15 & mask?LIGHTRED:LIGHTYELLOW)
+            else
+              change hmuxsw[j+half,i]                                          \
+                bkcolor=(inp.h8h15 & mask?LIGHTRED:LIGHTGRAY)
+              if i==H_SWITCH then
+                change hmuxsw[j+half,i] text=(inp.h8h15 & mask?"D":"A")
+              else if i==H_UI then
+                change hmuxsw[j+half,i] text=(inp.h8h15 & mask?"U":"I")
+              endif
+            endif
+            change hmuxsw[j+half,i] color=(inp.h8h15 & mask?YELLOW:BLACK)
+            mask=mask<<1
+          enddo
+        enddo
+      endif
+      // Relays Q32..Q63 and corresponding on-head switches. LATEST is not
+      // supported.
+      if inp.q32q63!=previnp.q32q63 || inp.h24h31!=previnp.h24h31 then
+        mask=1
+        for j=8,j<half,j++ do
+          for i=0,i<4,i++ do
+            change hmuxrelay[j+half,i]                                         \
+              bkcolor=(inp.q32q63 & mask?LIGHTRED:LIGHTGRAY)
+            if i==H_ZERO then
+              change hmuxsw[j+half,i]                                          \
+              bkcolor=(inp.h24h31 & mask?LIGHTRED:LIGHTYELLOW)
+            else
+              change hmuxsw[j+half,i]                                          \
+                bkcolor=(inp.h24h31 & mask?LIGHTRED:LIGHTGRAY)
+              if i==H_SWITCH then
+                change hmuxsw[j+half,i] text=(inp.h24h31 & mask?"D":"A")
+              else if i==H_UI then
+                change hmuxsw[j+half,i] text=(inp.h24h31 & mask?"U":"I")
+              endif
+            endif
+            change hmuxsw[j+half,i] color=(inp.h24h31 & mask?YELLOW:BLACK)
+            mask=mask<<1
+          enddo
+        enddo
+      endif
+      // LATEST relays K0..K31.
+      if inp.la0la31!=previnp.la0la31 then
+        mask=1
+        for j=0,j<half && j<8,j++ do
+          for i=0,i<=3,i=i+3 do
+            change hlatestrelay[j,i]                                           \
+              bkcolor=(inp.la0la31 & mask?LIGHTRED:LIGHTGRAY)
+            change hlatestrelay[j+half,i]                                      \
+              bkcolor=(inp.la0la31 & (mask<<16)?LIGHTRED:LIGHTGRAY)
+            mask=mask<<1
+          enddo
+        enddo
+      endif
+      // Auxiliary relays K64..K79, overload indicators and button that toggles
+      // temperature measurements.
+      if inp.k64k79!=previnp.k64k79 then
+        // Relays K64..K79.
+        mask=1
+        for j=0,j<4,j++ do
+          for i=0,i<4,i++ do
+            change hauxrelay[j,i] bkcolor=(inp.k64k79 & mask?LIGHTRED:LIGHTGRAY)
+            if j==1 then
+              change hbusaux[i] bkcolor=(inp.k64k79 & mask?LIGHTRED:LIGHTGRAY)
+            endif
+            mask=mask<<1
+          enddo
+        enddo
+        // Overload indicators.
+        draw window=hlimineg color=BLACK bkcolor=LIGHTYELLOW clear
+        draw bkcolor=(inp.k64k79 & 0x00010000?WHITE:LIGHTBLUE)
+        draw at 8,8 fillellipse 15,15
+        draw show
+        draw window=hlimipos color=BLACK bkcolor=LIGHTYELLOW clear
+        draw bkcolor=(inp.k64k79 & 0x00020000?WHITE:LIGHTRED)
+        draw at 8,8 fillellipse 15,15
+        draw show
+        draw window=hlimuneg color=BLACK bkcolor=LIGHTYELLOW clear
+        draw bkcolor=(inp.k64k79 & 0x00040000?WHITE:LIGHTBLUE)
+        draw at 8,8 fillellipse 15,15
+        draw show
+        draw window=hlimupos color=BLACK bkcolor=LIGHTYELLOW clear
+        draw bkcolor=(inp.k64k79 & 0x00080000?WHITE:LIGHTRED)
+        draw at 8,8 fillellipse 15,15
+        draw show
+        // Temperature sensor.
+        change htempoff bkcolor=(inp.k64k79 & 0x80000000?LIGHTRED:WHITE)
+        change htempoff text=(inp.k64k79 & 0x80000000?"X":"")
+      endif
+      // Feedback resistors.
+      if inp.rback!=previnp.rback then
+        for j=0,j<4,j++ do
+          change hrback[j] color=(inp.rback==rbackorder[j]?YELLOW:BLACK)
+          change hrback[j] bkcolor=(inp.rback==rbackorder[j]?LIGHTRED:LIGHTGRAY)
+        enddo
+      endif
+      // External voltage outputs.
+      if nmodule>0 then
+        if (uoutmodule==0 && (inp.extuout0!=previnp.extuout0 ||                \
+        inp.extuout1!=previnp.extuout1)) ||                                    \
+        (uoutmodule==1 && (inp.extuout2!=previnp.extuout2 ||                   \
+        inp.extuout3!=previnp.extuout3)) Updateuout()
+      endif
+      // Auxiliary LATEST relays K32..K37 (K0..K5).
+      if inp.la32la37!=previnp.la32la37 then
+        for i=0,i<4,i++ do
+          change hlatestaux[i]                                                 \
+          bkcolor=(inp.la32la37 & (1<<laextorder[i])?LIGHTRED:LIGHTGRAY)
+        enddo
+        change hlatestr[0] bkcolor=(inp.la32la37 & 0x10?LIGHTRED:LIGHTGRAY)
+        change hlatestr[1] bkcolor=(inp.la32la37 & 0x20?LIGHTRED:LIGHTGRAY)
+        change hlatestr[2] bkcolor=(inp.la32la37 & 0x20?LIGHTRED:LIGHTGRAY)
+        change hlatestr[3] bkcolor=(inp.la32la37 & 0x10?LIGHTRED:LIGHTGRAY)
+      endif
+      // LATEST multiplexer.
+      if inp.lamux!=previnp.lamux then
+        for j=0,j<9,j++ do
+          if (inp.lamux & 0x3E)==lamuxbits[j] break
+        enddo
+        for i=0,i<9,i++ do
+          if i==j then
+            change hlamux[i] color=YELLOW
+            change hlamux[i] bkcolor=LIGHTRED
+          else
+            change hlamux[i] color=BLACK
+            change hlamux[i] bkcolor=LIGHTGRAY
+          endif
+        enddo
+      endif
+      // Relays on measurement card.
+      if inp.k111k80!=previnp.k111k80 then
+        mask=1
+        for j=0,j<32,j++ do
+          change hrelay[j] bkcolor=(inp.k111k80 & mask?LIGHTRED:LIGHTGRAY)
+          mask=mask<<1
+        enddo
+      endif
+      // Modifications of measurement card.
+      if inp.types!=previnp.types then
+        if (inp.types & 0x07)==0x01 then
+          change hvcardtype text="HV500"
+          maxhv=500
+        else if (inp.types & 0x07)==0x02 then
+          change hvcardtype text="HV1000"
+          maxhv=1000
+        else
+          change hvcardtype text="HV500"
+          maxhv=500                         
+        endif
+        for j=0,j<4,j++ do
+          if (inp.types & 0x10000) then
+            change hampl[j] help=format(                                       \
+              "Press to select ADC PGA amplification %s (key %s)",             \
+              ampl204[j][0],ampl204[j][1])
+            change hampl[j] text=ampl204[j][0]
+          else
+            change hampl[j] help=format(                                       \
+              "Press to select ADC PGA amplification %s (key %s)",             \
+              ampl207[j][0],ampl207[j][1])
+            change hampl[j] text=ampl207[j][0]
+          endif
+        enddo
+        updateedits=1
+      endif
+      // Current/voltage sources and form/frequency, filtering and unprotect
+      // buttons.
+      if inp.udac!=previnp.udac then
+        udac=inp.udac & 0x0000FFFF
+        change hudac text=format("%.3f",(udac-32768)/32768.0*2.50)
+        change hi300 text=format("%.1f",(udac-32768)/32768.0*312.5)
+        change hihigh text=format("%.1f",(udac-32768)/32768.0*100.0)
+        change hilow text=format("%.3f",(udac-32768)/32768.0*2.50)
+        change hu text=format("%.3f",-(udac-32768)/32768.0*10.0)
+        p=(inp.udac>>20) & 0x0F
+        q=(inp.udac>>16) & 0x0F
+        for j=0,j<8,j++ do
+          change hform[j] color=(p==j?YELLOW:BLACK)
+          change hform[j] bkcolor=(p==j?LIGHTRED:LIGHTGRAY)
+        enddo
+        if p==4 && hfirsth==NULL then
+          hfirsth=control BUTTON
+            window=hmeas
+            position=ADCX0+5,ADCY0+5,ADCDX-2*RLDX-2,RLDY-2
+            text=(out.udac & 0x01000000?"1st harm":"2nd harm")
+            bkcolor=(out.udac & 0x01000000?LIGHTGREEN:LIGHTGRAY)
+            help="强制第一次谐波测量"
+            font=SMALLFONT
+          endc
+        else if p!=4 && hfirsth!=NULL then
+          destroy hfirsth
+          hfirsth=NULL
+        endif
+        for j=0,j<10,j++ do
+          change hfreq[j] color=(q==j?YELLOW:BLACK)
+          change hfreq[j] bkcolor=(q==j?LIGHTRED:LIGHTGRAY)
+        enddo
+        p=inp.udac & 0x80000000
+        change hsmooth bkcolor=(p==0?LIGHTGRAY:LIGHTGREEN)
+        p=inp.udac & 0x30000000
+        if p==0x00000000 then
+          change hunprot text="Safe"
+          change hunprot color=BLACK
+          change hunprot bkcolor=LIGHTGREEN
+        else if p==0x30000000 then
+          change hunprot text="Unsafe"
+          change hunprot color=YELLOW
+          change hunprot bkcolor=LIGHTRED
+        else
+          change hunprot text="Unsafe"
+          change hunprot color=BLACK
+          change hunprot bkcolor=YELLOW
+        endif
+        if (inp.udac & 0x02000000) then
+          change hresw bkcolor=YELLOW
+          change hresw text="Resw C"
+        else
+          change hresw bkcolor=LIGHTGREEN
+          change hresw text="Resw A"
+        endif
+      endif
+      // Source offset.
+      if ((inp.offs^previnp.offs) & 0x0000FFFF)!=0 then
+        acoffset=((inp.offs & 0x0000FFFF)-32768)/64.0
+        if (inp.offs & 0x0000FFFF)==32768 then
+          change hacofzero color=BLACK
+          change hacofzero bkcolor=LIGHTGRAY
+        else
+          change hacofzero color=YELLOW
+          change hacofzero bkcolor=LIGHTRED
+        endif
+      endif
+      // Delays.
+      if inp.delays!=previnp.delays then
+        // Actual sample-and-hold delay.
+        change hshon bkcolor=(inp.delays & 0x0020?LIGHTGRAY:LIGHTGREEN)
+        change hshdelay text=format("%i",inp.delays & 0x1F)
+        // Actual acceleration delay.
+        change hbooston bkcolor=(inp.delays & 0x4000?LIGHTGRAY:LIGHTGREEN)
+        change hboost text=format("%i",(inp.delays>>8) & 0x3F)
+        // Actual AD-DA delay.
+        change hadda text=format("%i",(inp.delays>>16) & 0x3F)
+      endif
+      // Actual DAC0 values and toggle switches (4 outputs).
+      if inp.dacineg!=previnp.dacineg then
+        change hactineg name=format(" %i",inp.dacineg)
+        u=15.0-inp.dacineg/273.07
+        if u>10.0 then
+          change hactinegv text=" <-10 V"
+        else if u>1.0 then
+          change hactinegv text=format(" %.1f V",-u)
+        else
+          change hactinegv text=format(" %.2fV",-u)
+        endif
+        Text(hdacineg[0],s); j=0; sscanf(s,"%i",&j); j=Max(0,Min(4095,j))
+        Text(hdacineg[1],s); k=0; sscanf(s,"%i",&k); k=Max(0,Min(4095,k))
+        if inp.dacineg==j then
+          change htogineg bkcolor=LIGHTGREEN
+        else if inp.dacineg==k then
+          change htogineg bkcolor=LIGHTMAGENTA
+        else
+          change htogineg bkcolor=LIGHTGRAY
+        endif
+      endif
+      if inp.dacipos!=previnp.dacipos then
+        change hactipos name=format(" %i",inp.dacipos)
+        u=15.0-inp.dacipos/273.07
+        if u>10.0 then
+          change hactiposv text=" > 10 V"
+        else if u>1.0 then
+          change hactiposv text=format(" %.1f V",u)
+        else
+          change hactiposv text=format(" %.2fV",u)
+        endif
+        Text(hdacipos[0],s); j=0; sscanf(s,"%i",&j); j=Max(0,Min(4095,j))
+        Text(hdacipos[1],s); k=0; sscanf(s,"%i",&k); k=Max(0,Min(4095,k))
+        if inp.dacipos==j then
+          change htogipos bkcolor=LIGHTGREEN
+        else if inp.dacipos==k then
+          change htogipos bkcolor=LIGHTMAGENTA
+        else
+          change htogipos bkcolor=LIGHTGRAY
+        endif
+      endif
+      if inp.dacilim!=previnp.dacilim then
+        change hactilim name=format(" %i",inp.dacilim)
+        change hactilimi name=format(" %.2f A",Max(0.0,(inp.dacilim-150)/778.2))
+        Text(hdacilim[0],s); j=0; sscanf(s,"%i",&j); j=Max(0,Min(4095,j))
+        Text(hdacilim[1],s); k=0; sscanf(s,"%i",&k); k=Max(0,Min(4095,k))
+        if inp.dacilim==j then
+          change htogilim bkcolor=LIGHTGREEN
+        else if inp.dacilim==k then
+          change htogilim bkcolor=LIGHTMAGENTA
+        else
+          change htogilim bkcolor=LIGHTGRAY
+        endif
+      endif
+      if inp.dacuhyst!=previnp.dacuhyst then
+        change hactuhyst name=format(" %i",inp.dacuhyst)
+        Text(hdacuhyst[0],s); j=0; sscanf(s,"%i",&j); j=Max(0,Min(4095,j))
+        Text(hdacuhyst[1],s); k=0; sscanf(s,"%i",&k); k=Max(0,Min(4095,k))
+        if inp.dacuhyst==j then
+          change htoguhyst bkcolor=LIGHTGREEN
+        else if inp.dacuhyst==k then
+          change htoguhyst bkcolor=LIGHTMAGENTA
+        else
+          change htoguhyst bkcolor=LIGHTGRAY
+        endif
+      endif
+      // HV DAC1.
+      if inp.dachv!=previnp.dachv then
+        if maxhv==1000 then
+          u=(inp.dachv & 0xFFFF)/HXTODAC
+        else
+          u=(inp.dachv & 0xFFFF)/HVTODAC
+        endif
+        change hvactual name=format(" %.1f V",u)
+      endif
+      // HV master switch, current limits, HV amplification and 300 mA source.
+      if inp.addr9!=previnp.addr9 then
+        p=inp.addr9 & 0x00000002
+        change hvswitch color=(p!=0?YELLOW:BLACK)
+        change hvswitch bkcolor=(p!=0?LIGHTRED:LIGHTGRAY)
+        p=inp.addr9 & 0x00000020
+        change hvcurrent[0][0] color=(p==0?YELLOW:BLACK)
+        change hvcurrent[0][0] bkcolor=(p==0?LIGHTRED:LIGHTGRAY)
+        change hvcurrent[0][1] color=(p!=0?YELLOW:BLACK)
+        change hvcurrent[0][1] bkcolor=(p!=0?LIGHTRED:LIGHTGRAY)
+        p=inp.addr9 & 0x00000040
+        change hvcurrent[1][0] color=(p==0?YELLOW:BLACK)
+        change hvcurrent[1][0] bkcolor=(p==0?LIGHTRED:LIGHTGRAY)
+        change hvcurrent[1][1] color=(p!=0?YELLOW:BLACK)
+        change hvcurrent[1][1] bkcolor=(p!=0?LIGHTRED:LIGHTGRAY)
+        p=disorder[(inp.addr9>>2) & 0x3]
+        for j=0,j<4,j++ do
+          change hvampl[j] color=(p==j?YELLOW:BLACK)
+          change hvampl[j] bkcolor=(p==j?LIGHTRED:LIGHTGRAY)
+        enddo
+        p=inp.addr9 & 0x00000080
+        change h300enable color=(p!=0?YELLOW:BLACK)
+        change h300enable bkcolor=(p!=0?LIGHTRED:WHITEBLUE)
+      endif
+      // ADC commutator, filter and PGA amplification switches.
+      if inp.pgamux!=previnp.pgamux then
+        p=inp.pgamux & 0xF
+        q=(inp.pgamux>>4) & 0xF
+        for j=0,j<16,j++ do
+          change hcomm[j,0] color=(p==j?YELLOW:BLACK)
+          change hcomm[j,0] bkcolor=(p==j?LIGHTRED:LIGHTGRAY)
+          change hcomm[j,1] color=(q==j?YELLOW:BLACK)
+          change hcomm[j,1] bkcolor=(q==j?LIGHTRED:LIGHTGRAY)
+        enddo
+        p=(inp.pgamux>>8) & 0x3
+        for j=0,j<4,j++ do
+          change hampl[j] color=(p==j?YELLOW:BLACK)
+          change hampl[j] bkcolor=(p==j?LIGHTRED:LIGHTGRAY)
+        enddo
+        p=inp.pgamux & 0x1C00
+        for i=0,i<8,i++ do
+          if p==filterbits[i][0] break
+        enddo
+        p=filterbits[i][1]
+        for j=0,j<4,j++ do
+          change hfilter[j] color=(p==j?YELLOW:BLACK)
+          change hfilter[j] bkcolor=(p==j?LIGHTRED:LIGHTGRAY)
+        enddo
+      endif
+      // ADC display. This changes always, no need to compare with previously
+      // displayed value.
+      draw window=hadc mode=M_CENTERED
+      if (inp.udac & 0x00F00000)==0x00100000 ||                                \
+        (inp.udac & 0x01F00000)==0x01400000 then
+        // Sine wave (first harmonic), display amplitude and phase.
+        if (previnp.udac & 0x00F00000)!=0x00100000 &&                          \
+          (previnp.udac & 0x01F00000)!=0x01400000 then
+          change hadc help="正弦信号的幅度，V和相位度"
+        endif
+        draw bkcolor=WHITEBLUE clear
+        u=Sqrt(inp.dbgsin*inp.dbgsin+inp.dbgcos*inp.dbgcos)/512.0
+        draw color=BLACK font=MEDIUMFONT at ADCDX/2-4,19
+        if inp.udac & 0x80000000 then
+          draw text=format("%.5fV",u/32768.0*10.0)
+        else
+          draw text=format("%.4f V",u/32768.0*10.0)
+        endif
+        r=Atan2(inp.dbgcos,inp.dbgsin)*360.0/(2.0*3.14159265359)
+        draw font=SMALLFONT
+        draw at ADCDX/2-4,31 text=format("Ph=%.3f ",r)
+      else if (inp.udac & 0x01F00000)==0x00400000 then
+        // Shifted sine (second harmonic), display components.
+        if (previnp.udac & 0x01F00000)!=0x00400000 then
+          change hadc help="二次谐波的正弦和余弦分量"
+        endif
+        draw bkcolor=WHITE clear font=MAINFONT
+        draw color=RED at ADCDX/2-4,16
+        draw text=format("%.2f",inp.dbgsin-shazerosin)
+        draw color=GREEN at ADCDX/2-4,30
+        draw text=format("%.2f",inp.dbgcos-shazerocos)
+      else
+        // Any other case, display voltage and raw or converted signal.
+        if (previnp.udac & 0x00F00000)==0x00100000 ||                          \
+          (previnp.udac & 0x00F00000)==0x00400000 then
+          change hadc help="主ADC(转换为有符号电压"            \
+          "and as raw ADC bits)"
+        endif
+        if adczeroset then
+          u=inp.uadc-adczerolevel
+        else
+          u=inp.uadc-32768.0
+        endif
+        if inp.uadc<=0.0 then          // Underflow
+          draw bkcolor=LIGHTBLUE clear color=YELLOW
+          j=WHITE
+        else if inp.uadc>=65535.0 then // Overflow
+          draw bkcolor=LIGHTRED clear color=BLACK
+          j=BLACK
+        else
+          draw bkcolor=WHITE clear color=LIGHTRED
+          j=DARKGRAY
+        endif
+        draw font=MEDIUMFONT
+        draw at ADCDX/2-4,19 text=format("%.4f V",u/32768.0*10.0)
+        draw color=j font=SMALLFONT at ADCDX/2-4,31
+        p=(inp.pgamux>>8) & 0x3
+        if p==0 r=u/1.00/3276.8
+        if p==1 r=u/2.00/3276.8
+        if p==2 r=u/5.00/3276.8
+        if p==3 r=u/10.0/3276.8
+        p=inp.pgamux & 0xF
+        q=(inp.pgamux>>4) & 0xF
+        if (p==4 && q==4) || (p==4 && q==15) || (p==15 && q==4) then
+          // I-U converter.
+          draw text=format("%.5g nA",r*10000.0)
+        else if (p==9 && q==9) || (p==9 && q==15) || (p==15 && q==9) then
+          // HV I. Correct for HV current amplifier.
+          p=disorder[(inp.addr9>>2) & 0x3]
+          if p==0 r=r/9.0000           // Current, milliamperes
+          if p==1 r=r/90.000
+          if p==2 r=r/900.00
+          if p==3 r=r/9000.0
+          if Abs(r)>=0.1 then
+            draw text=format("%.4g mA",r)
+          else if Abs(r)>=0.0001 then
+            draw text=format("%.4g uA",r*1000.0)
+          else
+            draw text=format("%.4g nA",r*1000000.0)
+          endif
+        else if (p==10 && q==10) || (p==10 && q==15) || (p==15 && q==10) then
+          // HV source voltage.
+          if maxhv==1000 then
+            draw text=format("%.4g V",r*(3276.8/HXSRCFACT))
+          else
+            draw text=format("%.4g V",r*(3276.8/HVSRCFACT))
+          endif
+        else if (p==11 && q==11) || (p==11 && q==15) || (p==15 && q==11) then
+          // HV voltage.
+          if maxhv==1000 then
+            draw text=format("%.4g V",-r*(3276.8/ADCHX))// 122.8)
+          else
+            draw text=format("%.4g V",-r*(3276.8/ADCHV)) //*62.5)
+          endif
+        else if (p==12 && q==12) || (p==12 && q==15) || (p==15 && q==12) then
+          // Current over HV regulator.
+          draw text=format("%.4g mA",r*2.0)
+        else if (inp.udac & 0x80000000)!=0 then
+          // All remaining combinations, smoothed.
+          draw text=format("%.2f bits",inp.uadc-32768.0)
+        else
+          // All remaining combinations, not smoothed.
+          draw text=format("%.1f bits",inp.uadc-32768)
+        endif
+      endif
+      draw show
+      updatebuttons=0
+      Memcpy(previnp,inp,Sizeof(inp))
+    endif
+    // Check whether test interpreter is running.
+    if measset!=0 && Time()-measset>1000 then
+      if adczeroset then
+        u=inp.uadc-adczerolevel
+      else
+        u=inp.uadc-32768.0
+      endif
+      i=sprintf(s,"MEASVOLT %.4f",u/32768.0*10.0)
+      SYS.Broadcast(i+1,s)
+      measset=0
+    endif
+    wait
+  enddo
+  // Save configurations to .ini file.
+  lim1=0; Text(hdacineg[0],s); sscanf(s,"%i",&lim1)
+  lim2=0; Text(hdacipos[0],s); sscanf(s,"%i",&lim2)
+  lim3=0; Text(hdacilim[0],s); sscanf(s,"%i",&lim3)
+  lim4=0; Text(hdacuhyst[0],s); sscanf(s,"%i",&lim4)
+  setini("A5meas","Limits","%i,%i,%i,%i",lim1,lim2,lim3,lim4);
+  lim1=0; Text(hdacineg[1],s); sscanf(s,"%i",&lim1)
+  lim2=0; Text(hdacipos[1],s); sscanf(s,"%i",&lim2)
+  lim3=0; Text(hdacilim[1],s); sscanf(s,"%i",&lim3)
+  lim4=0; Text(hdacuhyst[1],s); sscanf(s,"%i",&lim4)
+  setini("A5meas","Limits2","%i,%i,%i,%i",lim1,lim2,lim3,lim4);
+  for i=0,i<NCONFIG,i++ do
+    sprintf(key,"Config[%i]",i)
+    Memcpy(buf,config[i],Sizeof(out))
+    for j=0,j<Sizeof(out),j++ do
+      sprintf(s+2*j,"%02X",buf[j])
+    enddo
+    setini("A5meas",key,s)
+  enddo
+end
+

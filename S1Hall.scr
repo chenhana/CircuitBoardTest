@@ -1,0 +1,653 @@
+#include "ls.icl"                  // Standard functions
+#include "or.icl"                // A2 command names
+#include "pa.icl"                  // Rich Text Format extentions
+#cmdbuff 2
+
+#define VERSION        "1.00"
+#define DESCRIPTION    "S1 Hall-to-motor phase shift"
+
+// 1.00: Original version.
+
+#define WIDTH          640             // Full width of client area
+#define HEIGHT         450             // Full height of client area
+#define VIEWDX         520             // Width of data viewer (client area)
+#define MSGDY          22              // Height of message string
+#define BTNDY          22              // Height of buttons
+#define INFDY          18              // Height of info lines
+#define BORDER         5               // Distance between controls
+
+#define ZMIN           5000.0          // Topmost Z to measure phase
+#define ZSTEP          200.0           // Z step, micrometers
+#define NSTEP          76              // Number of Z steps to measure phase
+#define SAFEPHASE      35.0            // Safe phase shift, micrometers
+
+handle           hmain                 // Main window
+handle           hmsg                  // Message string
+handle           hview                 // Data viewer
+handle           hhead[32]             // Head selection buttons
+handle           hinfo[3]              // Data parameters
+handle           hmeasure              // Measure new phase shift
+handle           hmeasall              // Measure all phase shifts
+handle           hprotocol             // Protocol data to RTF file
+handle           hexit                 // Close script
+
+int              selected              // Selected head
+int              redraw                // Request to redraw graphics
+int              nphase[32]            // Number of data points in phase
+float            phase[32][NSTEP]      // Measured phase
+float            pmean[32]             // Mean phase, or 10000.0 if undefined
+int              cursor                // Position of data cursor
+int              mousey                // Y mouse coordinate, pixels
+int              mousechanged          // Mouse coordinate changed
+int              confirmed             // Clear shuttle was confirmed
+
+// Initializes statistics.
+function int Initsigma(float disp[])
+  disp[0]=0.0
+  disp[1]=0.0
+  disp[2]=0.0
+  disp[3]=0.0
+  disp[4]=0.0
+end
+
+// Function adds next measured value to array disp[5] which accumulates data
+// necessary to calculate normal dispersion, mean, minimal and maximal.
+function int Addsigma(float disp[],float value)
+  if disp[0]<=0.0 then
+    disp[0]=1.0                        // First point, data is still undefined
+    disp[1]=value
+    disp[2]=value*value
+    disp[3]=value
+    disp[4]=value
+  else
+    disp[0]=disp[0]+1.0
+    disp[1]=disp[1]+value
+    disp[2]=disp[2]+value*value
+    disp[3]=Min(disp[3],value)
+    disp[4]=Max(disp[4],value)
+  endif
+end
+
+// Function returns number of data items gathered by Addsigma().
+function int Getcount(float disp[])
+  return disp[0]
+end
+
+// Function calculates mean value based on data gathered by Addsigma().
+function float Getmean(float disp[])
+  if disp[0]<1.0 then
+    return 0.0
+  else
+    return disp[1]/disp[0]
+  endif
+end
+
+// Function calculates minimal value based on data gathered by Addsigma().
+function float Getmin(float disp[])
+  return disp[3]
+end
+
+// Function calculates minimal value based on data gathered by Addsigma().
+function float Getmax(float disp[])
+  return disp[4]
+end
+
+// Function calculates normal dispersion based on data gathered by Addsigma().
+function float Getsigma(float disp[])
+  float r
+  if disp[0]<2.0 then
+    return 0.0
+  else
+    r=(disp[0]*disp[2]-disp[1]*disp[1])/disp[0]/(disp[0]-1.0)
+    if r<=0 then
+      return 0.0
+    else
+      return Sqrt(r)
+    endif
+  endif
+end
+
+// Service function, displays formatted message.
+function int Message(int color,format f)
+  change hmsg color=color
+  change hmsg text=f
+end
+
+// Service function, draws data and cursor in the data viewer window.
+function int Drawdata(int gathering)
+  int i,x1,y1,x2,y2,xdata,ydata
+  float x,y,x0,y0,xscale,yscale
+  // Clear window.
+  draw window=hview color=WHITE bkcolor=WHITE mode=M_LEFT clear
+  // Get window (x1,y1 to x2,y2 in graph pixels), scale and origin. Conversion
+  // formulas:
+  //   xgraph=x0+phase*xscale
+  //   ygraph=y0+z*yscale
+  x1=60
+  y1=6
+  x2=VIEWDX-6
+  y2=HEIGHT-3*BORDER-MSGDY-29
+  x0=(x1+x2)/2.0
+  xscale=(x2-x1-2)/500.0               // +/- 250 micrometers phase shift
+  yscale=(y2-y1-20)/(NSTEP*ZSTEP)
+  y0=y1+10-ZMIN*yscale
+  // Draw head name.
+  draw mode=M_LEFT font=LARGEFONT color=(gathering==2?GRAY:PINK)
+  draw at x1+3,y1+37 text=format("%i%s",selected/2,selected & 1?"R":"L")
+  // Draw safe limits.
+  draw color=(gathering==2?GREEN:WHITEGREEN) bkcolor=WHITEGREEN
+  draw at x0-SAFEPHASE*xscale,y1 fillrect x0+SAFEPHASE*xscale+1,y2
+  // Draw grid and frame.
+  draw mode=M_CENTERED font=SMALLFONT
+  for x=-200.0,x<=200.0,x=x+50.0 do
+    draw color=(x==0 || gathering==2?GRAY:LIGHTGRAY)
+    draw at x0+x*xscale,y1+1 to x0+x*xscale,y2
+    draw color=BLACK
+    draw at x0+x*xscale,y2+14 text=format("%g",x)
+  enddo
+  draw mode=M_RIGHT color=BLACK at x2,y2+25 text="Phase shift, um"
+  draw mode=M_RIGHT font=SMALLFONT
+  for y=ZMIN+1000,y<ZMIN+ZSTEP*NSTEP,y=y+2000.0 do
+    draw color=(gathering==2?GRAY:LIGHTGRAY)
+    draw at x1,y0+y*yscale to x2,y0+y*yscale
+    draw color=BLACK
+    draw at x1-3,y0+y*yscale+7 text=format("%g",y)
+  enddo
+  draw mode=M_RIGHT color=BLACK at x1-3,16 text="Z, um"
+  draw color=BLACK at x1,y1 rect x2,y2
+  if nphase[selected]==0 then
+    // Draw warning.
+    draw color=LIGHTRED mode=M_CENTERED font=MEDIUMFONT
+    if gathering==0 then
+      draw at (x1+x2)/2,y2-30 text="Press \"Measure\" to gather data"
+    endif
+    change hinfo[0] text=""
+    change hinfo[1] text=""
+    change hinfo[2] text=""
+  else
+    // Recalculate and draw cursor.
+    if mousechanged then
+      cursor=(mousey-y0)/yscale
+      cursor=cursor/ZSTEP              // Rounding to nearest, waddelse
+      cursor=cursor*ZSTEP
+      if cursor<ZMIN then
+        cursor=ZMIN
+      else if cursor>ZMIN+(NSTEP-1)*ZSTEP then
+        cursor=ZMIN+(NSTEP-1)*ZSTEP
+      endif
+      mousechanged=0
+    endif
+    if gathering==0 then
+      draw color=GRAY at x1,y0+cursor*yscale to x2,y0+cursor*yscale
+    endif
+    // Draw mean.
+    if gathering==1 || pmean[selected]>1000.0 then
+      change hinfo[2] text=""
+    else
+      draw color=LIGHTRED
+      xdata=x0+pmean[selected]*xscale
+      xdata=Max(x1+1,Min(xdata,x2-1))
+      ydata=y0+(ZMIN+ZSTEP*(nphase[selected]-NSTEP/4))*yscale
+      ydata=Max(y1+1,Min(ydata,y2-1))
+      draw at xdata-4,ydata to xdata+5,ydata
+      draw at xdata,ydata
+      ydata=y0+(ZMIN+ZSTEP*(nphase[selected]-1))*yscale
+      ydata=Max(y1+1,Min(ydata,y2-1))
+      draw to xdata,ydata
+      draw at xdata-4,ydata to xdata+5,ydata
+      change hinfo[2] text=format("Mean = %i um",pmean[selected])
+    endif
+    // Draw data.
+    draw color=BLACK
+    for i=0,i<NSTEP && i<nphase[selected],i++ do
+      xdata=x0+phase[selected][i]*xscale
+      ydata=y0+(ZMIN+ZSTEP*i)*yscale
+      xdata=Max(x1+1,Min(xdata,x2-1))
+      ydata=Max(y1+1,Min(ydata,y2-1))
+      if i==0 then
+        draw at xdata,ydata
+      else
+        draw to xdata,ydata
+      endif
+    enddo
+    // Update info
+    i=(cursor-ZMIN)/ZSTEP
+    if gathering!=0 || i<0 || i>=nphase[selected] then
+      change hinfo[0] text=""
+      change hinfo[1] text=""
+    else
+      change hinfo[0] text=format("Z = %i um",cursor)
+      change hinfo[1] text=format("Shift = %.0f um",phase[selected][i])
+    endif
+  endif
+  draw show
+end
+
+// Measures phase shift on the selected head. Returns -1 if user pressed Exit,
+// 1 if action was cancelled (and error displayed) and 0 in any other case.
+function int Measure(int isnext)
+  int i,j,t,err
+  float x,y,z,p,ymin,ymax,means[5],meanz[5]
+  char s[256]
+  handle hcontinue,hcancel
+  // Disable buttons.
+  disable hmeasure
+  disable hmeasall
+  disable hprotocol
+  for i=0,i<$LAY.nfing*2,i++ do
+    disable hhead[i]
+  enddo
+  // Create confirmation buttons.
+  hcontinue=control BUTTON
+    window=hview
+    position=VIEWDX/2-85,220,80,25
+    text="继续"
+    help="按下开始测量"
+  endc
+  hcancel=control BUTTON
+    window=hview
+    position=VIEWDX/2+5,220,80,25
+    text="Cancel"
+    help="按可取消操作"
+  endc
+  err=0
+  Message(BLACK," Measuring phase shift for head %i%s",                        \
+    selected/2,selected & 1?"R":"L")
+  // Ask user to remove board.
+  if confirmed==0 then
+    draw window=hview color=WHITE bkcolor=WHITE clear
+    draw mode=M_CENTERED font=LARGEFONT color=LIGHTRED
+    draw at VIEWDX/2,65 text="ATTENTION!"
+    draw mode=M_CENTERED font=MEDIUMFONT color=RED
+    draw at VIEWDX/2,110 text="Please remove board, if any, from the shuttle"
+    draw at VIEWDX/2,132 text="and assure that the middle tester area is clear."
+    draw at VIEWDX/2,154 text="Please press 'Continue' when ready."
+    draw show
+    while err==0 do
+      if Pressed(hexit) then
+        err=-1
+      else if Pressed(hcontinue) then
+        break
+      else if Pressed(hcancel) then
+        Message(LIGHTRED,"Measurements cancelled")
+        err=1
+      endif
+      wait
+    enddo
+    if err!=0 goto finish
+    confirmed=1
+  endif
+  // Move fingers.
+  ymin=+1.0e99
+  ymax=-1.0e99
+  for i=0,i<$LAY.nfing,i++ do
+    ymin=Min(ymin,$LAY.bottom[i]/1000.0)
+    ymax=Max(ymax,$LAY.top[i]/1000.0)
+  enddo
+  x=$LAY.xoffset/1000.0
+  y=(ymin+ymax)/2.0
+  y=Max(y,$LAY.bottom[selected/2]/1000.0+15.0)
+  y=Min(y,$LAY.top[selected/2]/1000.0-15.0)
+  for i=0,i<$LAY.nfing*2,i++ do
+    if i==selected then
+      sprintf(s,"M %i(%f,%fH50) NOP",i,x,y)
+      SERV.Cmdimm(0,s)
+    else
+      sprintf(s,"M %i(Z) NOP",i)
+      SERV.Cmdimm(1,s)
+    endif
+  enddo
+  draw window=hview color=WHITE bkcolor=WHITE clear
+  draw mode=M_CENTERED font=MEDIUMFONT color=RED at VIEWDX/2,110
+  draw text="Heads are moving, please wait..."
+  draw show
+  disable hcontinue
+  while err==0 do
+    if $A[0].length>0 then
+      break
+    else if Pressed(hexit) then
+      err=-1
+    else if Pressed(hcancel) then
+      Message(LIGHTRED,"Measurements cancelled")
+      err=1
+    endif
+    wait
+  enddo
+  if err!=0 goto finish
+  enable hcontinue
+  // Ask for the confirmation once again.
+  if isnext==0 then
+    draw window=hview color=WHITE bkcolor=WHITE clear
+    draw mode=M_CENTERED font=MEDIUMFONT color=RED at VIEWDX/2,110
+    draw text="Please confirm that area under the finger is clear."
+    draw show
+    while err==0 do
+      if Pressed(hexit) then
+        err=-1
+      else if Pressed(hcontinue) then
+        break
+      else if Pressed(hcancel) then
+        Message(LIGHTRED,"Measurements cancelled")
+        err=1
+      endif
+      wait
+    enddo
+    if err!=0 goto finish
+  endif
+  destroy hcontinue
+  destroy hcancel
+  hcancel=control BUTTON
+    window=hview
+    position=VIEWDX/2-12,290,80,25
+    text="停止"
+    help="按下停止测量"
+  endc
+  // Discard old data.
+  nphase[selected]=0
+  pmean[selected]=10000.0
+  // Set slow head movements (2 mm/s).
+  SERV.Cmdimm(1,"OUTPORT32 ALL 0x10010007,2")
+  // Make measurements.
+  for i=0,i<NSTEP,i++ do
+    // Move to Z coordinate.
+    z=ZMIN+i*ZSTEP
+    SYS.Killimm(0)
+    sprintf(s,"OUTPORT32 HEAD(%i) 0x10010008,%i",selected,z)
+    SERV.Cmdimm(0,s)
+    t=Time()
+    while err==0 do
+      if $A[0].length>0 then
+        break
+      else if Pressed(hexit) then
+        err=-1
+      else if Time()-t>5000 then
+        Message(LIGHTRED,"Timeout")
+        err=1
+      else if Pressed(hcancel) then
+        Message(LIGHTRED,"Measurements cancelled")
+        err=1
+      endif
+      wait
+    enddo
+    if err==0 && $A[0].answer!=S_OUTPORT32 then
+      Message(LIGHTRED,"Invalid answer")
+      err=1
+    endif
+    if err!=0 goto finish
+    // We need to wait anyway. Let's do something useful.
+    Drawdata(1)
+    // Wait at least 100 ms (first step: 500 ms) to stabilize coordinate.
+    while 1 do
+      if Time()-t>=(i==0?500:100) break
+      wait
+    enddo
+    // Measure shift and actual Z coordinate. Note: there is no wait inside
+    // this loop!
+    Initsigma(means)
+    Initsigma(meanz)
+    for j=0,j<15,j++ do
+      SYS.Killimm(0)
+      SYS.Killimm(1)
+      sprintf(s,"INPORT32 HEAD(%i) 0x10000202",selected)
+      SERV.Cmdimm(0,s)
+      sprintf(s,"INPORT32 HEAD(%i) 0x10000018",selected)
+      SERV.Cmdimm(1,s)
+      t=Time()
+      while err==0 do
+        if $A[0].length>0 && $A[1].length>0 then
+          break
+        else if Pressed(hexit) then
+          err=-1
+        else if Time()-t>5000 then
+          Message(LIGHTRED,"Timeout")
+          err=1
+        else if Pressed(hcancel) then
+          Message(LIGHTRED,"Measurements cancelled")
+          err=1
+        endif
+      enddo
+      if err==0 && ($A[0].answer!=S_INPORT32 || $A[1].answer!=S_INPORT32) then
+        Message(LIGHTRED,"Invalid answer")
+        err=1
+      endif
+      if err!=0 goto finish
+      Addsigma(means,$uint4($A[0]+5))
+      Addsigma(meanz,$uint4($A[1]+5))
+    enddo
+    if Abs(z-Getmean(meanz))>50.0 then
+      if i>NSTEP/2 break
+      Message(LIGHTRED,"Obstacled Z hub")
+      err=1; goto finish
+    endif
+    phase[selected][i]=Getmean(means)
+    nphase[selected]=i+1
+  enddo
+finish:
+  // Calculate mean phase shift.
+  if nphase[selected]>=NSTEP/2 then
+    p=0.0
+    for i=0,i<NSTEP/4,i++ do
+      p=p+phase[selected][nphase[selected]-NSTEP/4+i]
+    enddo
+    pmean[selected]=p/(NSTEP/4)
+  endif
+  // Remove buttons, if any.
+  clear hview
+  // Restore default Z port speed.
+  SERV.Cmdimm(1,"OUTPORT32 ALL 0x10010007,0")
+  // Move selected head up and in home position.
+  sprintf(s,"OUTPORT32 HEAD(%i) 0x10010008,%i",selected,ZMIN)
+  SERV.Cmdimm(0,s)
+  t=Time()                             // Delay to execute Z up
+  while Time()-t<100 do
+    wait
+  enddo
+  sprintf(s,"M %i(Z) NOP",selected)
+  SERV.Cmdimm(1,s)
+  // Enable buttons.
+  enable hmeasure
+  enable hmeasall
+  for i=0,i<$LAY.nfing*2,i++ do
+    enable hhead[i]
+    if nphase[i]>0 enable hprotocol    // Only if data is available
+  enddo
+  if err!=1 Message(BLACK,"")
+  redraw=1
+  return err
+end
+
+// Selects specified head.
+function int Selecthead(int head)
+  int i
+  if head<0 || head>=$LAY.nfing*2 return
+  if selected==head return
+  selected=head
+  // Highlight selected button.
+  for i=0,i<$LAY.nfing*2,i++ do
+    if i==selected then
+      change hhead[i] color=LIGHTRED
+      change hhead[i] bkcolor=YELLOW
+    else
+      change hhead[i] color=BLACK
+      change hhead[i] bkcolor=GRAY
+    endif
+  enddo
+  redraw=1
+end
+
+// Main program.
+function int main()
+  int i,j,x,y,buttons,dx,deltay,nhead
+  char s[256],rtffile[260]
+  // Get number of controllers.
+  nhead=$LAY.nfing*2
+  // Create windows.
+  hmain=control WINDOW
+    window=NULL
+    position=10,10,WIDTH,HEIGHT
+    name=format("%s v%s",DESCRIPTION,VERSION)
+    help=" "
+    color=BLACK
+    bkcolor=LIGHTGRAY
+  endc
+  hmsg=control TEXT
+    window=hmain
+    position=BORDER,BORDER,VIEWDX+2,MSGDY
+    help="信息"
+    color=BLACK
+    bkcolor=WHITE
+    font=MEDIUMFONT
+    mode=M_BORDER
+  endc
+  hview=control GRAPH
+    window=hmain
+    position=BORDER+1,2*BORDER+MSGDY+1,VIEWDX,HEIGHT-3*BORDER-MSGDY-2
+    help="测量霍尔传感器和Z步进电机之间的位移"
+    color=BLACK
+    bkcolor=WHITE
+  endc
+  deltay=0
+  for i=0,i<nhead,i++ do
+    x=2*BORDER+VIEWDX+2
+    dx=(WIDTH-2*BORDER-x)/2
+    if (i & 1)!=0 x=x+dx+BORDER
+    if $LAY.side[i/2]!=0 deltay=BORDER
+    y=BORDER+(BORDER+BTNDY)*(i/2)+deltay
+    hhead[i]=control BUTTON
+      window=hmain
+      position=x,y,dx,BTNDY
+      name=format("%i%s",i/2,i & 1?"R":"L")
+      help=format("按下可查看测试头%i%s的相移",i/2,i & 1?"R":"L")
+      color=BLACK
+      bkcolor=GRAY
+    endc
+  enddo
+  x=2*BORDER+VIEWDX+2
+  dx=WIDTH-3*BORDER-VIEWDX-2
+  y=3*BORDER+(BORDER+BTNDY)*(nhead/2)+deltay
+  for i=0,i<3,i++ do
+    hinfo[i]=control TEXT
+      window=hmain
+      position=x,y+INFDY*i,dx,INFDY
+      help=" "
+      color=(i==3?LIGHTRED:BLACK)
+      bkcolor=LIGHTGRAY
+      font=MAINFONT
+      mode=M_CENTERED
+    endc
+  enddo
+  hmeasure=control BUTTON
+    window=hmain
+    position=x,y+3*BTNDY+3*BORDER,dx,BTNDY
+    name="测量"
+    help="按下可测量所选测试头的偏移量"
+    color=BLACK
+    bkcolor=GRAY
+  endc
+  hmeasall=control BUTTON
+    window=hmain
+    position=x,y+4*BTNDY+4*BORDER,dx,BTNDY
+    name="测量所有"
+    help="按下可测量所有偏移"
+    color=BLACK
+    bkcolor=GRAY
+  endc
+  hprotocol=control BUTTON
+    window=hmain
+    position=x,y+5*BTNDY+5*BORDER,dx,BTNDY
+    name="协议"
+    help="按下可将数据保存到.RTF文件"
+    color=BLACK
+    bkcolor=GRAY
+  endc
+  disable hprotocol                    // Will be enabled if data available
+  hexit=control BUTTON
+    window=hmain
+    position=x,HEIGHT-BORDER-BTNDY,dx,BTNDY
+    name="退出"
+    help="按下以关闭此脚本"
+    color=BLACK
+    bkcolor=GRAY
+  endc
+  // Prepare for work.
+  cursor=ZMIN
+  Message(BLACK," %s v%s",DESCRIPTION,VERSION)
+  redraw=1
+  selected=-1
+  Selecthead(0)
+  // Main loop.
+  while 1 do
+    if Pressed(hmeasure) then
+      j=Measure(0)
+      if j<0 break
+      redraw=1
+    else if Pressed(hmeasall) then
+      for i=0,i<$LAY.nfing*2,i++ do
+        Selecthead(i)
+        j=Measure(i)
+        if j!=0 break
+      enddo
+      if j<0 break
+      if j==0 Selecthead(0)
+      redraw=1
+    else if Pressed(hprotocol) then
+      Message(BLACK,"")
+      if rtffile[0]=='\0' Strcpy(rtffile,"s1hall.rtf");
+      if SYS.Browse(hmain,rtffile,"Select RTF protocol file",0)==0 continue
+      if ROpen(rtffile)!=0 then
+        Message(LIGHTRED,"Unable to create protocol file")
+        continue
+      endif
+      RParagraph(RTF_CENTERED)
+      RFmt(RTF_TIMES,RTF_BOLD|RTF_UL,24)
+      RAddtext("Shifts between Hall sensot and Z motor\n")
+      RFmt(RTF_TIMES,RTF_NORMAL,12)
+      Strtime(s,"\nCreated on: %a %d-%b-%Y, %H:%M\n\n",0,0)
+      RAddtext(s)
+      j=selected
+      for i=0,i<$LAY.nfing*2,i++ do
+        if nphase[i]==0 continue
+        Selecthead(i)
+        Drawdata(2)
+        RParagraph(RTF_CENTERED|RTF_KEEPNEXT)
+        RFmt(RTF_TIMES,RTF_BOLD,16)
+        RAddfmt("Head %i%s",i/2,i & 1?"R":"L")
+        RParagraph(RTF_CENTERED|RTF_KEEPNEXT)
+        RAddpiczoom(hview,0,0,VIEWDX,HEIGHT-3*BORDER-MSGDY-2,1,0.7)
+        RParagraph(RTF_CENTERED)
+        RFmt(RTF_TIMES,RTF_NORMAL,12)
+        if pmean[i]<1000.0 then
+          RAddfmt("Mean shift %i micrometers\n",pmean[i])
+        endif
+        RAddtext("\n")
+      enddo
+      Selecthead(j)
+      RClose()
+      Message(BLACK,"Protocol saved")
+      redraw=1
+    else if Pressed(hexit) then
+      break
+    endif
+    for i=0,i<nhead,i++ do
+      if Pressed(hhead[i]) then
+        Message(BLACK,"")
+        Selecthead(i)
+        break
+      endif
+    enddo
+    // Check mouse.
+    i=Mousexy(hview,&x,&y,&buttons)
+    if i==1 && (buttons & 1)!=0 && y!=mousey then
+      mousey=y
+      mousechanged=1
+      redraw=1
+    endif
+    // Redraw data.
+    if redraw then
+      Drawdata(0)
+      redraw=0
+    endif
+    wait
+  enddo
+end
+

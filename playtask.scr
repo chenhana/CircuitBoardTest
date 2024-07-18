@@ -1,0 +1,1195 @@
+#include "ls.icl"
+#include "or.icl"
+#cmdbuff 64
+
+#define VERSION        "1.06"
+#define DESCRIPTION    "Special measurements"
+
+// If you want to replace old records by new in the manual retest mode, set
+// REPLACE to 1.
+#define REPLACE        1               // 1: replace old records in retest
+
+// 1.00: Initial release.
+// 1.01: Component name, panel and sample IDs, update in protocol.
+// 1.02: Invalid coordinates during execution.
+// 1.03: Report ratios less than 1% beyond the [0,1] range as 0.00 and 1.00.
+// 1.04: If all panels are skipped, reports success.
+// 1.05: Protocols resistances and parallel resistance in power divider.
+// 1.06: Tolerances for absolute resistances in power divider.
+
+// Error codes in calls to Setlasterror().
+#define AEC_OK         0               // No error
+#define AEC_CANCEL     (-1)            // Function is cancelled by user
+#define AEC_ERR        (-2)            // Some error occured
+#define AEC_INT        (-3)            // Internal error occured
+#define AEC_SEVERE     (-4)            // Severe error occured
+
+// Fault types.
+#define FLT_OPEN       0x00000001      // Open
+#define FLT_OPENHIGH   0x00000002      // Open high
+#define FLT_LAOPEN     0x00000004      // LA open
+#define FLT_SHORT      0x00000100      // Short
+#define FLT_SHORTHIGH  0x00000200      // Short high
+#define FLT_HVSHORT    0x00000400      // HV short
+#define FLT_HVBREAK    0x00000800      // HV breakdown
+#define FLT_FLIPSHORT  0x00001000      // Possible flip short or to unknown
+#define FLT_FLIPOPEN   0x00002000      // Possible open (flip-test)
+#define FLT_FLIPNOTL   0x00004000      // Net was not learned
+#define FLT_FLIPNOTM   0x00008000      // Net was not measured
+#define FLT_NOCONTACT  0x00010000      // No contact
+#define FLT_NOMEAS     0x00020000      // No stable measurement
+#define FLT_RLOW       0x00100000      // Resistance lower than specified
+#define FLT_RHIGH      0x00200000      // Resistance higher than specified
+#define FLT_CLOW       0x00400000      // Capacity lower than specified
+#define FLT_CHIGH      0x00800000      // Capacity higher than specified
+#define FLT_CSHORT     0x01000000      // Capacity short
+#define FLT_4WILOW     0x02000000      // 4Wi Resistance lower than specified
+#define FLT_4WIHIGH    0x04000000      // 4Wi Resistance higher than specified
+#define FLT_LLOW       0x08000000      // Inductance lower than specified
+#define FLT_LHIGH      0x10000000      // Inductance higher than specified
+#define FLT_DIODE      0x20000000      // Fault with a diode
+#define FLT_EXACTC     0x40000000      // Some fault with ExactC component
+#define FLT_MULTIPAD   0x80000000      // Some fault for special measurement
+
+// Fault subtypes for FLT_MULTIPAD.
+#define FMP_DIVLOW     0x00000001      // Dividing ratio is too low
+#define FMP_DIVHIGH    0x00000002      // Dividing ratio is too high
+#define FMP_MEASERR    0x00000004      // Measurement error
+
+// Test types.
+#define TSTP_DISABLED         0x00000000
+#define TSTP_CONTINUITY       0x00000001
+#define TSTP_ISOLATION        0x00000002
+#define TSTP_HV               0x00000004
+#define TSTP_SELECTIVE        0x00000008
+#define TSTP_IMPEDANCE        0x00000010
+#define TSTP_LATEST           0x00000020
+#define TSTP_ADJACENCY        0x00000040
+#define TSTP_COMBINED         0x00000080
+#define TSTP_HVCOMMON         0x00000100
+#define TSTP_SFIELD           0x00000200
+#define TSTP_FFM              0x00000400
+#define TSTP_SFFM             0x00000800
+#define TSTP_AUTORETEST       0x00001000
+#define TSTP_BF_ADJ_RETEST    0x00002000
+#define TSTP_SHORTSRETEST     0x00004000
+#define TSTP_CHECKANTENNAE    0x00008000
+#define SHVTP_PP              0x00010000
+#define SHVTP_PS              0x00020000
+#define SHVTP_SS              0x00040000
+#define TSTP_MULTIPAD         0x00080000
+#define TSTP_ADJACENCY_NO_FM  0x00100000
+#define TSTP_INTER_IMAGE_ADJ  0x00200000
+#define TSTP_ADJ_CONTINUITY   0x00400000
+#define TSTP_AUTOMIX          0x00800000
+#define TSTP_4WI              0x01000000
+#define TSTP_INDUCTANCE       0x02000000
+#define TSTP_KELVIN           0x04000000
+#define TSTP_FIRSTRUN         0x08000000
+#define TSTP_WITHOUT_OPC      0x10000000
+#define TSTP_DIODE            0x20000000
+#define TSK_SCAN_ONLY         0x40000000
+#define TSTP_DUMMY            0x80000000
+
+// Test subtypes for TSTP_MULTIPAD.
+#define SUBTSTP_POWERDIV      0x00000001
+
+#define NHEAD          4               // Max no. of heads in a command
+#define NRAIL          16              // Max no. of rails in a queue
+#define NQUEUE         17              // (NRAIL+1)
+#define NSEND          64              // Number of pending commands
+
+typedef struct t_cmd                   // Command
+  char           name[32]              // Component name
+  int            panel                 // Panel this command belongs to
+  int            panelid               // Panel ident
+  int            sampleid              // Sample ident
+  int            nhead                 // Number of participating heads
+  int            id[NHEAD]             // Pad IDs
+  int            net[NHEAD]            // Net IDs
+  int            index[NHEAD]          // Pad indices
+  int            head[NHEAD]           // Selected heads that will contact pads
+  int            x[NHEAD]              // X head coordinates
+  int            y[NHEAD]              // Y head coordinates
+  int            r[NHEAD]              // Pad radius
+  int            acc[NHEAD]            // Contacting accuracy
+  int            dx[NHEAD]             // X correction
+  int            dy[NHEAD]             // Y correction
+  int            cmd                   // Measurement command
+  float          parm1                 // First cmd-dependent parameter
+  float          parm2                 // Second cmd-dependent parameter
+  float          expected              // Expected value
+  float          expmin,expmax         // Minimal and maximal allowed values
+  float          e1min,e1max           // Additional min/max allowed values
+  float          e2min,e2max           // Additional min/max allowed values
+  float          e3min,e3max           // Additional min/max allowed values
+ends
+
+// List of raw commands.
+struct t_cmd     *raw                  // List of raw commands
+int              nraw                  // Actual number of raw commands
+int              maxraw                // Size of raw command buffer
+
+// List of commands.
+struct t_cmd     *cmd                  // List of commands
+int              ncmd                  // Actual number of commands
+int              maxcmd                // Size of buffer
+
+// Command queue (rails).
+int              *q                    // Command queue as a whole
+int              maxq                  // Max number of elements in the queue
+int              qstart[NQUEUE]        // Index of first rail element
+int              nq[NQUEUE]            // Number of rail elements
+
+// Command queue (final).
+int              *job;                 // Final command queue, ncmd items
+
+// Input and output files.
+char             pathin[260]           // Name of the input file
+handle           fin                   // Input file or NULL
+char             pathout[260]          // Name of the output file
+handle           fout                  // Output file or NULL
+
+// Board data.
+int              npanel                // Number of panels
+int              panelspersample       // Number of panels per sample or 0
+int              *excluded             // List of panels
+int              *panelid              // List of panel idents
+int              *sampleid             // List of sample idents
+int              lot                   // Lot
+int              run                   // Run
+
+// Error message.
+char             errmsg[2048]          // Error message
+int              errcode               // Error code, AEC_xxx
+
+// Retest mode.
+int              retestmode            // Retest mode
+char             retestname[32]        // Command for retest
+int              retestpanel           // Panel for retest
+int              retestpad1            // First pad for retest
+int              retestpad2            // Second pad for retest
+
+
+////////////////////////////////////////////////////////////////////////////////
+//////////////////////////////////// QUEUES ////////////////////////////////////
+
+// Due to serious limitations of SCRIPT2, especially in dynamical memory
+// allocation, this simple task is not so simple.
+
+// Adds command index to the queue for the specified rail. Returns AEC_OK on
+// success and error code otherwise.
+function int Addqueue(int rail,int index)
+  int i,n
+  if rail<0 || rail>=NRAIL then
+    sprintf(errmsg,"PLAYTASK: Internal error in Addqueue()")
+    return AEC_SEVERE
+  endif
+  if maxq==0 then
+    // Queue initialization.
+    n=250
+    maxq=n*NQUEUE
+    if Alloc(q,maxq*4)==0 goto lowmem
+    for i=0,i<NQUEUE,i++ do
+      qstart[i]=i*n
+      nq[i]=0
+    enddo
+  else if nq[rail]>=qstart[rail+1]-qstart[rail] then
+    // Rail-related queue is overflowed.
+    n=maxq-qstart[NQUEUE-1]
+    if n==0 then
+      // No free memory, try to add more.
+      maxq=Realloc(q,maxq*2*4)/4
+      n=maxq-qstart[NQUEUE-1]
+      if n==0 goto lowmem
+    endif
+    if n>100 n=100
+    for i=qstart[NQUEUE-1]-1,i>=qstart[rail+1],i-- do
+      q[i+n]=q[i]
+    enddo
+    for i=rail+1,i<NQUEUE,i++ do
+      qstart[i]=qstart[i]+n
+    enddo
+  endif
+  // Add index.
+  q[qstart[rail]+nq[rail]]=index
+  nq[rail]++
+  return AEC_OK
+lowmem:
+  sprintf(errmsg,"PLAYTASK: Low memory")
+  return AEC_SEVERE
+end
+
+
+////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////// HEAP SORT ///////////////////////////////////
+
+// Compares two commands with given indices by X coordinate of the first head.
+function int Heapcompare(int i1,int i2,int user)
+  if cmd[i1].x[0]<cmd[i2].x[0] return -1
+  if cmd[i1].x[0]>cmd[i2].x[0] return 1
+  return 0
+end
+
+// Heap sort, faster than qsort() in worst case (if data is partially sorted).
+// Due to the limitations of SCRIPT2, can only sort list of integer indices
+// that point to the real data (or which represent the data itself). Requires
+// function Heapcompare() that compares items.
+function int Heapsort(int *data,int count,int user)
+  int j,k,n,q,t
+  if (count<2) return
+  n=count-1
+  for k=n/2,k>=0,k-- do
+    q=k
+    while q<=n/2 do
+      j=2*q
+      if j<n && Heapcompare(data[j],data[j+1],user)<0 then
+        j++
+      endif
+      if Heapcompare(data[q],data[j],user)<0 then
+        t=data[j]; data[j]=data[q]; data[q]=t
+      else
+        break
+      endif
+      q=j
+    enddo
+  enddo
+  while n>0 do
+    t=data[0]; data[0]=data[n]; data[n]=t
+    n--
+    q=0
+    while q<=n/2 do
+      j=2*q
+      if j<n && Heapcompare(data[j],data[j+1],user)<0 then
+        j++
+      endif
+      if Heapcompare(data[q],data[j],user)<0 then
+        t=data[j]; data[j]=data[q]; data[q]=t
+      else
+        break
+      endif
+      q=j
+    enddo
+  enddo
+end
+
+
+////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////// TEXT SCANNER /////////////////////////////////
+
+// Scans signed decimal or hexadecimal integer value from the cmd. Returns
+// number of scanned bytes or -1 if there is no integer number in the cmd.
+function int Scanint(char *cmd,int *value)
+  int i,j,k,n,sign
+  while cmd[i]==' ' do i++; enddo;     // Skip leading spaces
+  if cmd[i]=='-' then sign=-1; i++;
+  else if cmd[i]=='+' then i++;
+  endif
+  if cmd[i]=='\0' return -1
+  if cmd[i]=='0' && Toupper(cmd[i+1])=='X' then
+    i=i+2; k=0                         // Hexadecimal number
+    while 1 do
+      j=Toupper(cmd[i])
+      if j>='0' && j<='9' then
+        n=n*16+j-'0'; i++
+      else if j>='A' && j<='F' then
+        n=n*16+j-'A'+10; i++
+      else
+        break
+      endif
+      k++
+    enddo
+    if k==0 return -1                  // Invalid hexadecimal number
+  else                                 // Decimal number
+    if Isdigit(cmd[i])==0 return -1    // Not an integer
+    while Isdigit(cmd[i])!=0 do
+      n=n*10+cmd[i]-'0'; i++
+    enddo
+  endif
+  if sign<0 n=-n
+  value[0]=n
+  return i
+end
+
+// Scans signed float number from the cmd. Returns number of scanned bytes or
+// -1 if there is no float number in the cmd.
+function int Scanfloat(char *cmd,float *value)
+  int i,sign,exp,expsign
+  float f,mult
+  while cmd[i]==' ' do i++; enddo;     // Skip leading spaces
+  if cmd[i]=='-' then sign=-1; i++;
+  else if cmd[i]=='+' then i++;
+  endif
+  if Isdigit(cmd[i])==0 && cmd[i]!='.'                                         \
+    return -1                          // Not a number
+  while Isdigit(cmd[i])!=0 do
+    f=f*10.0+cmd[i]-'0'; i++
+  enddo
+  if cmd[i]=='.' then
+    i++; mult=0.1
+    while Isdigit(cmd[i]) do
+      f=f+(cmd[i]-'0')*mult
+      mult=mult/10.0; i++
+    enddo
+  endif
+  if Toupper(cmd[i])=='E' then         // Exponent
+    i++
+    if cmd[i]=='-' then expsign=-1; i++;
+    else if cmd[i]=='+' then i++;
+    endif
+    while Isdigit(cmd[i])!=0 do
+      exp=exp*10+cmd[i]-'0'; i++
+    enddo
+    if expsign<0 exp=-exp
+    f=f*Pow10(exp)
+  endif
+  if sign<0 f=-f
+  value[0]=f
+  while cmd[i]==' ' do i++; enddo;     // Skip trailing spaces
+  return i
+end
+
+// Scans name from the cmd and converts it to uppercase. Returns number of
+// scanned bytes or -1 if there is no float number in the cmd. Length of name
+// is limited to 32 characters, including terminal zero.
+function int Scanname(char *cmd,char *name)
+  int i,n
+  while cmd[i]==' ' do i++; enddo;     // Skip leading spaces
+  if Isalpha(cmd[i])==0 && cmd[i]!='_' return -1
+  name[n]=Toupper(cmd[i])
+  n++; i++
+  while (Isalnum(cmd[i]) || cmd[i]=='_') && n<31 do
+    name[n]=Toupper(cmd[i])
+    n++; i++
+  enddo
+  name[n]='\0'
+  return i
+end
+
+// Skips comment in form /*...*/ from cmd. Also skips trailing spaces. Returns
+// number of skipped bytes.
+function int Skipcomment(char *cmd)
+  int i
+  while cmd[i]==' ' do i++; enddo
+  if cmd[i]=='/' && cmd[i+1]=='*' then
+    i=i+2
+    while cmd[i]!='\0' && (cmd[i]!='*' || cmd[i+1]!='/') do
+      i++
+    enddo
+    if cmd[i]=='*' then
+      i=i+2
+    endif
+    while cmd[i]==' ' do i++; enddo
+  endif
+  return i
+end
+
+// Skips spaces and specified character from cmd. Returns number of skipped
+// bytes.
+function int Skipchar(char *cmd,char c)
+  int i
+  while cmd[i]==' ' do i++; enddo      // Skip leading spaces
+  if cmd[i]==c then
+    i++
+    while cmd[i]==' ' do i++; enddo    // Skip trailing spaces
+  endif
+  return i
+end
+
+
+////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////// DATA READING /////////////////////////////////
+
+function int Processdivcmd(char *cmd)
+  int i,j,n,id[3],quoted
+  float imax,umax,div,divmin,divmax
+  float r1min,r1max,r2min,r2max,rpmin,rpmax
+  char key[32],name[32]
+  struct t_cmd c
+  i=0; div=-1.0; divmin=-1.0; divmax=-1.0; name[0]='\0'
+  r1min=-1.0; r1max=-1.0; r2min=-1.0; r2max=-1.0;
+  rpmin=-1.0; rpmax=-1.0
+  // Expecting 3 pad indices.
+  for j=0,j<3,j++ do
+    i=i+Skipcomment(cmd+i)
+    if Toupper(cmd[i])!='I' then
+      sprintf(errmsg,"PLAYTASK: Expecting 3 pad indices 'Ixxx' in @DIV %s",cmd)
+      return AEC_SEVERE
+    endif
+    i++
+    n=Scanint(cmd+i,id+j)
+    if n<0 then
+      sprintf(errmsg,"PLAYTASK: Expecting 3 pad indices 'Ixxx' in @DIV %s",cmd)
+      return AEC_SEVERE
+    endif
+    i=i+n
+    i=i+Skipchar(cmd+i,',')
+  enddo
+  if retestmode then
+    // Note the order of the pads!
+    if id[0]!=retestpad1 || id[2]!=retestpad2 return AEC_OK
+  endif
+  // Get key parameters.
+  while 1 do
+    i=i+Skipcomment(cmd+i)
+    if cmd[i]=='\0' break
+    if cmd[i]=='"' then                // Name of component (without key)
+      if name[0]!='\0' then
+        Strcpy(key,"NAME"); goto repeat
+      endif
+      i++; n=0
+      while cmd[i]!='"' && cmd[i]!='\0' do
+        if n<31 then name[n]=cmd[i]; n++; endif
+        i++
+      enddo
+      if cmd[i]!='"' goto badname
+      name[n]='\0'
+      i++
+      i=i+Skipchar(cmd+i,',')
+      continue
+    endif
+    n=Scanname(cmd+i,key)
+    if n<0 goto syntax
+    i=i+n
+    if Strcmp(key,"IMAX")==0 then      // Current in A
+      if imax!=0.0 goto repeat
+      i=i+Skipchar(cmd+i,'=')
+      n=Scanfloat(cmd+i,&imax)
+      if n<0 goto syntax
+      i=i+n
+      if imax<=0.0 || imax>1.0 goto limits
+    else if Strcmp(key,"UMAX")==0 then // Voltage in V
+      if umax!=0.0 goto repeat
+      i=i+Skipchar(cmd+i,'=')
+      n=Scanfloat(cmd+i,&umax)
+      if n<0 goto syntax
+      i=i+n
+      if umax<0.1 || umax>10.0 goto limits
+    else if Strcmp(key,"DIV")==0 || Strcmp(key,"SPECDIV")==0 then
+      if div>=0.0 goto repeat
+      i=i+Skipchar(cmd+i,'=')
+      n=Scanfloat(cmd+i,&div)
+      if n<0 goto syntax
+      i=i+n
+      if div<0.0 || div>1.0 goto limits
+    else if Strcmp(key,"TOLPLUS")==0 || Strcmp(key,"MAX")==0 then
+      if divmax>=0.0 goto repeat
+      i=i+Skipchar(cmd+i,'=')
+      n=Scanfloat(cmd+i,&divmax)
+      if n<0 goto syntax
+      i=i+n
+      if cmd[i]=='%' then
+        i++
+        if divmax<0.0 goto limits
+        if div<0.0 goto nomain
+        divmax=div*(1.0+divmax/100.0)
+        if divmax>1.0 divmax=1.0
+      endif
+      if divmax<0.0 || divmax>1.0 goto limits
+    else if Strcmp(key,"TOLMINUS")==0 || Strcmp(key,"MIN")==0 then
+      if divmin>=0.0 goto repeat
+      i=i+Skipchar(cmd+i,'=')
+      n=Scanfloat(cmd+i,&divmin)
+      if n<0 goto syntax
+      i=i+n
+      if cmd[i]=='%' then
+        i++
+        divmin=Abs(divmin)
+        if div<0.0 goto nomain
+        divmin=div*(1.0-divmin/100.0)
+        if divmin<0.0 divmin=0.0
+      endif
+      if divmin<0.0 || divmin>1.0 goto limits
+    else if Strcmp(key,"NAME")==0 then // Name of component (with key)
+      if name[0]!='\0' goto repeat
+      i=i+Skipchar(cmd+i,'=')
+      if cmd[i]=='"' then
+        i++; quoted=1
+      else
+        quoted=0
+      endif
+      n=0
+      while 1 do
+        if cmd[i]=='\0' then
+          if quoted!=0 goto badname
+          break
+        else if quoted!=0 && cmd[i]=='"' then
+          i++; break
+        else if quoted==0 && (cmd[i]==' ' || cmd[i]==',' || cmd[i]==';') then
+          break
+        endif
+        if n<31 then
+          name[n]=cmd[i]; n++
+        endif
+        i++
+      enddo
+      name[n]='\0'
+    else if Strcmp(key,"MIN_R1")==0 || Strcmp(key,"R1MIN")==0 then
+      if r1min>=0.0 goto repeat
+      i=i+Skipchar(cmd+i,'=')
+      n=Scanfloat(cmd+i,&r1min)
+      if n<0 goto syntax
+      i=i+n
+      if r1min<0.0 || r1min>200.0e6 goto limits
+    else if Strcmp(key,"MAX_R1")==0 || Strcmp(key,"R1MAX")==0 then
+      if r1max>=0.0 goto repeat
+      i=i+Skipchar(cmd+i,'=')
+      n=Scanfloat(cmd+i,&r1max)
+      if n<0 goto syntax
+      i=i+n
+      if r1max<0.0 || r1max>200.0e6 goto limits
+    else if Strcmp(key,"MIN_R2")==0 || Strcmp(key,"R2MIN")==0 then
+      if r2min>=0.0 goto repeat
+      i=i+Skipchar(cmd+i,'=')
+      n=Scanfloat(cmd+i,&r2min)
+      if n<0 goto syntax
+      i=i+n
+      if r2min<0.0 || r2min>200.0e6 goto limits
+    else if Strcmp(key,"MAX_R2")==0 || Strcmp(key,"R2MAX")==0 then
+      if r2max>=0.0 goto repeat
+      i=i+Skipchar(cmd+i,'=')
+      n=Scanfloat(cmd+i,&r2max)
+      if n<0 goto syntax
+      i=i+n
+      if r2max<0.0 || r2max>200.0e6 goto limits
+    else if Strcmp(key,"MIN_RP")==0 || Strcmp(key,"RPMIN")==0 then
+      if rpmin>=0.0 goto repeat
+      i=i+Skipchar(cmd+i,'=')
+      n=Scanfloat(cmd+i,&rpmin)
+      if n<0 goto syntax
+      i=i+n
+      if rpmin<0.0 || rpmin>200.0e6 goto limits
+    else if Strcmp(key,"MAX_RP")==0 || Strcmp(key,"RPMAX")==0 then
+      if rpmax>=0.0 goto repeat
+      i=i+Skipchar(cmd+i,'=')
+      n=Scanfloat(cmd+i,&rpmax)
+      if n<0 goto syntax
+      i=i+n
+      if rpmax<0.0 || rpmax>200.0e6 goto limits
+    else
+      sprintf(errmsg,"PLAYTASK: Unknown key %s in @DIV %s",key,cmd)
+      return AEC_SEVERE
+    endif
+    i=i+Skipchar(cmd+i,',')
+  enddo
+  // Check key parameters for validity.
+  if div<0.0 || divmin<0.0 || divmax<0.0 then
+    sprintf(errmsg,"PLAYTASK: Obligatory parameters missing in @DIV %s",cmd)
+    return AEC_SEVERE
+  else if (r1min>=0.0 || r1max>=0) &&                                          \
+    (r1min<0.0 || r1max<0.0 || r1min>=r1max) then
+    sprintf(errmsg,"PLAYTASK: Invalid tolerances for R1 in @DIV %s",cmd)
+    return AEC_SEVERE
+  else if (r2min>=0.0 || r2max>=0) &&                                          \
+    (r2min<0.0 || r2max<0.0 || r2min>=r2max) then
+    sprintf(errmsg,"PLAYTASK: Invalid tolerances for R2 in @DIV %s",cmd)
+    return AEC_SEVERE
+  else if (rpmin>=0.0 || rpmax>=0) &&                                          \
+    (rpmin<0.0 || rpmax<0.0 || rpmin>=rpmax) then
+    sprintf(errmsg,"PLAYTASK: Invalid tolerances for RP in @DIV %s",cmd)
+    return AEC_SEVERE
+  endif
+  // Add command to the list of raw commands.
+  if maxraw==0 then
+    maxraw=250                         // Sound default
+    if Alloc(raw,maxraw*Sizeof(c))==0 goto lowmem
+  else if nraw>=maxraw then
+    maxraw=Realloc(raw,maxraw*2*Sizeof(c))/Sizeof(c)
+    if nraw>=maxraw goto lowmem
+  endif
+  Strcpy(raw[nraw].name,name)
+  raw[nraw].panel=-1
+  raw[nraw].panelid=-1
+  raw[nraw].sampleid=-1
+  raw[nraw].nhead=3
+  raw[nraw].id[0]=id[0]
+  raw[nraw].id[1]=id[1]
+  raw[nraw].id[2]=id[2]
+  raw[nraw].cmd=M_DIVIDER
+  raw[nraw].parm1=imax
+  raw[nraw].parm2=umax
+  raw[nraw].expected=div
+  raw[nraw].expmin=divmin
+  raw[nraw].expmax=divmax
+  raw[nraw].e1min=r1min
+  raw[nraw].e1max=r1max
+  raw[nraw].e2min=r2min
+  raw[nraw].e2max=r2max
+  raw[nraw].e3min=rpmin
+  raw[nraw].e3max=rpmax
+  nraw++
+  return AEC_OK
+repeat:
+  sprintf(errmsg,"PLAYTASK: Repeating key %s in @DIV %s",key,cmd)
+  return AEC_SEVERE
+syntax:
+  sprintf(errmsg,"PLAYTASK: Expecting 'key=value' in @DIV %s",cmd)
+  return AEC_SEVERE
+nomain:
+  sprintf(errmsg,"PLAYTASK: Percent precedes main value in @DIV %s",cmd)
+  return AEC_SEVERE
+limits:
+  sprintf(errmsg,"PLAYTASK: Key %s out of limits in @DIV %s",key,cmd)
+  return AEC_SEVERE
+lowmem:
+  sprintf(errmsg,"PLAYTASK: Low memory")
+  return AEC_SEVERE
+badname:
+  sprintf(errmsg,"PLAYTASK: Invalid component name")
+  return AEC_SEVERE
+end
+
+// Reads data from the playtask file. On success, returns AEC_OK. On error,
+// fills errmsg and returns one of the remaining AEC_xxx codes.
+function int Readdata()
+  int i,j,n,rstart,result
+  char s[640],cmdname[32]
+  handle fin
+  // Get lot and run.
+  SYS.Getlotrun(&lot,&run,&i)
+  // Get number of panels and list of excluded panels and panel IDs.
+  npanel=SYS.Getpanelinfo(&panelspersample,&i)
+  if panelspersample==0 || npanel<=0 then
+    sprintf(errmsg,"PLAYTASK: Can't get board data")
+    return AEC_SEVERE
+  endif
+  Alloc(excluded,npanel*4)
+  Alloc(panelid,npanel*4)
+  Alloc(sampleid,npanel*4)
+  npanel=SYS.Getpanelinfoex(&panelspersample,excluded,panelid,sampleid,&i)
+  for i=0,i<npanel,i++ do
+    excluded[i]=excluded[i] & 0x00000001
+  enddo
+  // Get command line.
+  if Argv(s)==0 then
+    sprintf(errmsg,"PLAYTASK: Play task file is not specified")
+    return AEC_SEVERE
+  endif
+  i=0
+  // Skip trailer.
+  i=i+Skipchar(s+i,';')
+  // Get name of input file. Note that unquoted file names can't contain
+  // opening parenthesis (it is reserved for retests).
+  j=0
+  if s[i]=='\"' then
+    i++
+    while s[i]!='\"' && s[i]!='\0' do
+      pathin[j]=s[i]; i++; j++
+    enddo
+    if s[i]=='\"' i++
+  else
+    while s[i]!=' ' && s[i]!='(' && s[i]!='\0' do
+      pathin[j]=s[i]; i++; j++
+    enddo
+  endif
+  pathin[j]='\0'
+  // Skip separator.
+  i=i+Skipchar(s+i,',')
+  // Get name of output file.
+  j=0
+  if s[i]=='\"' then
+    i++
+    while s[i]!='\"' && s[i]!='\0' do
+      pathout[j]=s[i]; i++; j++
+    enddo
+    if s[i]=='\"' i++
+  else
+    while s[i]!=' ' && s[i]!='(' && s[i]!='\0' do
+      pathout[j]=s[i]; i++; j++
+    enddo
+  endif
+  pathout[j]='\0'
+  // Check whether this is a retest request.
+  i=i+Skipchar(s+i,',')
+  rstart=i
+  if s[i]=='(' then
+    i++
+    // Get type of measurement.
+    n=Scanname(s+i,retestname)
+    if n<0 goto sretest
+    i=i+n
+    i=i+Skipchar(s+i,',')
+    n=Scanint(s+i,&retestpanel)
+    if n<0 goto sretest
+    i=i+n
+    i=i+Skipchar(s+i,',')
+    i=i+Skipchar(s+i,'I')
+    n=Scanint(s+i,&retestpad1)
+    if n<0 goto sretest
+    i=i+n
+    i=i+Skipchar(s+i,',')
+    i=i+Skipchar(s+i,'I')
+    n=Scanint(s+i,&retestpad2)
+    if n<0 goto sretest
+    i=i+n
+    if s[i]!=')' goto sretest
+    i++
+    retestmode=1
+  endif
+  // Open files.
+  fin=Fopen(pathin,"rt")
+  if fin==NULL then
+    sprintf(errmsg,"PLAYTASK: Can't open file %s",pathin)
+    return AEC_SEVERE
+  endif
+  if pathout[0]!='\0' then
+    fout=Fopen(pathout,"a+t")
+    if fout==NULL then
+      lprintf(RED,"PLAYTASK: Can't create file %s",pathout)
+    else
+      Fseek(fout,0,2)
+      if Ftell(fout)==0 then
+        fprintf(fout,"Lot\tRun\tSample\tPanel\tSmplid\tPanelid\t")
+        fprintf(fout,"Name\tVout\tVgnd\tVpow\t")
+        fprintf(fout,"Div\tMin\tMax\tUmax\tImax\tValue\tResult\t")
+        fprintf(fout,"R1\tR2\tRp\n")
+      endif
+    endif
+  endif
+  // Read data.
+  while 1 do
+    // Get next line.
+    if Fscanf(fin,"%s\n",s)!=1 break   // End of file
+    n=Strlen(s)
+    while n>0 && (s[n-1]=='\n' || s[n-1]=='\r') do
+      s[n-1]='\0'; n--
+    enddo
+    // Replace tabs with spaces and check for comments in the form '//'.
+    for i=0,s[i]!='\0',i++ do
+      if s[i]=='\t' then
+        s[i]=' '
+      else if s[i]=='/' && s[i+1]=='/' then
+        s[i]='\0'
+        break
+      endif
+    enddo
+    i=0
+    // Process command.
+    while s[i]==' ' do i++; enddo
+    if s[i]=='\0' continue             // Empty lines are allowed
+    if s[i]=='@' then
+      // Measurement.
+      i++
+      j=Scanname(s+i,cmdname)
+      if j<0 goto syntax
+      i=i+j
+      if retestmode && Strcmp(cmdname,retestname)!=0 then
+        continue                       // Retest mode, skip this command
+      endif
+      if Strcmp(cmdname,"DIV")==0 then
+        result=Processdivcmd(s+i)
+        if result<0 return result
+      else
+        sprintf(errmsg,"PLAYTASK: Unrecognized command %s",s)
+        return AEC_SEVERE
+      endif
+    else
+      sprintf(errmsg,"PLAYTASK: Unrecognized line %s",s)
+      return AEC_SEVERE
+    endif
+  enddo
+  Fclose(fin)
+  fin=NULL
+  if nraw==0 then
+    sprintf(errmsg,"PLAYTASK: Empty task file")
+    return AEC_SEVERE
+  endif
+  return AEC_OK
+sretest:
+  sprintf(errmsg,"PLAYTASK: Invalid retest request %s",s+rstart)
+  return AEC_SEVERE
+syntax:
+  sprintf(errmsg,"PLAYTASK: Syntax error %s",s)
+  return AEC_SEVERE
+end
+
+
+////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////// TASK GENERATION ////////////////////////////////
+
+// Recursive function, selects combination of heads that can be used to make
+// the specified measurement. Returns 0 on success and -1 if there is no
+// such combination. Array sel contains indices of the heads, not the heads
+// itself.
+function int Selectheads(int nhead,int index,int *sel,int *n,int *head,int *x)
+  int i,j,h,prev,hprev,xsel,xprev,result
+  for i=0,i<n[index],i++ do
+    h=head[4*index+i]
+    xsel=x[4*index+i]
+    // Check whether head conflicts with the previously selected heads.
+    for j=0,j<index,j++ do
+      prev=sel[j]
+      hprev=head[4*j+prev]
+      if h==hprev break                // Same head
+      if ((h^hprev) & 0xFE)==0 then    // Same rail, check coordinates
+        xprev=x[4*j+prev]
+        if h<hprev && xsel>xprev break
+        if h>hprev && xsel<xprev break
+      endif
+    enddo
+    if j<index continue                // Conflicting head, try another
+    sel[index]=i
+    // If there are more pads in the measurement, call function recursively
+    // to select them, too.
+    if index<nhead-1 then
+      result=Selectheads(nhead,index+1,sel,n,head,x)
+      if result==0 return 0            // Combination selected
+    else
+      return 0                         // Last head, report success
+    endif
+  enddo
+  return -1                            // Unable to find combination
+end
+
+// Given raw data, generates task for each panel and distributes it into the
+// head queues. I assume that first finger makes measurements and all other
+// are like antennas and stay for longer time on the same coordinates.
+function int Generatetask()
+  int i,m,h,panel,sel[NHEAD],rail,net[NHEAD],index[NHEAD],njob
+  int n[NHEAD],head[NHEAD,4],x[NHEAD,4],y[NHEAD,4],r[NHEAD,4]
+  int acc[NHEAD,4],dx[NHEAD,4],dy[NHEAD,4],nmax,next[NRAIL]
+  char s[256]
+  struct t_cmd c
+  for panel=0,panel<npanel,panel++ do
+    if excluded[panel]!=0 continue     // Panel is excluded, skip
+    if retestmode && panel!=retestpanel continue
+    for i=0,i<nraw,i++ do
+      Memcpy(c,raw[i],Sizeof(c))
+      // Get possible heads and contact positions.
+      for h=0,h<c.nhead,h++ do
+        n[h]=SYS.Getpadxy(panel,c.id[h],                                       \
+          net+h,index+h,head[h],x[h],y[h],r[h],acc[h],dx[h],dy[h])
+        if n[h]==0 then
+          sprintf(errmsg,                                                      \
+            "PLAYTASK: Can't contact I%i on panel %i",c.id[h],panel+1)
+          return AEC_SEVERE
+        endif
+      enddo
+      // Check whether there is a combination of heads that can be used for
+      // test.
+      if Selectheads(c.nhead,0,sel,n,head,x)!=0 then
+        m=sprintf(s,"PLAYTASK: Can't make measurement between")
+        for h=0,h<c.nhead,h++ do
+          m=m+sprintf(s+m," I%i,",c.id[h])
+        enddo
+        s[m-1]='\0'                    // Removes trailing comma
+        sprintf(errmsg,"%s on panel %i",s,panel+1)
+        return AEC_SEVERE
+      endif
+      // Fill command.
+      c.panel=panel
+      c.panelid=panelid[panel]
+      c.sampleid=sampleid[panel]
+      for h=0,h<c.nhead,h++ do
+        c.net[h]=net[h]
+        c.index[h]=index[h]
+        c.head[h]=head[h,sel[h]]
+        c.x[h]=x[h,sel[h]]
+        c.y[h]=y[h,sel[h]]
+        c.r[h]=r[h,sel[h]]
+        c.acc[h]=acc[h,sel[h]]
+        c.dx[h]=dx[h,sel[h]]
+        c.dy[h]=dy[h,sel[h]]
+      enddo
+      // Determine rail that this command belongs to. This "rail" also includes
+      // opposite rail for the double-sided testers.
+      for rail=0,rail<$LAY.nfing,rail++ do
+        if c.y[0]>=$LAY.bottom[rail] && c.y[0]<$LAY.top[rail] break
+      enddo
+      if rail>=$LAY.nfing then
+        sprintf(errmsg,                                                        \
+          "PLAYTASK: Pad I%i on panel %i is outside the layout",c.id[0],panel+1)
+        return AEC_SEVERE
+      endif
+      // Add command to the queues.
+      if maxcmd==0 then
+        maxcmd=250                     // Sound default
+        if Alloc(cmd,maxcmd*Sizeof(c))==0 goto lowmem
+      else if ncmd>=maxcmd then
+        maxcmd=Realloc(cmd,maxcmd*2*Sizeof(c))/Sizeof(c)
+        if ncmd>=maxcmd goto lowmem
+      endif
+      Memcpy(cmd[ncmd],c,Sizeof(c))
+      Addqueue(rail,ncmd)
+      ncmd++
+    enddo
+  enddo
+  if ncmd==0 then
+    // Most probably, all panels are skipped. This is not an error.
+    return AEC_OK
+  endif
+  // Sort rail queues by X coordinates of the first head.
+  nmax=0
+  for rail=0,rail<$LAY.nfing,rail++ do
+    nmax=Max(nmax,nq[rail])
+    if nq[rail]<=1 continue
+    Heapsort(q+qstart[rail],nq[rail],0)
+  enddo
+  // Merge queues together. I simply take measurements from each rail queue
+  // proportionally to its size.
+  if Alloc(job,ncmd*4)==0 goto lowmem
+  Memset(next,0,Sizeof(next))
+  njob=0
+  for i=0,i<=nmax,i++ do
+    for rail=0,rail<$LAY.nfing,rail++ do
+      if next[rail]<(i*nq[rail])/nmax then
+        job[njob]=q[qstart[rail]+next[rail]]
+        njob++; next[rail]++
+      endif
+    enddo
+  enddo
+  Free(q); maxq=0
+  // Report success.
+  return AEC_OK
+lowmem:
+  sprintf(errmsg,"PLAYTASK: Low memory")
+  return AEC_SEVERE
+end
+
+
+////////////////////////////////////////////////////////////////////////////////
+//////////////////////////////// TASK EXECUTION ////////////////////////////////
+
+// Executes measurements.
+function int Executetask()
+  int i,j,k,l,m,n,p,nsig,next,nsent,ndone,index[NSEND]
+  int status,result,answer,length,firstmove
+  char *oldfile
+  float ratio,rp,rg,rpar
+  char s[1024],t[1024]
+  next=0                               // Next command to send
+  nsent=0                              // Number of pending commands
+  ndone=0                              // Number of received answers
+  firstmove=1
+  for i=0,i<NSEND,i++ do
+    index[i]=-1                        // Invalidate list of indices
+  enddo
+  while ndone<ncmd do
+    // Check whether we can post next commands.
+    while nsent<NSEND && next<ncmd do
+      // Find free slot.
+      for i=0,i<NSEND,i++ do
+        if index[i]<0 break
+      enddo
+      if i>=NSEND break                // Must not happen!
+      k=job[next]
+      index[i]=k                       // Index in cmd
+      // Start creating measurement command.
+      n=sprintf(s,"M AVOID ")
+      // Add movements.
+      for j=0,j<cmd[k].nhead,j++ do
+        n=n+sprintf(s+n,"%i(I%i:%i) ",                                         \
+        cmd[k].head[j],cmd[k].panel,cmd[k].index[j])
+      enddo
+      // If first movement, move non-participating heads in home positions.
+      if firstmove then
+        for p=0,p<$LAY.nfing*2,p++ do
+          for j=0,j<cmd[k].nhead,j++ do
+            if cmd[k].head[j]==p break
+          enddo
+          if j<cmd[k].nhead continue
+          n=n+sprintf(s+n,"%i(Z) ",p)
+        enddo
+        firstmove=0
+      endif
+      // Add panel/group/net.
+      n=n+sprintf(s+n,"GROUP(%i,2,%i) ",cmd[k].panel+2,cmd[k].net[0]+1)
+      // Add measurement.
+      switch cmd[k].cmd
+      case M_DIVIDER:                  // Divider test
+        n=n+sprintf(s+n,"DIV(%i,%i,%i",                                        \
+          cmd[k].head[0],cmd[k].head[1],cmd[k].head[2])
+        if cmd[k].parm1!=0.0                                                   \
+          n=n+sprintf(s+n,",IMAX=%g",cmd[k].parm1*1000.0)
+        if cmd[k].parm2!=0.0                                                   \
+          n=n+sprintf(s+n,",UMAX=%g",cmd[k].parm2)
+        sprintf(s+n,",PAR)")
+      default:                         // As yet unsupported command
+        goto internal
+      endsw
+      // Send measurement to Test Player.
+      answer=SYS.Sendtextimm(i,s)
+      if answer<0 then
+        sprintf(errmsg,"PLAYTASK: Error sending '%s'",s)
+        return AEC_SEVERE
+      endif
+      next++
+      nsent++
+    enddo
+    // Check whether there are some answers.
+    for i=0,i<NSEND,i++ do
+      if index[i]<0 continue           // Free slot
+      if $A[i].length==0 continue      // Command is still pending
+      // Answer is here, mark command as executed and analyse answer.
+      k=index[i]
+      index[i]=-1
+      nsent--
+      ndone++
+      if $A[i].answer==S_MOVE then
+        switch cmd[k].cmd
+        case M_DIVIDER:                // Divider test
+          status=$A[i].status
+          ratio=$float4($A[i]+8)
+          if status & 0x0040 then
+            rp=$float4($A[i]+12)
+            rg=$float4($A[i]+16)
+          else
+            rp=0.0
+            rg=0.0
+          endif
+          if status & 0x0020 then
+            rpar=$float4($A[i]+20)
+          else
+            rpar=0.0
+          endif
+          // If, due to the noise, the measured ratio is less than 1% below
+          // zero or less than 1% above 1, trim to 0 or 1. (Reduces the number
+          // of questions from the customer).
+          if (ratio>=(-0.01) && ratio<=0.00) ratio=0.00
+          if (ratio>=1.00 && ratio<=1.01) ratio=1.00
+          result=1
+          if (status & 0x8800)!=0 then
+            SYS.Addfault(retestmode,FLT_MULTIPAD,FMP_MEASERR,                  \
+              TSTP_MULTIPAD,SUBTSTP_POWERDIV,                                  \
+              cmd[k].panel,cmd[k].index[0],cmd[k].index[2],                    \
+              ratio,0.0,0.0)
+            result=-1
+          else if (status & 0x0600)!=0 then
+            SYS.Addfault(retestmode,FLT_NOCONTACT,0,                           \
+              TSTP_MULTIPAD,SUBTSTP_POWERDIV,                                  \
+              cmd[k].panel,cmd[k].index[0],cmd[k].index[2],                    \
+              ratio,0.0,0.0)
+            result=-1
+          else if ratio<cmd[k].expmin then
+            SYS.Addfault(retestmode,FLT_MULTIPAD,FMP_DIVLOW,                   \
+              TSTP_MULTIPAD,SUBTSTP_POWERDIV,                                  \
+              cmd[k].panel,cmd[k].index[0],cmd[k].index[2],                    \
+              ratio,0.0,0.0)
+            result=0
+          else if ratio>cmd[k].expmax then
+            SYS.Addfault(retestmode,FLT_MULTIPAD,FMP_DIVHIGH,                  \
+              TSTP_MULTIPAD,SUBTSTP_POWERDIV,                                  \
+              cmd[k].panel,cmd[k].index[0],cmd[k].index[2],                    \
+              ratio,0.0,0.0)
+            result=0
+          else if (status & 0x0040)!=0 && cmd[k].e1min>=0.0 &&                 \
+            (rp<cmd[k].e1min || rp>cmd[k].e1max) then
+            SYS.Addfault(retestmode,FLT_MULTIPAD,FMP_MEASERR,                  \
+              TSTP_MULTIPAD,SUBTSTP_POWERDIV,                                  \
+              cmd[k].panel,cmd[k].index[0],cmd[k].index[2],                    \
+              rp,0.0,0.0)
+            result=0
+          else if (status & 0x0040)!=0 && cmd[k].e2min>=0.0 &&                 \
+            (rg<cmd[k].e2min || rg>cmd[k].e2max) then
+            SYS.Addfault(retestmode,FLT_MULTIPAD,FMP_MEASERR,                  \
+              TSTP_MULTIPAD,SUBTSTP_POWERDIV,                                  \
+              cmd[k].panel,cmd[k].index[0],cmd[k].index[2],                    \
+              rg,0.0,0.0)
+            result=0
+          else if (status & 0x0020)!=0 && cmd[k].e3min>=0.0 &&                 \
+            (rpar<cmd[k].e3min || rpar>cmd[k].e3max) then
+            SYS.Addfault(retestmode,FLT_MULTIPAD,FMP_MEASERR,                  \
+              TSTP_MULTIPAD,SUBTSTP_POWERDIV,                                  \
+              cmd[k].panel,cmd[k].index[0],cmd[k].index[2],                    \
+              rpar,0.0,0.0)
+            result=0
+          else if retestmode then
+            SYS.Addfault(retestmode,FLT_MULTIPAD,0,                            \
+              TSTP_MULTIPAD,SUBTSTP_POWERDIV,                                  \
+              cmd[k].panel,cmd[k].index[0],cmd[k].index[2],                    \
+              ratio,0.0,0.0)
+            result=1
+          endif
+          if fout!=NULL then
+            // Lot, run, sample, panel, sample ID, panel ID,name, pad IDs.
+            nsig=sprintf(s,"%i\t%i\t%i\t%i\t%i\t%i\t%s\t%i\t%i\t%i\t",         \
+              lot,run,cmd[k].panel/panelspersample+1,                          \
+              cmd[k].panel%panelspersample+1,                                  \
+              cmd[k].sampleid,cmd[k].panelid,cmd[k].name,                      \
+              cmd[k].id[0],cmd[k].id[1],cmd[k].id[2])
+            // Expected, min, max, Umax, Imax.
+            n=nsig+sprintf(s+nsig,"%g\t%.4g\t%.4g\t%.4g\t%.4g\t",              \
+              cmd[k].expected,cmd[k].expmin,cmd[k].expmax,                     \
+              cmd[k].parm2,cmd[k].parm1)
+            // Value, result, ValueR1, ValueR2, ValueRp.
+            n=n+sprintf(s+n,"%.5g\t%i\t%.5g\t%.5g\t%.5g\n",                    \
+              ratio,result,rp,rg,rpar)
+            // If in retest mode, replace old measurement with new.
+            if retestmode!=0 && REPLACE!=0 then
+              Fseek(fout,0,2)
+              length=Ftell(fout)
+              if Alloc(oldfile,length+1)==0 then
+                Fwrite(s,n,fout)
+              else
+                Fseek(fout,0,0)
+                length=Fread(oldfile,length,fout)
+                oldfile[length]='\0'
+                Memcpy(t,s,nsig); t[nsig]='\0'
+                l=Strstr(oldfile,t)
+                if l<0 then
+                  // No such record, append measurement to the end.
+                  Fwrite(s,n,fout)
+                else
+                  // To replace the record, we must recreate the file.
+                  Fclose(fout)
+                  fout=Fopen(pathout,"wt")
+                  if l>0 Fwrite(oldfile,l,fout)
+                  Fwrite(s,n,fout)
+                  while l<length do
+                    if oldfile[l]=='\n' break
+                    l++
+                  enddo
+                  if l<length l++
+                  if l<length Fwrite(oldfile+l,length-l,fout)
+                endif
+                Free(oldfile)
+              endif
+            else
+              Fwrite(s,n,fout)
+            endif
+          endif
+        default:                       // As yet unsupported command
+          goto internal
+        endsw
+      else
+        // Error executing command.
+        switch cmd[k].cmd
+        case M_DIVIDER:                // Divider test
+          SYS.Addfault(retestmode,FLT_MULTIPAD,FMP_MEASERR,                    \
+          TSTP_MULTIPAD,SUBTSTP_POWERDIV,                                      \
+          cmd[k].panel,cmd[k].index[0],cmd[k].index[2],                        \
+          0.0,0.0,0.0)
+        default:                       // As yet unsupported command
+          goto internal
+        endsw
+      endif
+    enddo
+    wait
+  enddo
+  // Report success.
+  return AEC_OK
+internal:
+  sprintf(errmsg,"PLAYTASK: Internal error in Executetask()")
+  return AEC_SEVERE
+end
+
+
+////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////// MAIN PROGRAM /////////////////////////////////
+
+// Main function.
+function int main()
+  retestmode=0
+  errcode=Readdata()
+  if errcode!=AEC_OK goto finish
+  errcode=Generatetask()
+  if errcode!=AEC_OK goto finish
+  errcode=Executetask()
+  if errcode!=AEC_OK goto finish
+finish:
+  if fin!=NULL Fclose(fin)
+  if fout!=NULL Fclose(fout)
+  if errcode!=AEC_OK SYS.Setlasterror(errcode,errmsg)
+  lprintf(RED,"FINISHED code=%i %s",errcode,errmsg)
+end
+

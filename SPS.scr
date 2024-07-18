@@ -1,0 +1,4468 @@
+#include "ls.icl"
+#include "or.icl"
+#cmdbuff 2
+
+#define VERSION  ""                // Actual software version
+
+// Latest changes:
+// 1.24 (28.06.2000): Sensor 203, non-Monster: "Bar MISSED"
+// 1.25 (03.07.2001): Corrected test sequence for A4 shuttle with catchers
+// 1.26 (18.09.2001): Support for cover sensors, bugfixes
+// 1.27 (19.10.2001): Direct connection to LINX printer
+// 1.28 (29.07.2002): A5 baud rate support
+// 1.29 (18.10.2002): Always restarts SPS on exit
+// 1.30 (23.06.2003): .ENx loader
+
+#define NACT 40
+#define NINP 40
+#define NOUT 40
+#define NREG 10
+#define NADJ 10
+#define MULTIREG 1                     // Allow group register read
+
+#define NMODE 7                        // Number of test mode buttons
+#define NTEST 4                        // Number of I/O test registers
+
+handle h                               // Serial SPS I/O channel
+handle hlinx                           // Serial LINX I/O channel
+handle hmain                           // Main window
+handle hgraph                          // Graphical window
+handle hmode[NMODE]                    // Test mode buttons
+int    testmode                        // Currently selected test mode
+int    commerr                         // Communication status detected by crate
+handle hreset                          // Reset all buttons
+handle hprint                          // Send bitmap directly to printer
+int    testertype                      // 0: A2, 1: A4, 2: A6
+int    monster                         // 1: A4 connected to Exaline
+int    nmodule                         // Expected A2: 0,4,8,12; A4: 0,4,8,13
+int    labelprinter                    // 1: A4 contains label printer
+int    catchers                        // 1: shuttle with side catchers
+int    showlog                         // 0: CAN, 1: documentation addresses
+int    festo                           // Base offset for FESTO pneumatics
+int    foffset                         // Additional offset for FESTO pneumatics
+int    a2offset                        // Additional offset for A2 loader
+int    ldoffset                        // Additional offset for A4 loader
+int    outoffset                       // Additional offset for A4 output unit
+int    stepcount                       // No. of (successfull) query cycles
+int    steptimer                       // Duration of read cycle
+char   inputs[20]                      // All SPS inputs at once, as 8-packs
+char   outputs[20]                     // All SPS outputs at once, as 8-packs
+int    nact                            // Number of allocated actuators
+handle hact[NACT]                      // Handles of allocated actuators
+int    sphys[NACT]                     // Output to be set or 0 (CAN address)
+int    slog[NACT]                      // Output to be set or 0 (schem address)
+int    rphys1[NACT],rphys2[NACT]       // Outputs to be reset or 0 (CAN)
+int    rlog1[NACT],rlog2[NACT]         // Outputs to be reset or 0 (schematics)
+int    extra[NACT]                     // Special actuator actions
+int    actstatus[NACT]                 // Actual status of the actuator
+int    ninp                            // Number of allocated input controls
+handle hinp[NINP]                      // Handles of input indicators
+int    iphys[NINP]                     // Input - CAN address
+int    ilog[NINP]                      // Input - address in schematics
+int    inpstatus[NINP]                 // Actual status of the input
+int    nout                            // Number of allocated output controls
+handle hout[NOUT]                      // Handles of output indicators
+int    ophys[NOUT]                     // Output - CAN address
+int    olog[NOUT]                      // Output - address in schematics
+int    outstatus[NOUT]                 // Actual status of the output
+int    nreg                            // Number of allocated register windows
+handle hreg[NREG]                      // Handles of allocated register windows
+int    regphys[NREG]                   // Register - CAN address
+int    reglog[NREG]                    // Register - address in schematics
+int    multireg[NREG]                  // Number of subsequent regs to read
+int    regstatus[NREG]                 // Actual status of the register
+int    nadj                            // Number of allocated adjusts
+handle hadjm[NADJ]                     // Handles of allocated adjust decrementers
+handle hadjp[NADJ]                     // Handles of allocated adjust incrementers
+int    adjreg[NADJ]                    // Register associated with adjust
+int    adjcur[NADJ]                    // Actual state of adjust
+int    adjstp[NADJ]                    // Step when activating adjust
+int    adjmin[NADJ]                    // Minimal allowed adjust
+int    adjmax[NADJ]                    // Maximal allowed adjust
+char   modiused[24]                    // Input modules requested by Draw...()
+char   modoused[24]                    // Output modules requested by Draw...()
+int    lastcommand                     // Last value of command register
+int    lasterror                       // Last error detected by SPS software
+int    labelcount                      // Index of last printed label
+int    bandspeed                       // Band velocity in long test
+int    demo                            // Demonstration without real connection
+int    burn                            // Software transfer mode
+int    baud                            // Baud rate
+
+function int Sendcmd(char *cmd,char length,char *answer)
+  int i,j,n,chksum,expect,t,special,ident
+  char c,s[256],buf[256]
+  if length<1 || length>68 return -1   // Error: bad command length
+  s[0]=0xDA; j=1                       // Start byte (called STX by JETTER)
+  chksum=0xDA
+  // Convert command into correct SPS sequence with special characters
+  for i=0,i<length,i++
+    if cmd[i]>=0xD8 && cmd[i]<=0xDF then
+      s[j]=0xD8;                       // Special character sequence
+      chksum=chksum+0xD8; j++
+      s[j]=cmd[i] & 0xEF
+      chksum=chksum+(cmd[i] & 0xEF); j++
+    else
+      s[j]=cmd[i]
+      chksum=chksum+cmd[i]; j++
+    endif
+  enddo
+  chksum=chksum & 0xFF
+  if chksum>=0xD8 && chksum<=0xDF then
+    s[j]=0xD8
+    chksum=chksum & 0xEF; j++
+  endif
+  s[j]=chksum; j++                     // So called FTS (checksum)
+  s[j]=0xDB; j++                       // Stop byte (called ETX by JETTER)
+  // Send command and receive answer.
+  if h!=NULL then
+    if Fwrite(s,j,h)!=j return -2      // Error: unable to send command
+    t=Time()+2000                      // Set timeout 2 seconds
+    j=0                                // Number of read bytes
+    while 1 do
+      if t<Time() return -3            // Error: timeout
+      j=j+Fread(s+j,64,h)
+      if j>64 break                    // Too long message
+      if j>0 then
+        if s[j-1]==0xDB break          // STX received
+      endif
+      wait
+    enddo
+    i=0; j=0
+    special=0                          // As yet, no character at all
+    chksum=0
+    expect=0
+    while j<64 do
+      c=s[i]; i++                      // Get next byte
+      if c==0xDB then                  // End of answer
+        chksum=(chksum-expect) & 0xFF
+        if chksum!=0 return -4         // Error: wrong checksum
+        j--; break                     // Remove checksum from the answer
+      else if c==0xDA then
+        j=0; special=0                 // Beginning of the (next?) answer
+        chksum=0xDA
+        expect=0
+      else if special then
+        chksum=chksum+c
+        answer[j]=c | 0x10; j++        // Restore special character
+        special=0
+        expect=expect+c+(c|0x10)
+      else if c==0xD8 then             // Special character follows
+        chksum=chksum+c
+        special=1
+        expect=0xD8
+      else                             // Ordinary character
+        chksum=chksum+c
+        answer[j]=c; j++
+        expect=2*c
+      endif
+    enddo
+  else if demo==0 then                 // Use tester interface
+    buf[0]=S_EXTINIT
+    buf[1]=0b01000000                  // Mode: RS on port 0, wait for answer
+    if baud==19200 then
+      buf[2]=0b00111100                // Baud: 19200,even,2,8
+    else if baud==38400 then
+      buf[2]=0b01011100                // Baud: 38400,even,2,8
+    else
+      buf[2]=0b00011100                // Baud: 9600,even,2,8
+    endif
+    buf[3]=2                           // Timeout 2 seconds
+    buf[4]=0                           // No echo
+    buf[5]=0xDB                        // Byte identifying end of answer
+    for i=2,i<8,i++ do
+      buf[4+i]=0                       // Unused or reserved bytes
+    enddo
+    $uint2(buf+12)=j                   // Length of command
+    for i=0,i<j,i++ do
+      buf[14+i]=s[i]                   // Command itself
+    enddo
+    ident=SYS.Sendimm(0,j+14,buf)      // Send command
+    t=Time()+3000                      // Set timeout 3 seconds
+    while $A[0].length==0 do
+      if t<Time() then
+        SYS.Killsend(ident)
+        return -3                      // Error: timeout
+      endif
+      wait
+    enddo
+    if $uint2($A[0]+5)!=0 then
+      commerr=$uint2($A[0]+5)
+      return -5                        // Communication error
+    endif
+    i=0; j=0
+    special=0                          // As yet, no special character
+    chksum=0xDA
+    expect=0
+    while j<64 do
+      if i>=$uint2($A[0]+7) return -6  // Too short answer
+      c=$A[0].rawdata[i+9]; i++        // Get next byte
+      if c==0xDB then                  // End of answer
+        chksum=(chksum-expect) & 0xFF
+        if chksum!=0 return -4         // Error: wrong checksum
+        j--; break                     // Remove checksum from the answer
+      else if c==0xDA then
+        j=0; special=0                 // Beginning of the (next?) answer
+        chksum=0xDA
+        expect=0
+      else if special then
+        chksum=chksum+c
+        answer[j]=c | 0x10; j++        // Restore special character
+        special=0
+        expect=expect+c+(c|0x10)
+      else if c==0xD8 then             // Special character follows
+        chksum=chksum+c
+        special=1
+        expect=0xD8
+      else                             // Ordinary character
+        chksum=chksum+c
+        answer[j]=c; j++
+        expect=2*c
+      endif
+    enddo
+  endif
+  return j                             // Success
+end
+
+// Reads specified register from the SPS. Returns -1 on error, or contents of
+// register otherwise.
+function int Readregister(int reg)
+  char s[64]
+  s[0]='Q'                             // Read register
+  $xuint3(s+1)=reg                     // Register number
+  if Sendcmd(s,4,s)!=4 return -1       // Query register value
+  if s[0]!=0x20 return -1              // SPS recognized some error
+  if reg==0 lastcommand=$xuint3(s+1)
+  if reg==3 lasterror=$xuint3(s+1)
+  return $xuint3(s+1)
+end
+
+// Writes value to specified SPS register. Returns -1 on error, or 0 otherwise.
+function int Writeregister(int reg,int value)
+  char s[64]
+  s[0]='R'                             // Write register
+  $xuint3(s+1)=reg                     // Register number
+  $xuint3(s+4)=value                   // Value to write
+  if Sendcmd(s,7,s)!=1 return -1       // Acknowledgement
+  if s[0]!=0x20 return -1              // SPS recognized some error
+  return 0
+end
+
+function int Writeoutput(int port,int value)
+  int i
+  char s[64]
+  s[0]=(value==0?'J':'I')              // Set/reset output
+  if port<101 return -1                // Wrong output
+  $xuint2(s+1)=((port/100)-1)*8+(port%10)-1
+  i=Sendcmd(s,3,s)
+  if i!=1 return -1                    // Acknowledgement
+  if (s[0] & 0xFE)!=0x20 return -1     // SPS recognized some error
+  return 0
+end
+
+function int Readinput(int port)
+  int i
+  char s[64]
+  if port<101 return -1                // Wrong input
+  s[0]='G'                             // Read input
+  $xuint2(s+1)=((port/100)-1)*8+(port%10)-1
+  i=Sendcmd(s,3,s)
+  if i!=1 return -1                    // Acknowledgement
+  if (s[0] & 0xFE)!=0x20 return -1     // SPS recognized some error
+  return s[0] & 1
+end
+
+// Draws circle with center at point x,y and coloured segment to indicate that
+// communication is ok.
+function int Drawstep(int x,int y,int segment)
+  int i
+  segment=segment & 0x03
+  draw window=hgraph color=BLACK bkcolor=LIGHTGRAY
+  draw at x,y fillellipse 40,40
+  if segment==0 then draw clip x+20,y-20;
+  else if segment==1 then draw clip x+20,y+20;
+  else if segment==2 then draw clip y-20,y+20;
+  else draw clip y-20,y-20; endif
+  draw bkcolor=BLACK
+  draw at x,y fillellipse 40,40
+  draw clip=NULL
+  draw at x-19,y to x+20,y
+  draw at x,y-19 to x,y+20
+  i=Time()
+  if i-steptimer<1000 then
+    draw bkcolor=WHITE font=SMALLFONT mode=M_CENTERED
+    draw at x,y fillellipse 25,25
+    draw at x,y+7 text=format("%i",i-steptimer)
+  endif
+  steptimer=i
+end
+
+// Draws fixture for SPS modules
+function int Drawfixture(int x,int y,char *text)
+  draw color=BLACK bkcolor=BROWN
+  draw at x,y fillrect x+355,y+40
+  draw at x,y+5 rect x+355,y+35
+  draw bkcolor=WHITE 
+  draw at x+282,y+12 fillrect x+348,y+28
+  draw at x+315,y+26 mode=M_CENTERED font=SMALLFONT text=text
+end
+
+// Draws main SPS module. Size of the module is 105x100 pixel.
+function int Drawmainmodule(int x,int y)
+  int i,yi,data
+  modiused[0]=1
+  modoused[0]=1
+  draw color=BLACK bkcolor=DARKGRAY
+  draw at x,y fillrect x+3,y+100
+  draw at x+2,y+2 fillrect x+103,y+98
+  draw at x+102,y fillrect x+105,y+100
+  draw bkcolor=WHITE at x+5,y+5 fillrect x+50,y+21
+  draw mode=M_CENTERED font=SMALLFONT
+  draw at x+27,y+20 text=format("I/O 100")
+  draw mode=0 font=TERMINALFONT
+  for i=0,i<8,i++
+    yi=y+10+i*11
+    if (inputs[0] & (0x01<<i))==0 then
+      draw color=GRAY bkcolor=BLACK
+    else
+      draw color=BLACK bkcolor=YELLOW
+    endif
+    draw at x+60,yi fillellipse 10,10
+    draw at x+72,yi+5 color=WHITE text=format("%i",i+1)
+    if (outputs[0] & (0x01<<i))==0 then
+      draw color=GRAY bkcolor=BLACK
+    else
+      draw color=BLACK bkcolor=LIGHTRED
+    endif
+    draw at x+90,yi fillellipse 10,10
+  enddo
+end
+
+// Draws SPS extention module. Size of the module is 55x100 pixel when compress
+// is 0, and 55x75 pixel if compress is not 0.
+function int Drawextmodule(int x,int y,int base,int out,int compress)
+  int i,j,xi,yi,data
+  j=(compress==0)
+  if out==0 then
+    modiused[base/100-1]=1
+    data=inputs[base/100-1];
+  else
+    modoused[base/100-1]=1
+    data=outputs[base/100-1];
+  endif
+  draw color=BLACK bkcolor=DARKGRAY
+  draw at x,y fillrect x+3,y+75+j*25
+  draw at x+2,y+2 fillrect x+53,y+73+j*25
+  draw at x+52,y fillrect x+55,y+75+j*25
+  draw bkcolor=WHITE at x+5,y+4+j fillrect x+50,y+18+j*3
+  draw mode=M_CENTERED font=SMALLFONT
+  draw at x+27,y+18+j*2 text=format("%s %i",(out==0?"In":"Out"),base)
+  draw mode=0 font=TERMINALFONT
+  for i=0,i<8,i++
+    xi=x+11+(i/4)*25
+    yi=y+25+j*9+(i%4)*(13+j*4)
+    if (data & (0x01<<i))==0 then
+      draw color=GRAY bkcolor=BLACK
+    else
+      draw color=BLACK bkcolor=(out==0?YELLOW:LIGHTRED)
+    endif
+    draw at xi,yi fillellipse 10,10
+    draw at xi+7,yi+5 color=WHITE text=format("%i",i+1)
+  enddo
+end
+
+function int Drawfestomodule(int x,int y,int base,int extend)
+  int i,j,xi,yi,data
+  j=(extend!=0)
+  draw color=BLACK bkcolor=DARKGRAY
+  draw at x,y+2 fillrect x+105+j*30,y+98
+  draw bkcolor=WHITE at x+15+j*15,y+5 fillrect x+90+j*15,y+21
+  draw mode=M_CENTERED font=SMALLFONT
+  draw at x+52+j*15,y+20 text=format("FESTO %i",base)
+  draw mode=0 font=TERMINALFONT
+  base=base/100-1
+  modoused[base]=1
+  modoused[base+1]=1
+  data=outputs[base]+outputs[base+1]*256
+  for i=0,i<12+j*4,i++
+    xi=x+14+(i/2)*15
+    yi=y+60-(i%2)*15
+    if (data & (0x01<<i))==0 then
+      draw color=GRAY bkcolor=BLACK
+    else
+      draw color=BLACK bkcolor=LIGHTRED
+    endif
+    draw at xi,yi fillellipse 10,10
+    draw at xi-4,yi+((i & 1)==0?16:-6)
+    draw color=WHITE text=format("%i",(i%8)+1)
+  enddo
+end
+
+// Creates double actuator (set/reset) linked to output out1
+function int Doubleactuator(int x,int y,                                       \
+  int ol,int rl,int offset,char *name,int spec,char *txt)
+  int i,op,rp
+  char s1[64],s2[64]
+  handle h1,h2
+  if nact>NACT-2 return -1             // No more place in tables
+  draw window=hgraph
+  if ol!=0 op=ol+offset
+  if rl!=0 rp=rl+offset
+  if ol!=0 then sprintf(s1,"output %i (%s)",(showlog?ol:op),name);
+  else sprintf(s1,"%s",name); endif
+  if rl==0 then s2[0]='\0';
+  else sprintf(s2," and reset output %i (security feature)",(showlog?rl:rp));
+  endif
+  h1=control BUTTON
+    window=hgraph
+    position=x,y+(spec<0?40:0),20,20
+    help=format("设置%s%s",s1,s2)
+    bkcolor=DARKGRAY
+  endc
+  h2=control BUTTON
+    window=hgraph
+    position=x,y+20,20,20
+    help=format("设置%s",s1)
+  endc
+  hact[nact]=h1
+  sphys[nact]=op; slog[nact]=ol;
+  rphys1[nact]=rp; rlog1[nact]=rl;
+  rphys2[nact]=0; rlog2[nact]=0;
+  extra[nact]=spec+1; actstatus[nact]=-1
+  nact++
+  hact[nact]=h2
+  sphys[nact]=0; slog[nact]=0;
+  rphys1[nact]=op; rlog1[nact]=ol;
+  rphys2[nact]=0; rlog2[nact]=0;
+  extra[nact]=spec+2; actstatus[nact]=-1
+  nact++
+  draw color=BLACK mode=M_CENTERED font=SMALLFONT
+  draw at x+9,y+71 text=txt
+end
+
+// Creates triple actuator (set1/reset both/set2) linked to outputs out1
+// and out2.
+function int Tripleactuator(int x,int y,                                       \
+  int ol1,char *name1,int ol2,char *name2,int offset,int spec,char *txt)
+  int i,op1,op2
+  char s1[64],s2[64]
+  handle h1,h2,h3
+  if nact>NACT-3 return -1             // No more place in tables
+  if ol1!=0 op1=ol1+offset
+  if ol2!=0 op2=ol2+offset
+  draw window=hgraph
+  if ol1!=0 then sprintf(s1,"output %i (%s)",(showlog?ol1:op1),name1);
+  else sprintf(s1,"%s",name1); endif
+  if ol2!=0 then sprintf(s2,"output %i (%s)",(showlog?ol2:op2),name2);
+  else sprintf(s2,"%s",name2); endif
+  h1=control BUTTON
+    window=hgraph
+    position=x,y,20,20
+    help=format("设置%s和重置%s",s2,s1)
+    bkcolor=DARKGRAY
+  endc
+  h2=control BUTTON
+    window=hgraph
+    position=x,y+20,20,20
+    help=format("重置%s和%s",s2,s1)
+  endc
+  h3=control BUTTON
+    window=hgraph
+    position=x,y+40,20,20
+    help=format("设置%s并重置%s",s2,s1)
+    bkcolor=DARKGRAY
+  endc
+  hact[nact]=h1
+  sphys[nact]=op1; slog[nact]=ol1
+  rphys1[nact]=op2; rlog1[nact]=ol2
+  rphys2[nact]=0; rlog2[nact]=0;
+  extra[nact]=spec+1; actstatus[nact]=-1
+  nact++
+  hact[nact]=h2
+  sphys[nact]=0; slog[nact]=0
+  rphys1[nact]=op1; rlog1[nact]=ol1
+  rphys2[nact]=op2; rlog2[nact]=ol2
+  extra[nact]=spec+2; actstatus[nact]=-1
+  nact++
+  hact[nact]=h3
+  sphys[nact]=op2; slog[nact]=ol2
+  rphys1[nact]=op1; rlog1[nact]=ol1
+  rphys2[nact]=0; rlog2[nact]=0;
+  extra[nact]=spec+3; actstatus[nact]=-1
+  nact++
+  draw color=BLACK mode=M_CENTERED font=SMALLFONT
+  draw at x+9,y+71 text=txt
+end
+
+function int Createinput(int x,int y,int il,int offset,char *txt)
+  int ip
+  char s[256]
+  if ninp>NINP-1 return -1             // No more place in tables
+  if il!=0 ip=il+offset
+  if ip<10000 then
+    sprintf(s,"Status of input %i%c(%s)",                                      \
+    showlog?il:ip,(txt[0]=='\0'?'\0':' '),txt)
+  else
+    sprintf(s,"Status of bit 6 of register %i (%s)",showlog?il:ip,txt)
+  endif
+  hinp[ninp]=control CHILD
+    window=hgraph
+    position=x,y,11,11
+    help=s
+    color=WHITE
+    size=128
+  endc
+  draw window=hinp[ninp] color=DARKGRAY bkcolor=GRAY
+  draw at 5,5 fillellipse 10,10
+  draw show
+  iphys[ninp]=ip
+  ilog[ninp]=il
+  inpstatus[ninp]=-1                   // Unknown input status
+  ninp++
+end
+
+function int Createoutput(int x,int y,int ol,int offset,char *txt)
+  int op
+  if nout>NOUT-1 return -1             // No more place in tables
+  if ol!=0 op=ol+offset
+  hout[nout]=control BUTTON
+    window=hgraph
+    position=x,y,15,15
+    help=format("输出%i%c(%s)的状态",                                   \
+      showlog?ol:op,(txt[0]=='\0'?'\0':' '),txt)
+    bkcolor=GRAY
+  endc
+  ophys[nout]=op
+  olog[nout]=ol
+  outstatus[nout]=-1                   // Unknown output status
+  nout++
+end
+
+function int Createreg(int x,int y,int dx,int rp,int rl,char *txt)
+  if nreg>NREG-1 return -1             // No more place in tables
+  hreg[nreg]=control TEXT
+    window=hgraph
+    position=x,y,dx,18
+    font=MAINFONT
+    bkcolor=LIGHTGRAY
+    mode=M_CENTERED|M_BORDER
+    help=format("读取%s",txt)
+  endc
+  regphys[nreg]=rp
+  reglog[nreg]=rl
+  multireg[nreg]=0
+  regstatus[nreg]=0x7FFFFFFF           // Unknown register status
+  nreg++
+end
+
+function int Createmultireg(int x,int y,int dx,int rp,int rl,int n,char *txt)
+  int i
+  if nreg>NREG-n return -1             // No more place in tables
+  for i=0,i<n,i++ do
+    hreg[nreg]=control TEXT
+      window=hgraph
+      position=x,y+i*19,dx,18
+      font=MAINFONT
+      bkcolor=LIGHTGRAY
+      mode=M_CENTERED|M_BORDER
+      help=format("%s %i",txt,(showlog?rl:rp)+i)
+    endc
+    regphys[nreg]=rp+i
+    reglog[nreg]=rl+i
+    multireg[nreg]=n-i
+    regstatus[nreg]=0x7FFFFFFF         // Unknown register status
+    nreg++
+  enddo
+end
+
+function int Createadjust(int x,int y,int rp,int vcur,int vmin,int vmax,int step,char *txt)
+  if nadj>NADJ-1 return -1             // No more place in tables
+  hadjm[nadj]=control BUTTON
+    window=hgraph
+    position=x,y,20,20
+    name="-"
+    help=format("按住可以减少%s",txt)
+    font=MEDIUMFONT
+    mode=M_REPEAT
+  endc
+  hadjp[nadj]=control BUTTON
+    window=hgraph
+    position=x+20,y,20,20
+    name="+"
+    help=format("按住可以增加%s",txt)
+    font=MEDIUMFONT
+    mode=M_REPEAT
+  endc
+  adjreg[nadj]=rp
+  vcur=Min(vmax,Max(vmin,vcur))
+  adjcur[nadj]=vcur
+  adjstp[nadj]=Max(1,step)
+  adjmin[nadj]=vmin
+  adjmax[nadj]=vmax
+  nadj++
+end
+
+// Reads used inputs, outputs and important registers from SPS and updates
+// controls on the actual picture. Returns 0 if operation is successfull or -1
+// on error.
+function int Queryall()
+  int i,j,status
+  char s[64],iused[24],oused[24]
+  if nmodule==0 return -1
+  for i=0,i<24,i++ do
+    iused[i]=modiused[i]
+    oused[i]=modoused[i]
+  enddo
+  for i=0,i<ninp,i++ do                // Determine which inputs are active
+    if iphys[i]>2000 continue
+    iused[iphys[i]/100-1]=1
+  enddo
+  for i=0,i<20,i++ do                  // Read inputs
+    if iused[i]==0 continue
+    j=Readregister(2400+i)
+    if j<0 return -1
+    inputs[i]=j
+    inputs[i+1]=j>>8
+    inputs[i+2]=j>>16
+    i=i+2
+  enddo
+  for i=0,i<nout,i++ do                // Determine which outputs are active
+    oused[ophys[i]/100-1]=1
+  enddo
+  for i=0,i<nact,i++ do                // Add outputs used by actuators
+    if sphys[i]>=100 oused[sphys[i]/100-1]=1
+    if rphys1[i]>=100 oused[rphys1[i]/100-1]=1
+    if rphys2[i]>=100 oused[rphys2[i]/100-1]=1
+  enddo
+  for i=0,i<20,i++ do                  // Read outputs
+    if oused[i]==0 continue
+    j=Readregister(2500+i)
+    if j<0 return -1
+    outputs[i]=j
+    outputs[i+1]=j>>8
+    outputs[i+2]=j>>16
+    i=i+2
+  enddo
+  for i=0,i<nreg,i++ do                // Read requested register
+    if multireg[i]==0 || MULTIREG==0 then
+      status=Readregister(regphys[i])
+      if status<0 return -1
+      if status==regstatus[i] continue
+      change hreg[i] text=format("%i",status)
+      regstatus[i]=status
+    else
+      s[0]='h'                         // Read register multiple
+      s[1]=0b00000001                  // Autoincrement
+      s[2]=multireg[i]                 // Number of registers
+      $xuint3(s+3)=regphys[i]          // Register base
+      if Sendcmd(s,6,s)!=4+multireg[i]*3 return -1
+      if s[0]!=0x20 return -1          // SPS recognized some error
+      for j=0,j<multireg[i],j++ do
+        if regphys[i]+j==0 lastcommand=$xuint3(s+1+3*j)
+        if regphys[i]+j==3 lasterror=$xuint3(s+1+3*j)
+        if regstatus[i+j]==$xuint3(s+1+3*j) continue
+        regstatus[i+j]=$xuint3(s+1+3*j)
+        change hreg[i+j] text=format("%i",regstatus[i+j])
+      enddo
+      i=i+multireg[i]-1
+    endif
+  enddo
+  draw window=hgraph
+  for i=0,i<nact,i++                   // Update actuators
+    if sphys[i]<100 continue
+    status=outputs[sphys[i]/100-1] & (0x01<<(sphys[i]%10-1))
+    if status==0 && actstatus[i]!=0 then
+      change hact[i] bkcolor=DARKGRAY
+      actstatus[i]=0
+    else if status!=0 && actstatus[i]!=1 then
+      change hact[i] bkcolor=LIGHTRED
+      actstatus[i]=1
+    endif
+  enddo
+  for i=0,i<ninp,i++                   // Update input displays
+    if iphys[i]>100 && iphys[i]<2000 then
+      status=inputs[iphys[i]/100-1] & (0x01<<(iphys[i]%10-1))
+    else if iphys[i]>=10000 then
+      status=Readregister(iphys[i])
+      status=status & 0x000040
+    else
+      continue                         // Don't know how to process
+    endif
+    if status==0 && inpstatus[i]!=0 then
+      clear hinp[i]
+      draw window=hinp[i] color=LIGHTRED bkcolor=BLACK
+      draw at 5,5 fillellipse 10,10
+      draw show
+      inpstatus[i]=0
+    else if status!=0 && inpstatus[i]!=1 then
+      clear hinp[i]
+      draw window=hinp[i] color=BLACK bkcolor=YELLOW
+      draw at 5,5 fillellipse 10,10
+      draw show
+      inpstatus[i]=1
+    endif
+  enddo
+  for i=0,i<nout,i++                   // Update output displays
+    if ophys[i]>100 && ophys[i]<2000 then
+      status=outputs[ophys[i]/100-1] & (0x01<<(ophys[i]%10-1))
+      if status==0 && outstatus[i]!=0 then
+        change hout[i] bkcolor=DARKGRAY
+        outstatus[i]=0
+      else if status!=0 && outstatus[i]!=1 then
+        change hout[i] bkcolor=LIGHTRED
+        outstatus[i]=1
+      endif
+    endif
+  enddo
+  Drawstep(560,30,stepcount)
+  draw show
+  stepcount++
+  return 0
+end
+
+function int Checkactuators()
+  int i,j,base
+  for i=0,i<nact,i++ do
+    if Pressed(hact[i]) then           // First reset, then set!
+      if rphys1[i]!=0 Writeoutput(rphys1[i],0)
+      if rphys2[i]!=0 Writeoutput(rphys2[i],0)
+      if sphys[i]!=0 Writeoutput(sphys[i],1)
+      j=extra[i]
+      if j!=0 then                     // Special actuator-dependent functions
+        if j==101 || j==103 then       // Increase/decrease shuttle width
+          Writeoutput(103,1)           // Enable shuttle width motor
+          Writeoutput(104,1)
+        else if j==102 then            // Stop shuttle width
+          Writeoutput(103,0)           // Disable shuttle width motor
+          Writeoutput(104,0)
+        else if j==201 || j==203 then  // Shuttle band forward/backward
+          Writeregister(10104,48)      // Deactivate shuttle step-motor inputs
+          Writeregister(10101,0)       // Stop axis
+          delay 80
+          Writeoutput(105,1)           // Enable step-motor
+          Writeregister(10101,3)       // Reset current shuttle band position
+          Writeregister(10102,0)       // Reset requested position
+          Writeregister(10103,1800)    // Maximal speed
+          Writeregister(10105,25)      // Start ramp
+          Writeregister(10106,50)      // Stop ramp
+          Writeregister(10108,10)      // Start speed
+          Writeregister(10101,18)      // Absolute positioning
+          if j==201 then               // Requested position
+            Writeregister(10102,8000000)
+          else
+            Writeregister(10102,-8000000)
+          endif
+        else if j==202 then            // Stop shuttle band
+          Writeregister(10101,0)       // Stop axis
+          delay 100
+          Writeregister(10101,3)       // Reset current shuttle band position
+          Writeregister(10102,0)       // Reset requested position
+          Writeoutput(105,0)           // Disable step-motor
+        else if j==301 || j==303 then  // A2/3/4 loader band forward/backward
+          Writeregister(12101,0)       // Stop axis
+          delay 80
+          if testertype==0                                                     \
+            Writeoutput(507,0)         // Enable step-motor
+          Writeregister(12101,3)       // Reset current shuttle band position
+          Writeregister(12102,0)       // Reset requested position
+          Writeregister(12103,1800)    // Maximal speed
+          Writeregister(12105,25)      // Start ramp
+          Writeregister(12106,50)      // Stop ramp
+          Writeregister(12108,10)      // Start speed
+          if j==301 then               // Requested position
+            Writeregister(12102,8000000)
+          else
+            Writeregister(12102,-8000000)
+          endif
+        else if j==302 then            // Stop loader band
+          Writeregister(12101,0)       // Stop axis
+          delay 100
+          Writeregister(12101,3)       // Reset current shuttle band position
+          Writeregister(12102,0)       // Reset requested position
+          if testertype==0 then                                                    
+            Writeoutput(507,1)         // Disable step-motor
+          endif
+        else if j==401 then            // A2: start left motor of input pile
+          Writeoutput(504,1)           // Unbrake left motor
+          if nmodule==8 then           // Set maximal speed
+            Writeregister(3000,1023)
+          else if nmodule==12 then
+            Writeregister(3020,1023)
+          endif
+        else if j==402 then            // A2: stop left motor of input pile
+          Writeoutput(504,0)           // Brake left motor
+          if nmodule==8 then           // Set zero speed
+            Writeregister(3000,0)
+          else if nmodule==12 then
+            Writeregister(3020,0)
+          endif
+        else if j==501 then            // A2: start right motor of input pile
+          Writeoutput(506,1)           // Unbrake right motor
+          if nmodule==8 then           // Set maximal speed
+            Writeregister(3001,1023)
+          else if nmodule==12 then
+            Writeregister(3021,1023)
+          endif
+        else if j==502 then            // A2: stop right motor of input pile
+          Writeoutput(506,0)           // Brake right motor
+          if nmodule==8 then           // Set zero speed
+            Writeregister(3001,0)
+          else if nmodule==12 then
+            Writeregister(3021,0)
+          endif
+        else if j==601 || j==603 then  // A4: output band forward/backward
+          base=(nmodule==13?13100:12100)
+          Writeregister(base+1,0)      // Stop axis
+          delay 80
+          Writeregister(base+1,3)      // Reset current shuttle band position
+          Writeregister(base+2,0)      // Reset requested position
+          Writeregister(base+3,1800)   // Maximal speed
+          Writeregister(base+5,25)     // Start ramp
+          Writeregister(base+6,50)     // Stop ramp
+          Writeregister(base+8,10)     // Start speed
+          if j==601 then               // Requested position
+            Writeregister(base+2,8000000)
+          else
+            Writeregister(base+2,-8000000)
+          endif
+        else if j==602 then            // A4: stop output band
+          base=(nmodule==13?13100:12100)
+          Writeregister(base+1,0)      // Stop axis
+          delay 100
+          Writeregister(base+1,3)      // Reset current shuttle band position
+          Writeregister(base+2,0)      // Reset requested position
+        else if j==701 then            // A4: start motors of input pile
+          Writeoutput(506,1)           // Unbrake motors
+        else if j==801 || j==803 then  // Increase/decrease loader width
+          Writeoutput(605,1)           // Enable width adjustment
+        else if j==802 then            // Stop changing loader width
+          Writeoutput(605,0)           // Disable width adjustment
+        else if j==901 || j==903 then  // Printing head left/right
+          base=(nmodule==13?13200:12200)
+          Writeregister(base+1,0)      // Stop axis
+          delay 80
+          Writeregister(base+1,3)      // Reset current head position
+          Writeregister(base+2,0)      // Reset requested position
+          Writeregister(base+3,2400)   // Maximal speed
+          Writeregister(base+5,100)    // Start ramp
+          Writeregister(base+6,100)    // Stop ramp
+          Writeregister(base+8,50)     // Start speed
+          if j==901 then               // Requested position
+            Writeregister(base+2,-1000)
+          else
+            Writeregister(base+2,1000)
+          endif
+        else if j==902 then            // Stop printing head
+          base=(nmodule==13?13200:12200)
+          Writeregister(base+1,0)      // Stop axis
+          delay 100
+          Writeregister(base+1,3)      // Reset current shuttle band position
+          Writeregister(base+2,0)      // Reset requested position
+        else if j==1001 || j==1003 then// Lifters down (shuttle with catchers)
+          Writeoutput(503+festo+foffset,0)
+          Writeoutput(504+festo+foffset,1)
+        endif
+      endif
+    endif
+  enddo
+  for i=0,i<nout,i++ do
+    if Pressed(hout[i]) then
+      if outstatus[i]==0 then
+        Writeoutput(ophys[i],1)
+      else
+        Writeoutput(ophys[i],0)
+      endif
+    endif
+  enddo
+  for i=0,i<nadj,i++ do                // Process adjusts
+    j=0
+    j=j-Pressed(hadjm[i])
+    j=j+Pressed(hadjp[i])
+    if j==0 continue
+    j=Max(adjmin[i],Min(adjmax[i],j*adjstp[i]+adjcur[i]))
+    adjcur[i]=j
+    Writeregister(adjreg[i],j)
+  enddo
+  if hreset!=NULL then
+    if Pressed(hreset) then
+      for i=0,i<nact,i++ do
+        if sphys[i]!=0 Writeoutput(sphys[i],0)
+      enddo
+      for i=0,i<nout,i++ do
+        Writeoutput(ophys[i],0)
+      enddo
+    endif
+  endif
+end
+
+// Highlight specified button
+function int Highlight(int n)
+  int i
+  testmode=n
+  for i=0,i<NMODE,i++
+    if i==n then
+      change hmode[i] color=LIGHTRED
+      change hmode[i] bkcolor=YELLOW
+    else
+      change hmode[i] color=BLACK
+      change hmode[i] bkcolor=GRAY
+    endif
+  enddo
+end
+
+// Draws schematic picture of shuttle and creates all corresponding controls.
+function int Createshuttle()
+  int i
+  int p[12] = { 15,25,60,25,165,45,165,65,60,55,15,55 }
+  clear hgraph                         // This deletes all available controls
+  nact=0; ninp=0; nout=0; nreg=0; nadj=0
+  for i=0,i<24,i++ do
+    modiused[i]=0
+    modoused[i]=0
+  enddo
+  draw window=hgraph mode=M_CENTERED show
+  draw color=LIGHTYELLOW bkcolor=LIGHTYELLOW
+  draw at 0,300 fillrect 588,360
+  draw color=GRAY bkcolor=WHITE        // Shuttle: top view
+  draw at 15,200 rect 285,205
+  draw at 60,20 fillrect 110,280 at 100,20 to 100,280
+  draw at 190,20 fillrect 240,280 at 200,20 to 200,280
+  draw at 142,20 rect 159,70
+  draw at 35,279 rect 55,290 at 245,279 rect 265,290
+  if testertype==1 then
+    draw polygon=p,6
+  endif
+  if demo then
+    draw font=HUGEFONT color=PINK at 300,150 text="DEMO"
+  endif
+  draw color=BLACK
+  draw at 2,188 rect 16,217
+  draw at 5,216 rect 16,235
+  draw at 62,198 rect 62+17,198+42
+  if catchers==0 then
+    draw at 82,169 rect 82+17,169+37
+    draw at 201,169 rect 201+17,169+37
+    draw at 82,205 rect 82+17,205+25
+    draw at 201,205 rect 201+17,205+25
+  else
+    draw at 94,203 fillrect 94+15,203+37
+    draw at 80,203 rect 80+15,203+37
+    draw at 191,203 fillrect 191+15,203+37
+    draw at 205,203 rect 205+15,203+37
+    draw at 43,150 rect 43+15,150+30
+    draw at 242,150 rect 242+15,150+30
+  endif
+  draw at 221,198 rect 221+17,198+42
+  draw at 142,180 fillrect 159,260
+  draw at 15,20 rect 285,280
+  if testertype==1 then
+    draw at 20,32 rect 20+42,32+17
+  endif
+  draw at 150,19 font=SMALLFONT
+  draw text=format("Shuttle A%s - top view",testertype==0?"2/3":"4")
+  Createinput(66,203,303,0,"Left band IN")
+  Createinput(66,226,304,0,"Left band OUT")
+  Createinput(225,203,301,0,"Right band IN")
+  Createinput(225,226,302,0,"Right band OUT")
+  if catchers==0 then
+    Createinput(86,192,305,0,"Left side UNFIXED")
+    Createinput(86,216,208,0,"Left side UNLIFTED")
+    Createinput(205,216,207,0,"Right side UNLIFTED")
+  else
+    Createinput(83,226,305,0,"Left side UNFIXED")
+    Createinput(46,166,208,0,"Left side UNLIFTED")
+    Createinput(245,166,207,0,"Right side UNLIFTED")
+  endif
+  if monster==0 Createinput(146,185,203,0,"Bar MISSED")
+  Createinput(146,246,204,0,"Bar BACK")
+  Createinput(146,266,201,0,"Outer IR sensor")
+  Createinput(146,166,202,0,"Inner IR sensor")
+  if testertype==0 then
+    Createinput(270,158,107,0,"Shuttle IN")
+    Createinput(270,178,108,0,"Shuttle OUT")
+    Createinput(205,192,308,0,"Right side UNFIXED")
+  else if testertype==1 then
+    Createinput(129,25,107,0,"Back IR sensor")
+    if catchers==0 then
+      Createinput(205,192,306,0,"Right side UNFIXED")
+    else
+      Createinput(208,226,306,0,"Right side UNFIXED")
+    endif
+    Createinput(24,36,307,0,"Back stopper UP")
+    Createinput(48,36,308,0,"Back stopper DOWN")
+  endif
+  Createoutput(20,210,103,0,"ENABLE width")
+  Createoutput(20,230,104,0,"UNBRAKE width")
+  draw window=hgraph                   // Shuttle: front view
+  draw color=GRAY bkcolor=WHITE
+  draw at 305,165 rect 575,170
+  draw at 330,215 ellipse 21,21
+  draw at 550,215 ellipse 21,21
+  if testertype==0 then
+    draw at 355,205 rect 525,225
+    Createreg(405,207,70,2903,2903,"Width potentiometer (analog input 1)")
+  endif
+  draw color=BLACK
+  draw at 310,155 fillrect 310+17,155+42
+  draw at 553,155 fillrect 553+17,155+42
+  draw at 432,155 fillrect 432+17,155+42
+  draw at 359,160 fillrect 390,190
+  draw at 389,170 rect 400,180
+  draw at 305,145 rect 575,245
+  draw at 305,244 rect 575,280
+  draw at 440,144
+  draw text=format("Shuttle A%s - front view",testertype==0?"2/3":"4")
+  Createinput(436,159,205,0,"Bar UP")
+  Createinput(436,182,206,0,"Bar DOWN")
+  Createinput(326,211,103,0,"LEFT two-hand button")
+  Createinput(546,211,104,0,"RIGHT two-hand button")
+  if testertype==1 then
+    Createinput(486,258,108,0,"Exaline connected")
+    Createoutput(522,256,106,0,"ACQ to Exaline")
+    if monster Createinput(546,258,203,0,"RDY from Exaline")
+  endif
+  Createoutput(368,169,105,0,"ENABLE step-motor")
+  draw window=hgraph                   // Shutttle: lock and buttons
+  draw color=GRAY bkcolor=WHITE
+  draw at 344,33 rect 368,57
+  draw at 381,33 rect 405,57
+  draw at 335,95 ellipse 25,25 at 335,99 to 335,90
+  draw at 317,101 text="1"
+  draw at 336,83 text="2"
+  draw at 354,101 text="3"
+  draw color=BLACK
+  draw at 305,20 rect 445,120
+  draw at 375,19 text="Lock and buttons"
+  Createinput(352,40,105,0,"LEFT button")
+  Createinput(389,40,106,0,"RIGHT button")
+  Createinput(315,73,101,0,"WIDTH lock position")
+  Createinput(346,73,102,0,"SERVICE lock position")
+  Createreg(367,87,70,2905,2905,"Velocity potentiometer (analog input 3)")
+  Tripleactuator(18,300,                                                       \
+    101,"INCREASE width",102,"DECREASE width",0,100,"Width")
+  Tripleactuator(58,300,                                                       \
+    0,"Band FORWARD",0,"Band BACKWARD",0,200,"Band")
+  Tripleactuator(118,300,                                                      \
+    407+festo,"Bar UP",408+festo,"Bar DOWN",foffset,0,"Up")
+  Tripleactuator(158,300,                                                      \
+    405+festo,"Bar IN",406+festo,"Bar OUT",foffset,0,"Push")
+  if testertype==0 then
+    Tripleactuator(198,300,                                                    \
+    505+festo,"Free BACKWARD",506+festo,"Fix FORWARD",foffset,0,"Align")
+  else
+    Tripleactuator(198,300,                                                    \
+    505+festo,"Clamp PCB",506+festo,"Unclamp BACK",foffset,0,"Clamp")
+  endif
+  if catchers==0 then
+    Tripleactuator(268,300,                                                    \
+    401+festo,"Band IN",402+festo,"Band OUT",foffset,0,"Band IN")
+  else
+    Tripleactuator(268,300,                                                    \
+    401+festo,"Band IN",402+festo,"Band OUT",foffset,1000,"Band IN")
+  endif
+  Tripleactuator(308,300,                                                      \
+    503+festo,"Lift PCB",504+festo,"Unlift PCB",foffset,0,                     \
+    catchers==0?"Lift\n(short)":"Lift")
+  Tripleactuator(348,300,                                                      \
+    403+festo,"Fix PCB",404+festo,"Unfix PCB",foffset,0,                       \
+    catchers==0?"Fix\n(long)":"Fix")
+  if catchers then
+    Tripleactuator(388,300,                                                    \
+    507+festo,"Catch PCB",508+festo,"Uncatch PCB",foffset,0,"Catch")
+  endif
+  if testertype==0 then
+    Tripleactuator(436,300,                                                    \
+    502+festo,"LOCK shuttle",501+festo,"UNLOCK shuttle",foffset,0,"Lock")
+  else
+    Tripleactuator(450,300,                                                    \
+    501+festo,"Back stopper UP",502+festo,"Back stopper DOWN",foffset,         \
+    0,"Stopper")
+  endif
+  hreset=control BUTTON
+    window=hgraph
+    position=523,300,60,60
+    name="重设"
+    help="立刻重置所有显示的输出"
+    color=RED
+  endc
+  Drawstep(560,30,stepcount)
+  draw window=hgraph show
+end
+
+// Draws schematic picture of A2 loader and creates all corresponding controls.
+function int CreateA2loader()
+  int i
+  clear hgraph                         // This deletes all available controls
+  nact=0; ninp=0; nout=0; nreg=0; nadj=0
+  for i=0,i<24,i++ do
+    modiused[i]=0
+    modoused[i]=0
+  enddo
+  draw window=hgraph show
+  draw color=LIGHTYELLOW bkcolor=LIGHTYELLOW
+  draw at 0,300 fillrect 588,360
+  if demo then
+    draw font=HUGEFONT color=PINK mode=M_CENTERED at 300,150 text="DEMO"
+  endif
+  draw font=SMALLFONT mode=M_LEFT
+  if nmodule==8 then
+    draw color=DARKGRAY at 230,20 wrap=520
+    draw text="Now testing stand-alone A2 loader. Please note that help "
+    draw text="line shows logical addresses of inputs and outputs, "
+    draw text="i.e. those specified in the documentation. To obtain "
+    draw text="physical (CAN) addresses, simply subtract 200."
+  endif
+  draw color=GRAY bkcolor=WHITE        // Loader: side view
+  draw mode=M_CENTERED wrap=0
+  draw at 15,125 rect 285,280          // Main frame
+  draw at 32,142 rect 268,263
+  draw at 47,142 rect 113,220          // Input pile
+  draw at 250,160 ellipse 26,26        // Band motor
+  draw at 197,235 rect 260,263         // Vacuum pump
+  draw at 284,200 rect 300,215
+  draw at 30,20 rect 130,126           // Input unit frame
+  draw at 47,37 rect 113,110
+  draw at 135,40 rect 200,126          // Output pile
+  draw at 152,57 rect 183,110
+  draw color=BLACK
+  draw at 15,125 to 15,279 to 284,279  // Loader's contour
+  draw to 284,125 to 199,125 to 199,40
+  draw to 129,40 to 129,20 to 30,20
+  draw to 30,125 to 284,125
+  draw at 67,39 fillrect 67+17,39+35   // Group cylinder
+  draw at 67,73 fillrect 67+17,73+35   // Suction cylinder
+  draw at 90,39 fillrect 90+17,39+19   // Vacuum sensor
+  draw at 10,115 fillrect 10+42,115+17 // Pushing cylinder
+  draw at 142,145 fillrect 159,145+42  // Stopper cylinder
+  draw at 140,19 text="Loader - side view"
+  Doubleactuator(16,300,701,702,a2offset,"Push PCB",0,"Push")
+  Doubleactuator(52,300,702,701,a2offset,"Suction DOWN",-1,"Suct")
+  Doubleactuator(88,300,705,701,a2offset,"Group DOWN",-1,"Group")
+  Doubleactuator(124,300,704,0,a2offset,"Vacuum ON",0,"Vac")
+  Doubleactuator(160,300,703,0,a2offset,"Stopper UP",0,"Stop")
+  Doubleactuator(196,300,501,0,a2offset,"Pump ON",0,"Pump")
+  Tripleactuator(231,300,                                                      \
+    0,"Band FORWARD",0,"Band BACKWARD",0,300,"Band")
+  Tripleactuator(266,300,                                                      \
+    606,"INCREASE width",607,"DECREASE width",a2offset,800,"Width")
+  Createinput(110,129,1001,a2offset,"PCB on band")
+  Createinput(146,129,1004,a2offset,"PCB on stopper")
+  Createinput(246,129,1002,a2offset,"PCB slowdown")
+  Createinput(268,129,1003,a2offset,"PCB on exit")
+  Createinput(163,44,1005,a2offset,"Output FULL")
+  Createinput(71,44,1103,a2offset,"Group UP")
+  Createinput(71,62,1104,a2offset,"Group DOWN")
+  Createinput(71,78,902,a2offset,"Suction UP")
+  Createinput(71,95,903,a2offset,"Suction DOWN")
+  Createinput(94,44,904,a2offset,"Vacuum OK")
+  Createinput(15,119,905,a2offset,"Pusher BACK")
+  Createinput(38,119,906,a2offset,"Pusher FORWARD")
+  Createinput(146,150,1102,a2offset,"Stopper UP")
+  Createinput(146,173,1101,a2offset,"Stopper DOWN")
+  Createoutput(244,154,507,a2offset,"DISABLE band movement")
+  Createoutput(244,210,605,a2offset,"ENABLE width")
+  Createreg(189,187,70,2904,2904,"Width potentiometer (analog input 2)")
+  draw window=hgraph                   // Loader: input pile
+  draw color=GRAY bkcolor=WHITE
+  draw at 340,165 ellipse 26,26
+  draw at 340,265 ellipse 26,26
+  draw at 410,165 ellipse 26,26
+  draw at 410,265 ellipse 26,26
+  draw at 355,180 rect 396,184         // PCB
+  draw color=BLACK
+  draw at 327,152 clip 354,165 at 340,165 ellipse 26,26
+  draw at 327,265 clip 354,279 at 340,265 ellipse 26,26
+  draw at 397,152 clip 424,165 at 410,165 ellipse 26,26
+  draw at 397,265 clip 424,279 at 410,265 ellipse 26,26
+  draw clip=NULL
+  draw at 327,165 to 327,265 at 353,165 to 353,265
+  draw at 397,165 to 397,265 at 423,165 to 423,265
+  draw at 353,184 rect 358,189         // Shelves
+  draw at 353,261 rect 358,266
+  draw at 323,213 rect 328,218
+  draw at 393,184 rect 398,189
+  draw at 393,261 rect 398,266
+  draw at 423,213 rect 428,218
+  draw at 375,138 text="Input pile"
+  Doubleactuator(345,300,503,0,a2offset,"Left motor",400,"Left")
+  Doubleactuator(389,300,505,0,a2offset,"Right motor",500,"Right")
+  Createinput(341,182,806,a2offset,"Left PCB sensor")
+  Createinput(401,182,807,a2offset,"Right PCB sensor")
+  Createinput(311,211,808,a2offset,"Left SHELF sensor")
+  Createinput(431,211,901,a2offset,"Right SHELF sensor")
+  Createinput(336,261,907,a2offset,"Left motor OVERLOADED")
+  Createinput(406,261,908,a2offset,"Right motor OVERLOADED")
+  Createoutput(334,234,504,a2offset,"UNBRAKE left motor")
+  Createoutput(404,234,506,a2offset,"UNBRAKE right motor")
+  draw window=hgraph                   // Loader: output pile
+  draw color=GRAY bkcolor=WHITE
+  draw at 491,180 rect 533,184         // PCB
+  draw at 512,157 rect 565,176         // End switches
+  draw color=BLACK
+  draw at 460,115 rect 565,132         // Printer
+  draw at 505,106 fillrect 519,150
+  draw at 505,114 rect 519,117
+  draw at 480,165 rect 490,220         // Walls
+  draw at 534,165 fillrect 544,220
+  draw at 489,185 rect 496,257         // Pushers
+  draw at 528,185 rect 535,257
+  draw at 482,240 fillellipse 26,26    // Motors
+  draw at 541,240 fillellipse 26,26
+  draw at 510,98 text="Printing head & output pile"
+  Doubleactuator(466,300,601,0,a2offset,"Left motor",0,"Left")
+  Doubleactuator(500,300,602,0,a2offset,"Right motor",0,"Right")
+  Tripleactuator(534,300,                                                      \
+    0,"Head TO LEFT",0,"Head TO RIGHT",0,900,"Head")
+  Doubleactuator(568,300,508,0,a2offset,"HI->LO Printer start",0,"Print")
+  Createinput(488,262,1006,a2offset,"Left lifter DOWN")
+  Createinput(527,262,1007,a2offset,"Right lifter DOWN")
+  Createinput(517,162,1105,a2offset,"MINIMAL width")
+  Createinput(551,162,1106,a2offset,"MAXIMAL width")
+  Createinput(464,119,12200,0,"Zero sensor of printing head")
+  if nmodule==8 then
+    hreset=control BUTTON
+      window=hgraph
+      position=350,70,50,50
+      name="重设"
+      help="立刻重置所有显示的输出"
+      color=RED
+    endc
+  else
+    hreset=control BUTTON
+      window=hgraph
+      position=320,20,60,60
+      name="重设"
+      help="立刻重置所有显示的输出"
+      color=RED
+    endc
+  endif
+  Drawstep(560,30,stepcount)
+  draw window=hgraph show
+end
+
+// Draws schematic picture of A4 loader and creates all corresponding controls.
+function int CreateA4loader()
+  int i
+  clear hgraph                         // This deletes all available controls
+  nact=0; ninp=0; nout=0; nreg=0; nadj=0
+  for i=0,i<24,i++ do
+    modiused[i]=0
+    modoused[i]=0
+  enddo
+  draw window=hgraph show
+  draw color=LIGHTYELLOW bkcolor=LIGHTYELLOW
+  draw at 0,300 fillrect 588,360
+  draw color=LIGHTYELLOW bkcolor=LIGHTYELLOW
+  draw at 0,300 fillrect 588,360
+  if demo then
+    draw font=HUGEFONT color=PINK mode=M_CENTERED at 300,150 text="DEMO"
+  endif
+  draw font=SMALLFONT mode=M_LEFT
+  draw color=GRAY bkcolor=WHITE        // Loader: side view
+  draw mode=M_CENTERED wrap=0
+  draw at 45,125 rect 315,280          // Main frame
+  draw at 62,142 rect 298,263
+  draw at 77,142 rect 143,220          // Input pile
+  draw at 280,160 ellipse 26,26        // Band motor
+  draw at 314,200 rect 330,215
+  draw at 60,20 rect 160,126           // Input unit frame
+  draw at 77,37 rect 143,110
+  draw color=BLACK
+  draw at 45,125 to 45,279 to 314,279  // Loader's contour
+  draw to 314,125 to 159,125 to 159,20
+  draw to 60,20 to 60,125 to 314,125
+  draw at 97,39 fillrect 97+17,39+35   // Group cylinder
+  draw at 97,73 fillrect 97+17,73+35   // Suction cylinder
+  draw at 120,39 fillrect 120+17,39+19 // Vacuum sensor
+  draw at 40,115 fillrect 40+42,115+17 // Pushing cylinder
+  draw at 170,19 text="A4 loader - side view"
+  Doubleactuator(56,300,501,502,ldoffset,"Push PCB",0,"Push")
+  Doubleactuator(92,300,502,501,ldoffset,"Suction DOWN",-1,"Suct")
+  Doubleactuator(128,300,503,501,ldoffset,"Group DOWN",-1,"Group")
+  Doubleactuator(184,300,901,0,ldoffset,"Pump ON",0,"Pump")
+  Doubleactuator(220,300,504,0,ldoffset,"Vacuum ON",0,"Vacuum")
+  Tripleactuator(281,300,                                                      \
+    0,"Band FORWARD",0,"Band BACKWARD",0,300,"Band")
+  Createinput(140,129,706,ldoffset,"PCB on band")
+  Createinput(219,129,803,ldoffset,"Cover CLOSED")
+  Createinput(298,129,708,ldoffset,"PCB on exit")
+  Createinput(101,44,703,ldoffset,"Group UP")
+  Createinput(101,62,704,ldoffset,"Group DOWN")
+  Createinput(101,78,701,ldoffset,"Suction UP")
+  Createinput(101,95,702,ldoffset,"Suction DOWN")
+  Createinput(124,44,605,ldoffset,"Vacuum OK")
+  Createinput(45,119,607,ldoffset,"Pusher BACK")
+  Createinput(68,119,608,ldoffset,"Pusher FORWARD")
+  draw window=hgraph                   // Loader: input pile
+  draw color=GRAY bkcolor=WHITE
+  draw at 400,105 ellipse 26,26
+  draw at 400,205 ellipse 26,26
+  draw at 470,105 ellipse 26,26
+  draw at 470,205 ellipse 26,26
+  draw at 415,120 rect 456,124         // PCB
+  draw color=BLACK
+  draw at 387,92 clip 414,105 at 400,105 ellipse 26,26
+  draw at 387,205 clip 414,219 at 400,205 ellipse 26,26
+  draw at 387,92 clip 484,105 at 470,105 ellipse 26,26
+  draw at 387,205 clip 484,219 at 470,205 ellipse 26,26
+  draw clip=NULL
+  draw at 387,105 to 387,205 at 413,105 to 413,205
+  draw at 457,105 to 457,205 at 483,105 to 483,205
+  draw at 413,124 rect 418,129         // Shelves
+  draw at 413,201 rect 418,206
+  draw at 383,153 rect 388,158
+  draw at 453,124 rect 458,129
+  draw at 453,201 rect 458,206
+  draw at 483,153 rect 488,158
+  draw at 435,78 text="Input pile"
+  Doubleactuator(393,300,505,0,ldoffset,"Left motor",700,"Left")
+  Doubleactuator(462,300,507,0,ldoffset,"Right motor",700,"Right")
+  Createoutput(429,197,506,ldoffset,"UNBRAKE motors")
+  Createinput(431,140,707,ldoffset,"PCBs in input pile")
+  Createinput(401,122,601,ldoffset,"Left PCB sensor")
+  Createinput(461,122,602,ldoffset,"Right PCB sensor")
+  Createinput(371,151,603,ldoffset,"Left SHELF sensor")
+  Createinput(491,151,604,ldoffset,"Right SHELF sensor")
+  Createinput(396,201,801,ldoffset,"Left motor NOT OVERLOADED")
+  Createinput(466,201,802,ldoffset,"Right motor NOT OVERLOADED")
+  i=Readregister(24)                   // Default left speed
+  Writeregister(3020,i)
+  Createreg(382,237,40,3020,3020,"Left speed")
+  Createadjust(382,255,3020,i,0,2000,10,"Left speed")
+  i=Readregister(25)                   // Default right speed
+  Writeregister(3021,i)
+  Createreg(451,237,40,3021,3021,"Right speed")
+  Createadjust(451,255,3021,i,0,2000,10,"Right speed")
+  hreset=control BUTTON
+    window=hgraph
+    position=523,300,60,60
+    name="重设"
+    help="立刻重置所有显示的输出"
+    color=RED
+  endc
+  Drawstep(560,30,stepcount)
+  draw window=hgraph show
+end
+
+// Draws schematic picture of A4 output unit and creates controls.
+function int Createoutputunit()
+  int i
+  clear hgraph                         // This deletes all available controls
+  nact=0; ninp=0; nout=0; nreg=0; nadj=0
+  for i=0,i<24,i++ do
+    modiused[i]=0
+    modoused[i]=0
+  enddo
+  hprint=control BUTTON
+    window=hgraph
+    position=523,220,60,24
+    name="LINX"
+    help="通过COMx将Smiley发送到LINX打印机:"
+  endc
+  draw window=hgraph show
+  draw color=LIGHTYELLOW bkcolor=LIGHTYELLOW
+  draw at 0,300 fillrect 588,360
+  if demo then
+    draw font=HUGEFONT color=PINK mode=M_CENTERED at 300,150 text="DEMO"
+  endif
+  draw font=SMALLFONT mode=M_LEFT
+  draw color=DARKGRAY at 10,15 wrap=530
+  if nmodule!=13 draw text="Loader is not connected. "
+  if showlog!=0 && outoffset!=0 then
+    draw text="Note that help line displays documented addresses of inputs "
+    draw text="and outputs. To obtain physical (CAN) address, simply subtract "
+    draw text=format("%i.",-outoffset)
+  else if showlog==0 && outoffset!=0 then
+    draw text="Note that help line displays physical (CAN) addresses of "
+    draw text="inputs and outputs. To obtain address in schematics, add "
+    draw text=format("%i.",-outoffset)
+  endif
+  draw color=GRAY bkcolor=WHITE        // Loader: side view
+  draw mode=M_CENTERED wrap=0
+  draw at 35,125 rect 485,280          // Main frame
+  draw at 52,142 rect 468,263
+  if labelprinter==0 then
+    draw at 142,34 rect 156,66         // Printing head
+    draw at 142,42 rect 156,51
+    draw at 142,58 to 156,58
+  else
+    draw at 108,56 rect 122,76         // Printer arm
+    draw at 108,56 rect 115,76
+  endif
+  draw at 220,40 rect 305,126          // "Good" output pile
+  draw at 235,55 rect 290,111
+  draw at 185,155 rect 260,174         // "Good" pushers and motors
+  draw at 205,142 fillrect 240,175
+  draw at 400,40 rect 485,126          // "Bad" output pile
+  draw at 415,55 rect 470,111
+  draw at 365,155 rect 440,174         // "Bad" pushers and motors
+  draw at 385,142 fillrect 420,175
+  draw at 310,185 rect 468,263         // Electronics compartment
+  draw at 240,225 rect 290,263         // Vacuum pump
+  draw color=DARKGRAY
+  draw at 262,125 text="Good"
+  draw at 442,125 text="Bad"
+  draw color=BLACK
+  draw at 35,125 to 121,125 to 121,40  // Contour of output unit
+  draw to 139,40 to 139,125 to 220,125
+  draw to 220,40 to 304,40 to 304,125
+  draw to 359,125 to 400,125 to 400,40
+  draw to 484,40 to 484,279 to 35,279
+  draw to 35,125
+  if labelprinter==0 then
+    draw at 139,65 rect 159,115        // Printing head
+  else
+    draw at 89,40 rect 109,59          // Printer arm
+    draw at 89,58 rect 109,105         
+    draw at 108,85 rect 122,95
+    draw at 79,104 rect 119,110
+  endif
+  draw at 286,145 fillrect 303,145+42  // Stopper cylinder
+  Createinput(60,160,1101,outoffset,"Cover CLOSED")
+  Createinput(60,129,1102,outoffset,"First PCB sensor")
+  Createinput(126,129,1103,outoffset,"Second PCB sensor")
+  if labelprinter==0 then
+    Createinput(126,45,13200,(nmodule==8?1000:0),"Zero sensor of printing head")
+  else
+    Createinput(95,45,1104,outoffset,"Label vacuum OK")
+    Createinput(126,45,13200,(nmodule==8?1000:0),"Zero sensor of printer arm")
+    Createinput(95,64,1203,outoffset,"Printer arm UP")
+    Createinput(95,91,1204,outoffset,"Printer arm DOWN")
+  endif
+  Createinput(290,129,1105,outoffset,"PCB at GOOD position")
+  Createinput(470,129,1106,outoffset,"PCB at BAD position")
+  Createinput(258,44,1107,outoffset,"Good pile FULL")
+  Createinput(438,44,1108,outoffset,"Bad pile FULL")
+  Createinput(290,150,1201,outoffset,"Stopper UP")
+  Createinput(290,173,1202,outoffset,"Stopper DOWN")
+  Createinput(191,160,1205,outoffset,"Left good lifter DOWN")
+  Createinput(245,160,1206,outoffset,"Right good lifter DOWN")
+  Createinput(371,160,1207,outoffset,"Left bad lifter DOWN")
+  Createinput(425,160,1208,outoffset,"Right bad lifter DOWN")
+  Tripleactuator(35,300,0,"Band FORWARD",0,"Band BACKWARD",0,600,"Band")
+  Tripleactuator(100,300,0,"Head TO LEFT",0,"Head TO RIGHT",0,900,"Head")
+  if labelprinter==0 then
+    Doubleactuator(134,300,1003,0,outoffset,"HI->LO Printer start",0,"Print")
+  else
+    Doubleactuator(131,300,1002,0,outoffset,"Printer arm down",-1,"Down")
+    Doubleactuator(162,300,1004,0,outoffset,"Label vacuum on",-1,"Label")
+  endif
+  Doubleactuator(195,300,903,0,outoffset,"Left good lifter ON",0,"Left")
+  Doubleactuator(229,300,904,0,outoffset,"Right good lifter ON",0,"Right")
+  Doubleactuator(286,300,1001,0,outoffset,"Stopper UP",0,"Stopper")
+  Doubleactuator(375,300,905,0,outoffset,"Left bad lifter ON",0,"Left")
+  Doubleactuator(409,300,906,0,outoffset,"Right bad lifter ON",0,"Right")
+  Doubleactuator(465,300,901,0,outoffset,"Vacuum pump ON",0,"Vacuum")
+  hreset=control BUTTON
+    window=hgraph
+    position=523,300,60,60
+    name="重设"
+    help="立刻重置所有显示的输出"
+    color=RED
+  endc
+  Drawstep(560,30,stepcount)
+  draw window=hgraph show
+end
+
+// If serial LINX port is not yet open, selects it.
+function int Selectprinterport()
+  int i,n,serialok[4]
+  handle h,hask,hcom[4],hok,hcancel
+  if hlinx!=NULL return
+  n=-1
+  for i=0,i<4,i++
+    h=Fserial(i+1,9600,8,NOPARITY|RTS_ON)
+    if h==NULL then
+      serialok[i]=0
+    else
+      serialok[i]=1
+      if n<0 n=i
+      Fclose(h)
+    endif
+  enddo
+  if n<0 return                        // Oops, no free port!
+  hask=control WINDOW
+    window=hmain
+    name="选择LINX端口"
+    help=" "
+    mode=M_MODAL
+    position=80,80,220,110
+    bkcolor=YELLOW
+  endc
+  for i=0,i<4,i++
+    hcom[i]=control RADIO
+      window=hask
+      position=30,12+23*i,65,23
+      text=format(" COM%i",i+1)
+      help=format("LINX 已连接到 COM%i",i+1)
+      mode=(n==i?M_CHECKED:0)
+    endc
+    if serialok[i]==0 disable hcom[i]
+  enddo
+  hok=control BUTTON
+    window=hask
+    position=120,25,75,25
+    text="确定"
+    help="按确认您的选择"
+  endc
+  hcancel=control BUTTON
+    window=hask
+    position=120,65,75,25
+    text="Cancel"
+    help="按下取消打印"
+  endc
+  while 1 do
+    if Pressed(hcancel) then
+      break
+    else if Pressed(hok) then
+      if Status(hcom[0]) then i=0;
+      else if Status(hcom[1]) then i=1;
+      else if Status(hcom[2]) then i=2;
+      else if Status(hcom[3]) then i=3;
+      else continue;
+      endif
+      hlinx=Fserial(i+1,9600,8,NOPARITY|RTS_ON)
+      if hlinx!=NULL break
+    endif
+    wait
+  enddo
+  destroy hask
+end
+
+// Sends n-character message from buf to LINX printer and waits for answer.
+// Returns length of answer in characters (max. 128) or 0 on error. It is
+// possible to point buf and answer to the same memory.
+function int Printermessage(char *buf,int n,char *answer)
+  char c,s[1024]
+  int i,j,k,t,chksum,escseq
+  // Format command to LINX printer.
+  s[0]=0x1B
+  chksum=0x02; s[1]=0x02               // ESC STX - start of new message
+  j=2
+  for i=0,i<n,i++ do
+    if j>=762 return 0                 // Message is too long
+    if buf[i]==0x1B then               // Preceed ESC in data by ESC
+      s[j]=0x1B; j++
+    endif
+    s[j]=buf[i]; j++
+    chksum=chksum+buf[i]
+  enddo
+  s[j]=0x1B; j++
+  s[j]=0x03; j++                       // ESC ETX - end of message
+  chksum=chksum+0x03
+  chksum=(-chksum) & 0xFF
+  if chksum==0x1B then                 // Preceed checksum==ESC by ESC
+    s[j]=0x1B; j++
+  endif
+  s[j]=chksum; j++
+  // Transmit prepared command.
+  if Fwrite(s,j,hlinx)!=j return 0     // Error: unable to send command
+  t=Time()+5000                        // Max allowed communication time 5 s
+  escseq=0
+  while 1 do                           // Wait for ACK- or NAK- byte
+    k=Fread(&c,1,hlinx)
+    if k==1 then                       // Byte received
+      if escseq==0 && c==0x1B then
+        escseq=1                       // ESC: next is control byte
+      else if escseq!=0 then
+        escseq=0
+        if c==0x15 || c==0x06 then     // NAK or ACK: new answer
+          answer[0]=c
+          break
+        endif
+      endif
+    endif
+    if Time()>t return 0               // Reception timeout
+    wait
+  enddo
+  j=1                                  // Total number of received bytes
+  while j<1014 do
+    k=Fread(&c,1,hlinx)
+    if k==1 then                       // Byte received
+      if escseq==0 && c==0x1B then
+        escseq=1; continue             // ESC: next is control byte
+      else if escseq!=0 then
+        escseq=0
+        if c==0x03 then
+          break                        // ETX: end of answer, chksum follows
+        else if c==0x15 || c==0x06 then
+          answer[0]=c; j=1;            // NAK or ACK: new answer
+        else if c==0x11 then
+          ;                            // Xon: simply ignore
+        else if c==0x13 then
+          ;                            // Xoff: simply ignore
+        else
+          answer[j]=c; j++             // Any other character: add to answer
+        endif
+      else
+        answer[j]=c; j++               // Ordinary character: add to answer
+      endif
+    endif
+    if Time()>t return 0               // Reception timeout
+    wait
+  enddo
+  return j
+end
+
+// Converts bitmap from as in tester command to LINX format and passes it to
+// LINX printer. Returns -1 on data error, 40 if communication error
+// detected and 0 on success.
+function int Decodelinxbitmap(char *bmp,int nx,int ny,int dx,int dy)
+  int i,j,ii,jj,n,xbytes,ybytes,lmask,bmask
+  char buf[1024]
+  // Assure that LINX printer port is open.
+  if hlinx==NULL then
+    Selectprinterport()
+    if hlinx==NULL return 0
+  endif
+  // Set printer width.
+  buf[0]=3                             // 'Set print width' command
+  $int2(buf+1)=(dx/7)*5
+  if Printermessage(buf,3,buf)==0 then
+    lprintf(RED,"Unable to set width - no communication with LINX?")
+    return 40
+  endif
+  // Send bitmap to printer.
+  n=nx*((ny+7)/8)                      // Number of bytes in LINX bitmap
+  if ny>16 || n>512 return -1
+  buf[0]=28                            // 'Download field' command
+  $int2(buf+1)=32+n                    // Length of field
+  buf[3]=0x1C                          // Field header
+  buf[4]=0x08                          // Pixel field
+  $int2(buf+5)=32+n                    // Length of field (from header byte)
+  buf[7]=0                             // Y field position
+  $int2(buf+8)=0                       // X field position
+  $int2(buf+10)=nx                     // X field length in rasters
+  buf[12]=ny                           // Y field height in drops
+  buf[13]=0                            // Must be zero
+  buf[14]=1                            // Bold x1 (normal) pixels
+  buf[15]=0                            // Text length: must be zero
+  buf[16]=(ny+7)/8                     // Number of bytes per raster
+  Memset(buf+17,0,18+n)                // Clear format, link, name & bitmap
+  xbytes=(nx+7)/8
+  ybytes=(ny+7)/8
+  lmask=0x80; jj=0
+  for j=0,j<ny,j++ do
+    bmask=0x80; ii=0
+    for i=0,i<nx,i++ do
+      if (bmp[j*xbytes+ii] & bmask) then
+        buf[35+i*ybytes+ybytes-jj-1]=buf[35+i*ybytes+ybytes-jj-1] | lmask
+      endif
+      bmask=bmask>>1
+      if bmask==0 then
+        bmask=0x80; ii++
+      endif
+    enddo
+    lmask=lmask>>1
+    if lmask==0 then
+      lmask=0x80; jj++
+    endif
+  enddo
+  if Printermessage(buf,35+n,buf)==0 then
+    lprintf(RED,"Unable to send image - unstable connection to LINX?")
+    return 40
+  endif
+  return 0                             // Bitmap successfully transferred
+end
+
+// Creates 32x16-pixel Smiley Cat.
+function int Createsmileycat(char *buf)
+  $xuint4(buf+60)=0b11111111111111111111111111111111;
+  $xuint4(buf+56)=0b10111110000000000000000011111101;
+  $xuint4(buf+52)=0b10100001111111111111111100000101;
+  $xuint4(buf+48)=0b10010001000000000000000010001001;
+  $xuint4(buf+44)=0b10001010010100000000101001010001;
+  $xuint4(buf+40)=0b10000100001000000000010000100001;
+  $xuint4(buf+36)=0b10000100010100000000101000100001;
+  $xuint4(buf+32)=0b10000100000000000000000000100001;
+  $xuint4(buf+28)=0b10000100000000011000000000100001;
+  $xuint4(buf+24)=0b10000100000000000000000000100001;
+  $xuint4(buf+20)=0b10000010000001000010000001000001;
+  $xuint4(buf+16)=0b10000001000000111100000010000001;
+  $xuint4(buf+12)=0b10000000110000000000001100000001;
+  $xuint4(buf+8) =0b10000000001111111111110000000001;
+  $xuint4(buf+4) =0b10000000001000000000010000000001;
+  $xuint4(buf)   =0b11111111111111111111111111111111;
+end
+
+// Creates 32x16-pixel Sad Cat.
+function int Createsadcat(char *buf)
+  $xuint4(buf+60)=0b11111111111111111111111111111111;
+  $xuint4(buf+56)=0b10000000000000000000000000000001;
+  $xuint4(buf+52)=0b10001111111111111111111111110001;
+  $xuint4(buf+48)=0b10110001000000000000000010001101;
+  $xuint4(buf+44)=0b11000010001000000000010001000011;
+  $xuint4(buf+40)=0b11111100001000000000010000111111;
+  $xuint4(buf+36)=0b10000100001000000000010000100001;
+  $xuint4(buf+32)=0b10000100000000000000000000100001;
+  $xuint4(buf+28)=0b10000100000000011000000000100001;
+  $xuint4(buf+24)=0b10000100000000000000000000100001;
+  $xuint4(buf+20)=0b10000010000000111100000001000001;
+  $xuint4(buf+16)=0b10000001000001000010000010000001;
+  $xuint4(buf+12)=0b10000000110000000000001100000001;
+  $xuint4(buf+8) =0b10000000001111111111110000000001;
+  $xuint4(buf+4) =0b10000000001000000000010000000001;
+  $xuint4(buf)   =0b11111111111111111111111111111111;
+end
+
+// Prints Smiley or Sad Cat bitmap at the specified coordinates
+function int Printbitmap(int sad,float x,float y)
+  char buf[256]
+  int i,j
+  if h==NULL then                      // Connected via tester
+    buf[0]=S_MARK
+    buf[1]=1                           // Mode
+    buf[2]=0                           // Side, this time 0
+    $int3(buf+3)=x*1000.0              // X coordinate, micrometers
+    $int3(buf+6)=y*1000.0              // Y coordinate, micrometers
+    $int2(buf+9)=200                   // DX, micrometers
+    $int2(buf+11)=200                  // DY, micrometers
+    $int2(buf+13)=32                   // NX, pixels
+    $int2(buf+15)=16                   // NY, pixels
+    buf[17]=0x00                       // Direction: to the right
+    if sad then
+      Createsadcat(buf+18)
+    else
+      Createsmileycat(buf+18)
+    endif
+    SYS.Sendimm(0,82,buf)
+    while $A[0].length==0 do           // Wait till command is finished
+      wait
+    enddo
+  else                                 // Connected via RS232
+    Writeregister(3,0)                 // Reset error
+    Writeregister(6,x*1000.0)          // X coordinate, micrometers
+    Writeregister(7,y*1000.0)          // Y coordinate, micrometers
+    Writeregister(0,12)                // Print bitmap
+  endif
+end
+
+// Sends Smiley or Sad Cat bitmap to the Linx printer.
+function int Sendbitmap(int sad)
+  char buf[256]
+  int i,j
+  if h!=NULL return -1                 // Connected via RS232
+  buf[0]=S_MARK
+  buf[1]=6                             // Mode - only new A2 software
+  buf[2]=0                             // Side, this time 0
+  $int3(buf+3)=0                       // X coordinate, ignored
+  $int3(buf+6)=0                       // Y coordinate, ignored
+  $int2(buf+9)=200                     // DX, micrometers
+  $int2(buf+11)=200                    // DY, micrometers
+  $int2(buf+13)=32                     // NX, pixels
+  $int2(buf+15)=16                     // NY, pixels
+  buf[17]=0x00                         // Direction: to the right
+  if sad then
+    Createsadcat(buf+18)
+  else
+    Createsmileycat(buf+18)
+  endif
+  SYS.Sendimm(0,82,buf)
+  while $A[0].length==0 do             // Wait till command is finished
+    wait
+  enddo
+end
+
+// Print label and attach it at the specified coordinates. Note that printing
+// without connection to FPT is not possible.
+function int Attachlabel(float x,float y)
+  char buf[1024]
+  int i,j,n
+  if h==NULL then                      // Connected via tester
+    buf[0]=S_MARK
+    buf[1]=3                           // Mode
+    buf[2]=0                           // Side, must be 0
+    $int3(buf+3)=x*1000.0              // X coordinate, micrometers
+    $int3(buf+6)=y*1000.0              // Y coordinate, micrometers
+    $int2(buf+9)=0                     // DX, must be 0
+    $int2(buf+11)=0                    // DY, must be 0
+    $int2(buf+15)=0                    // NY, must be 0
+    buf[17]=0x00                       // Direction: must be 0
+    n=18
+    n=n+sprintf(buf+n,"----- Test of A2/A4 label printer -----\n")
+    labelcount++
+    n=n+sprintf(buf+n,"\x1B4              Label # %i\n\x1B5",labelcount)
+    n=n+sprintf(buf+n,"-- Many happy returns of this label! --")
+    $int2(buf+13)=n-18                 // NX, characters
+    SYS.Sendimm(0,n,buf)
+    while $A[0].length==0 do           // Wait till command is finished
+      wait
+    enddo
+  endif
+end
+
+function int Selectreg()
+  int command
+  char s[64]
+  handle hselect,hlist,hok,hcancel
+  hselect=control WINDOW
+    window=hmain
+    name="选择SPS注册器"
+    help=" "
+    mode=M_MODAL
+    position=170,140,300,153
+    bkcolor=YELLOW
+  endc
+  hlist=control LISTBOX
+    window=hselect
+    position=5,5,290,120
+    help="选择一个预定义寄存器"
+    mode=M_VSCROLL
+    font=FIXEDFONT
+  endc
+  add hlist text="    9 - Input which caused error"
+  add hlist text="   10 - X label position, ticks"
+  add hlist text="   11 - Number of line feeds"
+  add hlist text="   20 - X print correction, um"
+  add hlist text="   21 - Y print correction, um"
+  add hlist text="   22 - Y print scale, um/step"
+  add hlist text="   23 - Debug mode"
+  add hlist text="   24 - Default V of left input"
+  add hlist text="   25 - Default V of right input"
+  add hlist text="   70 - TripleClick status"
+  add hlist text="   73 - Shuttle has side catchers"
+  add hlist text="   74 - Span frame mode"
+  add hlist text=" 2000 - Version of SPS OS"
+  add hlist text=" 2008 - SPS error bits"
+  add hlist text=" 2011 - Timeouted I/O module"
+  add hlist text=" 2012 - Timeouted slave module"
+  add hlist text=" 2013 - Number of I/O modules"
+  add hlist text=" 2014 - Number of slave modules"
+  add hlist text="10109 - Position of shuttle band"
+  add hlist text="12109 - Position of loader band"
+  hok=control BUTTON
+    window=hselect
+    position=70,129,75,22
+    text="确定"
+    help="确认选择"
+  endc
+  hcancel=control BUTTON
+    window=hselect
+    position=155,129,75,22
+    text="Cancel"
+    help="按下放弃选择"
+  endc
+  change hlist select=0
+  setfocus hlist
+  while 1 do
+    if Pressed(hcancel) then
+      destroy hselect
+      return -1
+    else if Pressed(hok) || Pressed(hlist) then
+      Text(hlist,s)
+      command=-1; sscanf(s,"%i",&command)
+      destroy hselect
+      return command
+    endif
+    wait
+  enddo
+end
+
+function int Setdebugmode()
+  int i
+  handle hselect,hok,hcancel
+  handle hprinter
+  i=Readregister(23)
+  if (i & 0x10000)==0 i=0
+  hselect=control WINDOW
+    window=hmain
+    name="设置诊断模式"
+    help=" "
+    mode=M_MODAL
+    position=170,140,300,153
+    bkcolor=YELLOW
+  endc
+  hprinter=control CHECKBOX
+    window=hselect
+    position=20,30,150,22
+    name="禁用打印机"
+    help="选中可以禁用Linx/标签打印机初始化"
+    font=INFOFONT
+    mode=(i & 0x00002?M_CHECKED:0)
+  endc
+  hok=control BUTTON
+    window=hselect
+    position=70,129,75,22
+    text="确定"
+    help="按下确认新的调试模式"
+  endc
+  hcancel=control BUTTON
+    window=hselect
+    position=155,129,75,22
+    text="Cancel"
+    help="按下可放弃更改"
+  endc
+  while 1 do
+    if Pressed(hcancel) then
+      destroy hselect
+      return
+    else if Pressed(hok) then
+      i=0x10000
+      if Status(hprinter) i=i|0x00002
+      Writeregister(23,i)
+      destroy hselect
+      return
+    endif
+    wait
+  enddo
+end
+
+function int Decodeerr(char *s,int n)
+  int i
+  i=sprintf(s," Err %i: ",n)
+  switch n
+  case 0:  s[0]='\0'
+  case 11: Strcpy(s+i,"Emergency cirquit")
+  case 12: Strcpy(s+i,"Self-test detected error")
+  case 13: Strcpy(s+i,"Internal SPS error")
+  case 14: Strcpy(s+i,"Unrecognized comand")
+  case 15: Strcpy(s+i,"Pusher in push position")
+  case 16: Strcpy(s+i,"Some unit still moving")
+  case 17: Strcpy(s+i,"Not allowed by tester")
+  case 18: Strcpy(s+i,"Unable to Continue")
+  case 20: Strcpy(s+i,"Left input motor")
+  case 21: Strcpy(s+i,"Right input motor")
+  case 22: Strcpy(s+i,"Motors in output unit")
+  case 23: Strcpy(s+i,"Stopper out of order")
+  case 24: Strcpy(s+i,"Stopper sensor")
+  case 25: Strcpy(s+i,"PCB on the band")
+  case 26: Strcpy(s+i,"Lifters not down")
+  case 27: Strcpy(s+i,"Pneumatics")
+  case 28: Strcpy(s+i,"Suction board")
+  case 29: Strcpy(s+i,"Shuttle pneumatics")
+  case 30: Strcpy(s+i,"No more PCBs")
+  case 31: Strcpy(s+i,"PCB jam")
+  case 32: Strcpy(s+i,"Output pile full")
+  case 33: Strcpy(s+i,"Unable to home printer")
+  case 34: Strcpy(s+i,"Bad X-Y coordinates")
+  case 35: Strcpy(s+i,"False hardware")
+  case 36: Strcpy(s+i,"No answer from Exaline")
+  default: Strcpy(s+i,"Unknown SPS error")
+  endsw
+end
+
+// Displays actual status of running A2/A3 software and allows to send different
+// commands to tester.
+function int CreateA2command()
+  int i,regno1,regno2,newdata,ret
+  float x,y
+  char buf[64]
+  handle hzero,hcont,hreserr,herrtext
+  handle hregno1,hselreg1,hactual1,hnew1,hwrite1
+  handle hregno2,hselreg2,hactual2,hnew2,hwrite2
+  handle hunload,hload1,hload2,hload3
+  handle hpushers,hmove1,hmove2,hmove3
+  handle hprintpos,hatx1,haty1,hatx2,haty2,hprint1,hprint2,hsmiley,hsad
+  clear hgraph                         // This deletes all available controls
+  nact=0; ninp=0; nout=0; nreg=0; nadj=0
+  for i=0,i<24,i++ do
+    modiused[i]=0
+    modoused[i]=0
+  enddo
+  draw window=hgraph show
+  if demo then
+    draw font=HUGEFONT color=PINK mode=M_CENTERED at 300,150 text="DEMO"
+  endif
+  hreset=control BUTTON
+    window=hgraph
+    position=10,235,85,22
+    name="重设"
+    color=RED
+    help"按下可中断当前操作，并从传输带中移除所有PCB"
+  endc
+  hzero=control BUTTON
+    window=hgraph
+    position=105,235,85,22
+    name="置零"
+    help="通知加载器带上没有PCB"
+  endc
+  hcont=control BUTTON
+    window=hgraph
+    position=200,235,85,22
+    name="继续"
+    help="继续加载ing PCBs"
+  endc
+  hunload=control BUTTON
+    window=hgraph
+    position=10,261,85,22
+    name="卸载"
+    help="按下可卸载所有PCB"
+  endc
+  hload1=control BUTTON
+    window=hgraph
+    position=105,261,85,22
+    name="加载1"
+    help="按下加载1 PCB"
+  endc
+  hload2=control BUTTON
+    window=hgraph
+    position=200,261,85,22
+    name="加载2"
+    help="按下加载2 PCB"
+  endc
+  hload3=control BUTTON
+    window=hgraph
+    position=295,261,85,22
+    name="加载3"
+    help="按下加载3 PCB"
+  endc
+  hpushers=control BUTTON
+    window=hgraph
+    position=10,287,85,22
+    name="InitOut"
+    help="按下以初始化输出堆下的推进器"
+  endc
+  hmove1=control BUTTON
+    window=hgraph
+    position=105,287,85,22
+    name="移动1"
+    help="按下可将PCB一次移动1个"
+  endc
+  hmove2=control BUTTON
+    window=hgraph
+    position=200,287,85,22
+    name="移动2"
+    help="按下可将PCB一次移动2个"
+  endc
+  hmove3=control BUTTON
+    window=hgraph
+    position=295,287,85,22
+    name="移动3"
+    help="按下可将PCB一次移动3个"
+  endc
+  hprintpos=control BUTTON
+    window=hgraph
+    position=10,326,85,22
+    name="Print pos"
+    help="将下一块板卸载到打印位置"
+  endc
+  herrtext=control TEXT
+    window=hgraph
+    position=390,261,200,22
+    help="把SPS检测到的最后一个错误解码"
+    font=INFOFONT
+    color=LIGHTRED
+    mode=M_BORDER
+  endc
+  if h==NULL then                      // Create these controls only if
+    hatx1=control EDIT                 // connected via slave and I/O extender
+      window=hgraph
+      position=128,326,61,22
+      help="第一个打印位置的X坐标，毫米"
+    endc
+    haty1=control EDIT
+      window=hgraph
+      position=223,326,61,22
+      help="第一个打印位置的Y坐标，毫米"
+    endc
+    hprint1=control BUTTON
+      window=hgraph
+      position=295,326,85,22
+      name="打印"
+      help="在第一个打印位置打印笑脸位图"
+    endc
+    x=0.0; y=0.0
+    getini("SPS","Print pos 1","%g,%g",&x,&y)
+    change hatx1 text=format("%g",x)
+    change haty1 text=format("%g",y)
+    hatx2=control EDIT
+      window=hgraph
+      position=128,352,61,22
+      help="第二个打印位置的X坐标，毫米"
+    endc
+    haty2=control EDIT
+      window=hgraph
+      position=223,352,61,22
+      help="第二个打印位置的Y坐标，毫米"
+    endc
+    hprint2=control BUTTON
+      window=hgraph
+      position=295,352,85,22
+      name="打印"
+      help="在第二个打印位置打印笑脸位图"
+    endc
+    x=0.0; y=0.0
+    getini("SPS","Print pos 2","%g,%g",&x,&y)
+    change hatx2 text=format("%g",x)
+    change haty2 text=format("%g",y)
+    hsmiley=control BUTTON
+      window=hgraph
+      position=400,326,85,22
+      name="Smiley"
+      help="将笑脸位图发送到Linx打印机"
+    endc
+    hsad=control BUTTON
+      window=hgraph
+      position=400,352,85,22
+      name="Sad"
+      help="将哭脸位图发送到Linx打印机"
+    endc
+  endif
+  hreserr=control BUTTON
+    window=hgraph
+    position=533,67,50,18
+    name="重设"
+    help="按下可将错误寄存器设置为0"
+    font=SMALLFONT
+  endc
+  hregno1=control EDIT
+    window=hgraph
+    position=470,127,56,18
+    help="可以观察并直接修改的第一个SPS寄存器的索引"
+    font=MAINFONT
+  endc
+  hselreg1=control BUTTON
+    window=hgraph
+    position=533,127,50,18
+    name="选择"
+    help="按下可选择其中一个重要寄存器"
+    font=SMALLFONT
+  endc
+  hactual1=control TEXT
+    window=hgraph
+    position=470,146,56,18
+    font=MAINFONT
+    bkcolor=LIGHTGRAY
+    mode=M_BORDER|M_CENTERED
+    help="第一个选定的SPS寄存器的实际内容"
+  endc
+  hnew1=control EDIT
+    window=hgraph
+    position=470,165,56,18
+    help="要写入第一个选定的SPS寄存器的新数据"
+    font=MAINFONT
+  endc
+  hwrite1=control BUTTON
+    window=hgraph
+    position=533,165,50,18
+    name="改变"
+    help="按下可更改第一个选定寄存器的内容"
+    font=SMALLFONT
+  endc
+  hregno2=control EDIT
+    window=hgraph
+    position=470,202,56,18
+    help="可以观察并直接修改第二个SPS寄存器的索引"
+    font=MAINFONT
+  endc
+  hselreg2=control BUTTON
+    window=hgraph
+    position=533,202,50,18
+    name="选择"
+    help="按下可选择其中一个重要寄存器"
+    font=SMALLFONT
+  endc
+  hactual2=control TEXT
+    window=hgraph
+    position=470,221,56,18
+    font=MAINFONT
+    bkcolor=LIGHTGRAY
+    mode=M_BORDER|M_CENTERED
+    help="所选第二个SPS寄存器的实际内容"
+  endc
+  hnew2=control EDIT
+    window=hgraph
+    position=470,240,56,18
+    help="要写入第二个选定的SPS寄存器的新数据"
+    font=MAINFONT
+  endc
+  hwrite2=control BUTTON
+    window=hgraph
+    position=533,240,50,18
+    name="改变"
+    help="按下可更改第二个选定寄存器的内容"
+    font=SMALLFONT
+  endc
+  regno1=0; newdata=0
+  getini("SPS","Register 1","%i,%i",&regno1,&newdata)
+  change hregno1 text=format("%i",regno1)
+  change hnew1 text=format("%i",newdata)
+  regno2=0; newdata=0
+  getini("SPS","Register 2","%i,%i",&regno2,&newdata)
+  change hregno2 text=format("%i",regno2)
+  change hnew2 text=format("%i",newdata)
+  Createmultireg(470,10,56,0,0,5,"Register")
+  Createmultireg(11,44,46,2903,2903,3,"Analog input")
+  buf[0]='N'
+  buf[1]=1; buf[2]=0xAA
+  Sendcmd(buf,3,buf)                   // Restart all tasks
+  while 1 do
+    Queryall()
+    Text(hregno1,buf); regno1=-1; sscanf(buf,"%i",&regno1)
+    Text(hregno2,buf); regno2=-1; sscanf(buf,"%i",&regno2)
+    if regno1>=0 then
+      i=Readregister(regno1)
+      if i>=0 then
+        if (i & 0x800000) i=i|0xFF000000
+        change hactual1 text=format("%i",i)
+      else
+        change hactual1 text="?"
+      endif
+    else
+      change hactual1 text=""
+    endif
+    if regno2>=0 then
+      i=Readregister(regno2)
+      if i>=0 then
+        if (i & 0x800000) i=i|0xFF000000
+        change hactual2 text=format("%i",i)
+      else
+        change hactual2 text="?"
+      endif
+    else
+      change hactual2 text=""
+    endif
+    Drawmainmodule(5,5);
+    Drawextmodule(110,5,200,0,0);
+    Drawextmodule(165,5,300,0,0);
+    Drawfestomodule(225,5,400+festo+foffset,testertype);
+    draw window=hgraph color=BLACK font=INFOFONT
+    draw at 405,25 text="Command"
+    draw at 405,44 text="Tester"
+    draw at 405,63 text="Status"
+    draw at 405,82 text="Error"
+    draw at 405,101 text="Answer"
+    draw at 405,142 text="Register"
+    draw at 405,161 text="Actual"
+    draw at 405,180 text="New value"
+    draw at 405,217 text="Register"
+    draw at 405,236 text="Actual"
+    draw at 405,255 text="New value"
+    if h==NULL then
+      draw at 105,344 text="X="
+      draw at 200,344 text="Y="
+      draw at 105,370 text="X="
+      draw at 200,370 text="Y="
+    endif
+    draw show
+    Decodeerr(buf,lasterror)
+    change herrtext text=buf
+    Drawextmodule(5,120,500,1,0);
+    Drawextmodule(60,120,600,1,0);
+    Drawextmodule(115,120,700,1,0);
+    Drawextmodule(175,120,800,0,0);
+    Drawextmodule(230,120,900,0,0);
+    Drawextmodule(285,120,1000,0,0);
+    Drawextmodule(340,120,1100,0,0);
+    if Pressed(hreserr) then
+      Writeregister(3,0)               // Reset error
+    else if Pressed(hselreg1) then
+      i=Selectreg()
+      if i>=0 then
+        regno1=i
+        change hregno1 text=format("%i",regno1)
+      endif
+    else if Pressed(hwrite1) && regno1>=0 then
+      Text(hnew1,buf); newdata=0; sscanf(buf,"%i",&newdata)
+      Writeregister(regno1,newdata)
+    else if Pressed(hselreg2) then
+      i=Selectreg()
+      if i>=0 then
+        regno2=i
+        change hregno2 text=format("%i",regno2)
+      endif
+    else if Pressed(hwrite2) && regno2>=0 then
+      Text(hnew2,buf); newdata=0; sscanf(buf,"%i",&newdata)
+      Writeregister(regno2,newdata)
+    else if Pressed(hreset) then
+      Writeregister(3,0)               // Reset error
+      Writeregister(0,1)               // Reset shuttle and loader
+    else if Pressed(hzero) then
+      Writeregister(3,0)               // Reset error
+      Writeregister(0,10)              // Reset without moving band
+    else if Pressed(hcont) then
+      Writeregister(3,0)               // Reset error
+      Writeregister(0,11)              // Continue loading PCBs
+    else if Pressed(hunload) then
+      Writeregister(3,0)               // Reset error
+      Writeregister(0,5)               // Unload PCBs
+    else if Pressed(hload1) then
+      Writeregister(3,0)               // Reset error
+      Writeregister(0,257)             // Load 1 PCB
+    else if Pressed(hload2) then
+      Writeregister(3,0)               // Reset error
+      Writeregister(0,258)             // Load 2 PCBs
+    else if Pressed(hload3) then
+      Writeregister(3,0)               // Reset error
+      Writeregister(0,259)             // Load 3 PCBs
+    else if Pressed(hprintpos) then
+      Writeregister(3,0)               // Reset error
+      Writeregister(0,4)               // Unload next into print position
+    else if Pressed(hpushers) then
+      Writeregister(3,0)               // Reset error
+      Writeregister(0,20)              // Activate pushers
+    else if Pressed(hmove1) then
+      Writeregister(3,0)               // Reset error
+      Writeregister(0,513)             // Move 1 PCB
+    else if Pressed(hmove2) then
+      Writeregister(3,0)               // Reset error
+      Writeregister(0,514)             // Move 2 PCBs
+    else if Pressed(hmove3) then
+      Writeregister(3,0)               // Reset error
+      Writeregister(0,515)             // Move 3 PCBs
+    else if Pressed(hmode[0]) then
+      ret=0; break
+    else if Pressed(hmode[1]) then
+      ret=1; break
+    else if Pressed(hmode[2]) then
+      Highlight(2)
+    else if Pressed(hmode[3]) then
+      ret=3; break
+    else if Pressed(hmode[4]) then
+      ret=4; break
+    else if Pressed(hmode[5]) then
+      ret=5; break
+    else if Pressed(hmode[6]) then
+      ret=-1; break
+    endif
+    if h==NULL then                    // Check for print requests
+      if Pressed(hprint1) then
+        Text(hatx1,buf); x=0.0; sscanf(buf,"%g",&x)
+        Text(haty1,buf); y=0.0; sscanf(buf,"%g",&y)
+        if labelprinter==0 then
+          Printbitmap(0,x,y)
+        else
+          Attachlabel(x,y)
+        endif
+      else if Pressed(hprint2) then
+        Text(hatx2,buf); x=0.0; sscanf(buf,"%g",&x)
+        Text(haty2,buf); y=0.0; sscanf(buf,"%g",&y)
+        if labelprinter==0 then
+          Printbitmap(1,x,y)
+        else
+          Attachlabel(x,y)
+        endif
+      else if Pressed(hsmiley) then
+        Sendbitmap(0)
+      else if Pressed(hsad) then
+        Sendbitmap(1)
+      endif
+    endif
+    if (demo) delay 100
+    wait
+  enddo
+  Text(hatx1,buf); x=0.0; sscanf(buf,"%g",&x)
+  Text(haty1,buf); y=0.0; sscanf(buf,"%g",&y)
+  setini("SPS","Print pos 1","%g,%g",x,y)
+  Text(hatx2,buf); x=0.0; sscanf(buf,"%g",&x)
+  Text(haty2,buf); y=0.0; sscanf(buf,"%g",&y)
+  setini("SPS","Print pos 2","%g,%g",x,y)
+  Text(hnew1,buf); newdata=0; sscanf(buf,"%i",&newdata)
+  setini("SPS","Register 1","%i,%i",regno1,newdata)
+  Text(hnew2,buf); newdata=0; sscanf(buf,"%i",&newdata)
+  setini("SPS","Register 2","%i,%i",regno2,newdata)
+  if ret>=0 then
+    buf[0]='N'
+    buf[1]=2; buf[2]=0xAA
+    Sendcmd(buf,3,buf)                 // Stop all tasks
+  endif
+  return ret
+end
+
+// Displays actual status of running A4 software and allows to send different
+// commands to tester.
+function int CreateA4command()
+  int i,regno1,regno2,newdata,ret,markmode
+  int ismark,nmark,marking,markphase
+  float x,y
+  char buf[64]
+  handle hzero,hcont,hreserr,hdebug,herrtext
+  handle hregno1,hselreg1,hactual1,hnew1,hwrite1
+  handle hregno2,hselreg2,hactual2,hnew2,hwrite2
+  handle hunload,hungood,hunbad,hload1,hload2,hload3
+  handle hpushgood,hpushbad,hmove1,hmove2,hmove3,hmark
+  handle hprintpos,hatx1,haty1,hatx2,haty2,hprint1,hprint2
+  clear hgraph                         // This deletes all available controls
+  nact=0; ninp=0; nout=0; nreg=0; nadj=0
+  for i=0,i<24,i++ do
+    modiused[i]=0
+    modoused[i]=0
+  enddo
+  draw window=hgraph show
+  if demo then
+    draw font=HUGEFONT color=PINK mode=M_CENTERED at 300,150 text="DEMO"
+  endif
+  if nmodule>4 then
+    hreset=control BUTTON
+      window=hgraph
+      position=10,274,85,22
+      name="重设"
+      color=RED
+      help="按下可中断当前操作并将所有PCB移到不良品堆上"
+    endc
+    hzero=control BUTTON
+      window=hgraph
+      position=105,274,85,22
+      name="置零"
+      help="通知加载器带上没有PCB"
+    endc
+    hcont=control BUTTON
+      window=hgraph
+      position=200,274,85,22
+      name="继续"
+      help="继续加载ing PCBs"
+    endc
+    hpushgood=control BUTTON
+      window=hgraph
+      position=10,300,85,22
+      name="Init Good"
+      help="按此初始化良品输出堆下的推进器"
+    endc
+    hpushbad=control BUTTON
+      window=hgraph
+      position=105,300,85,22
+      name="Init Bad"
+      help="按此初始化不良品输出堆下的推进器"
+    endc
+    hunload=control BUTTON
+      window=hgraph
+      position=200,300,85,22
+      name="卸载"
+      help="按下可将所有PCB卸载到不良输出堆"
+    endc
+  endif
+  if nmodule==13 || (nmodule>4 && monster==1) then
+    hload1=control BUTTON
+      window=hgraph
+      position=308,274,65,22
+      name="加载1"
+      help="按下加载1 PCB"
+    endc
+    hload2=control BUTTON
+      window=hgraph
+      position=383,274,65,22
+      name="加载2"
+      help="按下加载2 PCB"
+    endc
+    hload3=control BUTTON
+      window=hgraph
+      position=458,274,65,22
+      name="加载3"
+      help="按下加载3 PCB"
+    endc
+    hmove1=control BUTTON
+      window=hgraph
+      position=308,300,65,22
+      name="移动1"
+      help="按下移动或标记PCB一次一个"
+    endc
+    hmove2=control BUTTON
+      window=hgraph
+      position=383,300,65,22
+      name="移动2"
+      help="按下移动或标记PCB一次2个"
+    endc
+    hmove3=control BUTTON
+      window=hgraph
+      position=458,300,65,22
+      name="移动3"
+      help="按下移动或标记PCB一次3个"
+    endc
+    hmark=control CUSTOMBOX
+      window=hgraph
+      position=531,300,52,22
+      name="标记"
+      help="按下移动时标记PCB"
+    endc
+    hungood=control BUTTON
+      window=hgraph
+      position=10,336,85,22
+      name="好"
+      help="按下将单个PCB卸载到良品输出堆"
+    endc
+    hunbad=control BUTTON
+      window=hgraph
+      position=105,336,85,22
+      name="坏"
+      help="按下将单个PCB卸载到不良品输出堆"
+    endc
+    hprintpos=control BUTTON
+      window=hgraph
+      position=200,336,85,22
+      name="Print pos"
+      help="将下一块板卸载到打印位置"
+    endc
+  endif
+  herrtext=control TEXT
+    window=hgraph
+    position=10,362,275,22
+    help="把SPS检测到的最后一个错误解码"
+    font=INFOFONT
+    color=LIGHTRED
+    mode=M_BORDER
+  endc
+  if nmodule>4 then
+    hatx1=control EDIT
+      window=hgraph
+      position=331,336,61,22
+      help="第一个打印位置的X坐标，毫米"
+    endc
+    haty1=control EDIT
+      window=hgraph
+      position=426,336,61,22
+      help="第一个打印位置的Y坐标，毫米"
+    endc
+    hprint1=control BUTTON
+      window=hgraph
+      position=498,336,85,22
+      name=(h==NULL?"打印":"打印移动")
+      help=format("%s第一个打印位置",                           \
+      h==NULL?"Print Smiley bitmap at":"Move printing head to")
+    endc
+    x=0.0; y=0.0
+    getini("SPS","Print pos 1","%g,%g",&x,&y)
+    change hatx1 text=format("%g",x)
+    change haty1 text=format("%g",y)
+  endif
+  if nmodule>4 then
+    hatx2=control EDIT
+      window=hgraph
+      position=331,362,61,22
+      help="第二个打印位置的X坐标，毫米"
+    endc
+    haty2=control EDIT
+      window=hgraph
+      position=426,362,61,22
+      help="第二个打印位置的Y坐标，毫米"
+    endc
+    hprint2=control BUTTON
+      window=hgraph
+      position=498,362,85,22
+      name=(h==NULL?"打印":"打印移动")
+      help=format("%s第二个打印位置",                            \
+      h==NULL?"Print Smiley bitmap at":"Move printing head to")
+    endc
+    x=0.0; y=0.0
+    getini("SPS","Print pos 2","%g,%g",&x,&y)
+    change hatx2 text=format("%g",x)
+    change haty2 text=format("%g",y)
+  endif
+  hreserr=control BUTTON
+    window=hgraph
+    position=533,67,50,18
+    name="重设"
+    help="按下可将错误寄存器设置为0"
+    font=SMALLFONT
+  endc
+  hdebug=control BUTTON
+    window=hgraph
+    position=533,86,50,18
+    name="诊断"
+    help="按下可启用或禁用部分硬件"
+    font=SMALLFONT
+  endc
+  hregno1=control EDIT
+    window=hgraph
+    position=470,127,56,18
+    help="可以观察并直接修改的第一个SPS寄存器的索引"
+    font=MAINFONT
+  endc
+  hselreg1=control BUTTON
+    window=hgraph
+    position=533,127,50,18
+    name="选择"
+    help="按下可选择其中一个重要寄存器"
+    font=SMALLFONT
+  endc
+  hactual1=control TEXT
+    window=hgraph
+    position=470,146,56,18
+    font=MAINFONT
+    bkcolor=LIGHTGRAY
+    mode=M_BORDER|M_CENTERED
+    help="第一个选定的SPS寄存器的实际内容"
+  endc
+  hnew1=control EDIT
+    window=hgraph
+    position=470,165,56,18
+    help="要写入第一个选定的SPS寄存器的新数据"
+    font=MAINFONT
+  endc
+  hwrite1=control BUTTON
+    window=hgraph
+    position=533,165,50,18
+    name="改变"
+    help="按下可更改第一个选定寄存器的内容"
+    font=SMALLFONT
+  endc
+  hregno2=control EDIT
+    window=hgraph
+    position=470,202,56,18
+    help="可以观察并直接修改第二个SPS寄存器的索引"
+    font=MAINFONT
+  endc
+  hselreg2=control BUTTON
+    window=hgraph
+    position=533,202,50,18
+    name="选择"
+    help="按下可选择其中一个重要寄存器"
+    font=SMALLFONT
+  endc
+  hactual2=control TEXT
+    window=hgraph
+    position=470,221,56,18
+    font=MAINFONT
+    bkcolor=LIGHTGRAY
+    mode=M_BORDER|M_CENTERED
+    help="所选第二个SPS寄存器的实际内容"
+  endc
+  hnew2=control EDIT
+    window=hgraph
+    position=470,240,56,18
+    help="要写入第二个选定的SPS寄存器的新数据"
+    font=MAINFONT
+  endc
+  hwrite2=control BUTTON
+    window=hgraph
+    position=533,240,50,18
+    name="改变"
+    help="按下可更改第二个选定寄存器的内容"
+    font=SMALLFONT
+  endc
+  regno1=0; newdata=0
+  getini("SPS","Register 1","%i,%i",&regno1,&newdata)
+  change hregno1 text=format("%i",regno1)
+  change hnew1 text=format("%i",newdata)
+  regno2=0; newdata=0
+  getini("SPS","Register 2","%i,%i",&regno2,&newdata)
+  change hregno2 text=format("%i",regno2)
+  change hnew2 text=format("%i",newdata)
+  Createmultireg(470,10,56,0,0,5,"Register")
+  Createmultireg(15,80,46,2905,2905,1,"Analog input")
+  buf[0]='N'
+  buf[1]=1; buf[2]=0xAA
+  Sendcmd(buf,3,buf)                   // Restart all tasks
+  ismark=0; nmark=0; marking=0; markphase=0
+  while 1 do
+    Queryall()
+    Text(hregno1,buf); regno1=-1; sscanf(buf,"%i",&regno1)
+    Text(hregno2,buf); regno2=-1; sscanf(buf,"%i",&regno2)
+    if regno1>=0 then
+      i=Readregister(regno1)
+      if i>=0 then
+        if (i & 0x800000) i=i|0xFF000000
+        change hactual1 text=format("%i",i)
+      else
+        change hactual1 text="?"
+      endif
+    else
+      change hactual1 text=""
+    endif
+    if regno2>=0 then
+      i=Readregister(regno2)
+      if i>=0 then
+        if (i & 0x800000) i=i|0xFF000000
+        change hactual2 text=format("%i",i)
+      else
+        change hactual2 text="?"
+      endif
+    else
+      change hactual2 text=""
+    endif
+    Drawmainmodule(9,5);
+    Drawextmodule(114,5,200,0,0);
+    Drawextmodule(169,5,300,0,0);
+    Drawfestomodule(229,5,400+festo+foffset,testertype);
+    draw window=hgraph color=BLACK font=INFOFONT
+    draw at 405,25 text="Command"
+    draw at 405,44 text="Tester"
+    draw at 405,63 text="Status"
+    draw at 405,82 text="Error"
+    draw at 405,101 text="Answer"
+    draw at 405,142 text="Register"
+    draw at 405,161 text="Actual"
+    draw at 405,180 text="New value"
+    draw at 405,217 text="Register"
+    draw at 405,236 text="Actual"
+    draw at 405,255 text="New value"
+    if nmodule>4 then
+      draw at 308,354 text="X="
+      draw at 403,354 text="Y="
+      draw at 308,380 text="X="
+      draw at 403,380 text="Y="
+    endif
+    draw show
+    Decodeerr(buf,lasterror)
+    change herrtext text=buf
+    if nmodule==8 then
+      Drawfixture(9,150,"Output unit")
+      Drawextmodule(9,120,400,1,0);
+      Drawextmodule(64,120,500,1,0);
+      Drawextmodule(119,120,600,0,0);
+      Drawextmodule(174,120,700,0,0);
+    else if nmodule==13 then
+      Drawfixture(9,127,"Loader")
+      Drawextmodule(9,110,500,1,1);
+      Drawextmodule(64,110,600,0,1);
+      Drawextmodule(119,110,700,0,1);
+      Drawextmodule(199,110,800,0,1);
+      Drawfixture(9,207,"Output unit")
+      Drawextmodule(9,190,900,1,1);
+      Drawextmodule(64,190,1000,1,1);
+      Drawextmodule(119,190,1100,0,1);
+      Drawextmodule(174,190,1200,0,1);
+    endif
+    if Pressed(hreserr) then
+      Writeregister(3,0)               // Reset error
+    else if Pressed(hdebug) then
+      Setdebugmode()
+    else if Pressed(hselreg1) then
+      i=Selectreg()
+      if i>=0 then
+        regno1=i
+        change hregno1 text=format("%i",regno1)
+      endif
+    else if Pressed(hwrite1) && regno1>=0 then
+      Text(hnew1,buf); newdata=0; sscanf(buf,"%i",&newdata)
+      Writeregister(regno1,newdata)
+    else if Pressed(hselreg2) then
+      i=Selectreg()
+      if i>=0 then
+        regno2=i
+        change hregno2 text=format("%i",regno2)
+      endif
+    else if Pressed(hwrite2) && regno2>=0 then
+      Text(hnew2,buf); newdata=0; sscanf(buf,"%i",&newdata)
+      Writeregister(regno2,newdata)
+    else if Pressed(hprint1) then
+      Text(hatx1,buf); x=0.0; sscanf(buf,"%g",&x)
+      Text(haty1,buf); y=0.0; sscanf(buf,"%g",&y)
+      if labelprinter==0 then
+        Printbitmap(0,x,y)
+      else
+        Attachlabel(x,y)
+      endif
+    else if Pressed(hprint2) then
+      Text(hatx2,buf); x=0.0; sscanf(buf,"%g",&x)
+      Text(haty2,buf); y=0.0; sscanf(buf,"%g",&y)
+      if labelprinter==0 then
+        Printbitmap(1,x,y)
+      else
+        Attachlabel(x,y)
+      endif
+    else if Pressed(hmode[0]) then
+      ret=0; break
+    else if Pressed(hmode[1]) then
+      ret=1; break
+    else if Pressed(hmode[2]) then
+      Highlight(2)
+    else if Pressed(hmode[3]) then
+      ret=3; break
+    else if Pressed(hmode[4]) then
+      ret=4; break
+    else if Pressed(hmode[5]) then
+      ret=5; break
+    else if Pressed(hmode[6]) then
+      ret=-1; break
+    endif
+    if nmodule>4 then
+      if Pressed(hreset) then
+        Writeregister(3,0)             // Reset error
+        Writeregister(0,1)             // Reset shuttle and loader
+      else if Pressed(hzero) then
+        Writeregister(3,0)             // Reset error
+        Writeregister(0,10)            // Reset without moving band
+      else if Pressed(hcont) then
+        Writeregister(3,0)             // Reset error
+        Writeregister(0,11)            // Continue loading PCBs
+      else if Pressed(hpushgood) then
+        Writeregister(3,0)             // Reset error
+        Writeregister(0,21)            // Activate good pushers
+      else if Pressed(hpushbad) then
+        Writeregister(3,0)             // Reset error
+        Writeregister(0,20)            // Activate bad pushers
+      else if Pressed(hunload) then
+        Writeregister(3,0)             // Reset error
+        Writeregister(0,5)             // Unload PCBs
+      else if Pressed(hungood) then
+        Writeregister(3,0)             // Reset error
+        Writeregister(0,14)            // Unload PCB as good
+      else if Pressed(hunbad) then
+        Writeregister(3,0)             // Reset error
+        Writeregister(0,13)            // Unload PCB as bad
+      else if Pressed(hprintpos) then
+        Writeregister(3,0)             // Reset error
+        Writeregister(0,4)             // Unload next into print position
+      endif
+    endif
+    if nmodule==13 || monster==1 then  // Only if loader attached
+      if Pressed(hmark) then
+        markmode=Status(hmark)
+        if markmode==0 then
+          change hmove1 text="Move 1"
+          change hmove2 text="Move 2"
+          change hmove3 text="Move 3"
+          ismark=0                     // Stop marking
+        else
+          change hmove1 text="Mark 1"
+          change hmove2 text="Mark 2"
+          change hmove3 text="Mark 3"
+        endif
+      else if Pressed(hload1) then
+        Writeregister(3,0)             // Reset error
+        Writeregister(0,257)           // Load 1 PCB
+      else if Pressed(hload2) then
+        Writeregister(3,0)             // Reset error
+        Writeregister(0,258)           // Load 2 PCBs
+      else if Pressed(hload3) then
+        Writeregister(3,0)             // Reset error
+        Writeregister(0,259)           // Load 3 PCBs
+      else if Pressed(hmove1) then
+        Writeregister(3,0)             // Reset error
+        if markmode==0 then
+          Writeregister(0,513)         // Move 1 PCB
+        else if ismark==0 then
+          ismark=1                     // Mark by 1
+        else
+          ismark=0                     // Stop marking
+        endif
+      else if Pressed(hmove2) then
+        Writeregister(3,0)             // Reset error
+        if markmode==0 then
+          Writeregister(0,514)         // Move 2 PCBs
+        else if ismark==0 then
+          ismark=2                     // Mark by 2
+        else
+          ismark=0                     // Stop marking
+        endif
+      else if Pressed(hmove3) then
+        Writeregister(3,0)             // Reset error
+        if markmode==0 then
+          Writeregister(0,515)         // Move 3 PCBs
+        else if ismark==0 then
+          ismark=3                     // Mark by 3
+        else
+          ismark=0                     // Stop marking
+        endif
+      endif
+    endif
+    if (demo) then
+      delay 100
+    else if nmark!=0 then              // Check whether marking active
+      if lasterror!=0 then
+        ismark=0; nmark=0              // Error detected, stop sequence
+      else if lastcommand==0 then
+        if markphase==0 then           // Load nmark boards
+          Writeregister(0,256+nmark)
+          markphase=1
+          marking=0                    // PCB currently being marked
+        else if markphase==1 then      // Move board in print position
+          marking++
+          if marking>nmark then
+            Writeregister(0,13)        // Unload PCB as bad
+            nmark=0                    // Marking cycle finished
+          else
+            Writeregister(0,4)         // Unload next into print position
+            markphase=2
+          endif
+        else if markphase==2 then      // Place first mark
+          Text(hatx1,buf); x=0.0; sscanf(buf,"%g",&x)
+          Text(haty1,buf); y=0.0; sscanf(buf,"%g",&y)
+          if labelprinter==0 then
+            Printbitmap(0,x,y)
+          else
+            Attachlabel(x,y)
+          endif
+          markphase=3
+        else if markphase==3 then      // Place second mark
+          Text(hatx2,buf); x=0.0; sscanf(buf,"%g",&x)
+          Text(haty2,buf); y=0.0; sscanf(buf,"%g",&y)
+          if labelprinter==0 then
+            Printbitmap(1,x,y)
+          else
+            Attachlabel(x,y)
+          endif
+          markphase=1
+        endif
+      endif
+    else
+      nmark=ismark
+      markphase=0
+    endif
+    wait
+  enddo
+  if nmodule>4 then
+    Text(hatx1,buf); x=0.0; sscanf(buf,"%g",&x)
+    Text(haty1,buf); y=0.0; sscanf(buf,"%g",&y)
+    setini("SPS","Print pos 1","%g,%g",x,y)
+    Text(hatx2,buf); x=0.0; sscanf(buf,"%g",&x)
+    Text(haty2,buf); y=0.0; sscanf(buf,"%g",&y)
+    setini("SPS","Print pos 2","%g,%g",x,y)
+  endif
+  Text(hnew1,buf); newdata=0; sscanf(buf,"%i",&newdata)
+  setini("SPS","Register 1","%i,%i",regno1,newdata)
+  Text(hnew2,buf); newdata=0; sscanf(buf,"%i",&newdata)
+  setini("SPS","Register 2","%i,%i",regno2,newdata)
+  if ret>=0 then
+    buf[0]='N'
+    buf[1]=2; buf[2]=0xAA
+    Sendcmd(buf,3,buf)                 // Stop all tasks
+  endif
+  return ret
+end
+
+// Draws controls necessary to adjust width.
+function int Createwidth()
+  int i,y,err
+  handle hpot[4],hmm[4],hok[4],hinfo,hset
+  int mode[4],programm                 // -1:disabled,0:enabled,1:confirmed
+  int pot[4]
+  float mm[4],f
+  char s[64]
+  clear hgraph                         // This deletes all available controls
+  nact=0; ninp=0; nout=0; nreg=0; nadj=0
+  for i=0,i<24,i++ do
+    modiused[i]=0
+    modoused[i]=0
+  enddo
+  hreset=NULL
+  draw window=hgraph show              // Force fast redraw
+  if demo then
+    draw font=HUGEFONT color=PINK mode=M_CENTERED at 300,150 text="DEMO"
+  endif
+  draw color=BLACK at 30,10 rect 505,95
+  draw font=SMALLFONT color=BLACK mode=M_LEFT
+  draw at 35,35 wrap=500 text="Brief instructions:\n"
+  draw text=" - Move shuttle transporters apart, measure width, type it in "
+  draw text="the upmost line and press 'Confirm'\n"
+  draw text=" - Move transporters together and fill the next line\n"
+  draw text=" - Do the same with the loader. If necessary, you may "
+  draw text="correct previous measurements at any time\n"
+  draw text=" - Now press 'Programm' and assure that operation is successfull."
+  for i=0,i<4,i++ do
+    y=139+i*40
+    hpot[i]=control TEXT
+      window=hgraph
+      position=300,y,70,22
+      help="假定的电位计读数"
+      mode=M_BORDER
+    endc
+    hmm[i]=control EDIT
+      window=hgraph
+      help="对应于电位计读数的频带宽度"
+      position=385,y,70,22
+    endc
+    hok[i]=control BUTTON
+      window=hgraph
+      text="Confirm"
+      help="确认宽度测量正确"
+      position=470,y,70,22
+    endc
+    disable hok[i]
+    mode[i]=-1; pot[i]=-1
+  enddo
+  hinfo=control TEXT
+    window=hgraph
+    position=31,310,390,25
+    help="SPS参数编程结果"
+    font=MEDIUMFONT
+    mode=M_BORDER
+  endc
+  hset=control BUTTON
+    window=hgraph
+    position=440,310,111,25
+    name="程序"
+    help="计算宽度参数并将其发送到非易失性SPS内存"
+  endc
+  disable hset
+  setfocus hmm[0]
+  programm=-1
+  draw at 30,110 rect 550,290
+  draw at 30,130 to 550,130
+  draw at 30,210 to 550,210
+  draw at 233,110 to 233,290
+  draw font=INFOFONT color=BLACK mode=M_LEFT wrap=0
+  draw at 90,127 text="Adjust width"
+  draw at 250,127 text="Width:    ADC units      Millimeters       Confirm"
+  draw at 250,157 text="Wide"
+  draw at 250,197 text="Narrow"
+  draw at 250,237 text="Wide"
+  draw at 250,277 text="Narrow"
+  draw font=MEDIUMFONT color=DARKGRAY mode=M_LEFT at 40,177 text="Shuttle:"
+  Tripleactuator(115,140,                                                      \
+    101,"Shuttle APART",102,"Shuttle TOGETHER",0,100,"")
+  Createreg(150,161,70,2903,2903,"Shuttle potentiometer (analog input 1)")
+  draw font=MEDIUMFONT color=DARKGRAY mode=M_LEFT at 40,257 text="Loader:"
+  Tripleactuator(115,220,                                                      \
+    606,"Loader APART",607,"Loader TOGETHER",a2offset,800,"")
+  Createreg(150,241,70,2904,2904,"Loader potentiometer (analog input 2)")
+  draw window=hgraph show
+  while 1 do
+    Drawstep(560,30,stepcount)
+    Queryall()
+    Checkactuators()
+    for i=0,i<4,i++ do
+      if mode[i]!=1 && regstatus[i/2]<1024 && regstatus[i/2]!=pot[i] then
+        pot[i]=regstatus[i/2]
+        change hpot[i] text=format("%5i",pot[i])
+      endif
+      Text(hmm[i],s); mm[i]=0.0; sscanf(s,"%f",mm+i)
+      if pot[i]>0 && mm[i]>0.0 && mm[i]<600.0 && mode[i]<0 then
+        enable hok[i]; mode[i]=0
+      else if (mm[i]<=0.0 || mm[i]>=600.0) && mode[i]>=0 then
+        disable hok[i]; mode[i]=-1
+      endif
+      if (Pressed(hok[i]) || Pressed(hmm[i])) && mode[i]>=0 then
+        pot[i]=regstatus[i/2]
+        change hpot[i] text=format("%5i",pot[i])
+        mode[i]=1
+        change hmm[i] text=format("%.1f",mm[i])
+      endif
+    enddo
+    if programm<0 &&                                                           \
+      mode[0]==1 && mode[1]==1 && mode[2]==1 && mode[3]==1 then
+      enable hset; programm=0
+    else if programm>=0 &&                                                     \
+      (mode[0]<1 || mode[1]<1 || mode[2]<1 || mode[3]<1) then
+      disable hset; programm=-1
+    endif
+    draw window=hgraph show
+    if Pressed(hset) then
+      err=0
+      for i=0,i<4,i++ do
+        Text(hmm[i],s); mm[i]=0.0; sscanf(s,"%f",mm+i)
+        if mm[i]<=40.0 || mm[i]>=600.0 err=1
+        change hmm[i] text=format("%.1f",mm[i])
+      enddo
+      if err==1 change hinfo text=" Wrong data"
+      if err==0 then
+        f=mm[0]-mm[1]; i=pot[0]-pot[1]
+        if f<100 || i<100 then
+          err=1; change hinfo text=" Shuttle: Basis is too short"
+        else if f>600 || i>600 then
+          err=1; change hinfo text=" Shuttle: Wrong data"
+        else
+          f=f/i
+          if f<0.45 || f>0.70 then
+            err=1; change hinfo text=" Shuttle: Width measured incorrectly"
+          endif
+        endif
+        f=mm[2]-mm[3]; i=pot[2]-pot[3]
+        if f<100 || i<100 then
+          err=1; change hinfo text=" Loader: Basis is too short"
+        else if f>600 || i>600 then
+          err=1; change hinfo text=" Loader: Wrong data"
+        else
+          f=f/i
+          if f<0.45 || f>0.70 then
+            err=1; change hinfo text=" Loader: Width measured incorrectly"
+          endif
+        endif
+      endif
+      if err==0 err=Writeregister(10,mm[1]*2.0+0.5)
+      if err==0 err=Writeregister(11,pot[1])
+      if err==0 err=Writeregister(12,mm[0]*2.0+0.5)
+      if err==0 err=Writeregister(13,pot[0])
+      if err==0 err=Writeregister(14,mm[3]*2.0+0.5)
+      if err==0 err=Writeregister(15,pot[3])
+      if err==0 err=Writeregister(16,mm[2]*2.0+0.5)
+      if err==0 err=Writeregister(17,pot[2])
+      if err<0 change hinfo text=" Error during data transmission"
+      if err==0 change hinfo text=" Success"
+    else if Pressed(hmode[0]) then
+      return 0
+    else if Pressed(hmode[1]) then
+      return 1
+    else if Pressed(hmode[2]) then
+      return 2
+    else if Pressed(hmode[3]) then
+      Highlight(3)
+    else if Pressed(hmode[4]) then
+      return 4
+    else if Pressed(hmode[5]) then
+      return 5
+    else if Pressed(hmode[6]) then
+      return -1
+    endif
+    wait
+  enddo
+end
+
+// Perform test of serial communication with SPS. Function uses SPS registers
+// 200..200+NTEST-1
+function int Createio()
+  int i,j,t,ret,run,elapsed,tstart,tredraw,total,errors,redraw
+  int mode,next,sent[NTEST],ok[NTEST]
+  char s[64]
+  handle hsucc,hrandom,htotal,herrors,hspeed,hlist
+  handle hstart,hstop,hclear
+  clear hgraph                         // This deletes all available controls
+  nact=0; ninp=0; nout=0; nreg=0; nadj=0
+  for i=0,i<24,i++ do
+    modiused[i]=0
+    modoused[i]=0
+  enddo
+  draw window=hgraph show
+  if demo then
+    draw font=HUGEFONT color=PINK mode=M_CENTERED at 300,150 text="DEMO"
+  endif
+  draw font=INFOFONT color=BLACK mode=M_LEFT
+  hsucc=control RADIO
+    window=hgraph
+    position=370,30,170,22
+    name="连续数字"
+    help="发送到SPS并读回连续的数字(1、2、3…)"
+  endc
+  hrandom=control RADIO
+    window=hgraph
+    position=370,62,170,22
+    name="随机数字"
+    help="发送到SPS并读回随机数"
+  endc
+  i=0; getini("SPS","I/O test type","%i",&i)
+  if (i==0) then
+    change hsucc mode=M_CHECKED
+  else
+    change hrandom mode=M_CHECKED
+  endif
+  draw at 10,48 text="Number of single tests:"
+  htotal=control TEXT
+    window=hgraph
+    position=180,30,80,22
+    help="串行测试周期总数(先写，后读SPS寄存器)"
+    font=MEDIUMFONT
+    mode=M_BORDER
+  endc
+  draw at 10,80 text="Number of detected errors:"
+  herrors=control TEXT
+    window=hgraph
+    position=180,62,80,22
+    help="检测到的I/O错误总数"
+    font=MEDIUMFONT
+    color=LIGHTRED
+    mode=M_BORDER
+  endc
+  draw at 10,112 text="Test speed, cycles/second:"
+  hspeed=control TEXT
+    window=hgraph
+    position=180,94,80,22
+    help="平均测试速度，每秒的测试周期(写入+读取)"
+    font=MEDIUMFONT
+    mode=M_BORDER
+  endc
+  hlist=control LIST
+    window=hgraph
+    position=5,140,580,210
+    help="测试期间检测到的错误列表"
+    mode=M_VSCROLL|M_TSTAMP
+    font=FIXEDFONT
+    size=65536
+  endc
+  hstart=control BUTTON
+    window=hgraph
+    position=265,355,100,24
+    name="开始测试"
+    help="按下即可开始测试SPS串行连接"
+  endc
+  hstop=control BUTTON
+    window=hgraph
+    position=375,355,100,24
+    name="停止测试"
+    help="按下即可停止测试SPS串行连接"
+  endc
+  disable hstop
+  hclear=control BUTTON
+    window=hgraph
+    position=485,355,100,24
+    name="清除"
+    help="按可清除统计信息和检测到的错误列表"
+  endc
+  Drawstep(560,30,stepcount)
+  draw show
+  run=0; redraw=1; next=0
+  while 1 do
+    t=Time()
+    if Pressed(hstart) then
+      disable hstart
+      enable hstop
+      tstart=Time()
+      run=1; redraw=1
+    else if Pressed(hstop) then
+      disable hstop
+      enable hstart
+      elapsed=elapsed+Time()-tstart
+      run=0; redraw=1
+    else if Pressed(hclear) then
+      total=0
+      errors=0
+      elapsed=0
+      clear hlist
+      tstart=Time()
+      redraw=1
+    else if Pressed(hmode[0]) then
+      ret=0; break
+    else if Pressed(hmode[1]) then
+      ret=1; break
+    else if Pressed(hmode[2]) then
+      ret=2; break
+    else if Pressed(hmode[3]) then
+      ret=3; break
+    else if Pressed(hmode[4]) then
+      Highlight(4)
+    else if Pressed(hmode[5]) then
+      ret=5; break
+    else if Pressed(hmode[6]) then
+      ret=-1; break
+    else if (demo) then
+      delay 100
+    else if run && demo==0 then
+      Drawstep(560,30,stepcount)
+      stepcount++
+      mode=Status(hrandom)
+      for i=0,i<NTEST,i++ do           // Write to test registers
+        if mode==0 then
+          sent[i]=next; next++
+        else
+          sent[i]=Random(0x01000000)
+        endif
+        s[0]='R'                       // Write register
+        $xuint3(s+1)=200+i             // Register number
+        $xuint3(s+4)=sent[i]           // Value to write
+        j=Sendcmd(s,7,s)               // Acknowledgement
+        if j>=0 && s[0]!=0x20 j=-9     // SPS recognized some error
+        ok[i]=j
+        switch j                       // Analyze error
+        case -1:
+          add hlist text="Bad write command length"
+        case -2:
+          add hlist text="Unable to send write command to SPS"
+        case -3:
+          add hlist text="Timeout while sending write command to SPS"
+        case -4:
+          add hlist text="Wrong checksum in response to write command"
+        case -5:
+          add hlist text=format("Crate reports communication error 0x%X",      \
+          commerr)
+        case -6:
+          add hlist text="Too short response to write command"
+        case -9:
+          add hlist text="SPS recognized error in write command"
+        endsw
+        total++; if j<0 errors++
+      enddo
+      for i=0,i<NTEST,i++ do           // Read from test registers
+        if ok[i]<0 continue
+        s[0]='Q'                       // Read register
+        $xuint3(s+1)=200+i             // Register number
+        j=Sendcmd(s,4,s)               // Query register value
+        if j>=0 && s[0]!=0x20 j=-9     // SPS recognized some error
+        if j>=0 && $xuint3(s+1)!=sent[i] j=-10 // Value differs from expected
+        switch j                       // Analyze error
+        case -1:
+          add hlist text="Bad read command length"
+        case -2:
+          add hlist text="Unable to send read command to SPS"
+        case -3:
+          add hlist text="Timeout while sending read command to SPS"
+        case -4:
+          add hlist text="Wrong checksum in response to read command"
+        case -5:
+          add hlist text=format("Crate reports communication error 0x%X",      \
+          commerr)
+        case -6:
+          add hlist text="Too short response to read command"
+        case -9:
+          add hlist text="SPS recognized error in read command"
+        case -10:
+          add hlist text=format("Read value (%i) differs from expected (%i)",  \
+          $xuint3(s+1),sent[i])
+        endsw
+        if j<0 errors++
+      enddo
+      draw show
+      redraw=1
+    endif
+    if redraw || t>tredraw then
+      change htotal text=format(" %i",total)
+      if errors!=0 then
+        change herrors text=format(" %i",errors)
+      else
+        change herrors text=""
+      endif
+      tredraw=t+1000                   // Redraw at least once per second
+      t=elapsed+(run?t-tstart:0)
+      if t>2000 then
+        change hspeed text=format(" %.1f",total/(t/1000.0))
+      else
+        change hspeed text=""
+      endif
+      redraw=0
+    endif
+    wait
+  enddo
+  setini("SPS","I/O test type","%i",Status(hrandom))
+  return ret
+end
+
+#define RECSIZE 32
+
+char a2shonly[1][RECSIZE] = {        \
+  "E" }
+
+char a2auto[1][RECSIZE] = {          \
+  "E" }
+
+char a4shonly[15][RECSIZE] = {       \
+  "S1402 R1401 H308 L307",           \ // Back stopper down
+  "S1405 R1406 F0",                  \ // Clamp PCB, band forward
+  "S1403 R1404 L208 L207 W5",        \ // Lift PCB
+  "S1303 R1304 L305 L306",           \ // Fix PCB
+  "S1307 R1308 H205 L206",           \ // Bar up
+  "S1305 R1306 L204 W10",            \ // Push PCB
+  "R1405 S1406 W5",                  \ // Unclamp PCB
+  "S1302 R1301 H304 L303 H302 L301", \ // Band away from under PCB
+  "S1301 R1302 H303 L304 H301 L302", \ // Band in under PCB
+  "S1306 R1305 H204 W3",             \ // Bar back
+  "R1307 S1308 L205 H206",           \ // Bar down
+  "R1403 S1404 R1303 S1304",         \ // Unlift and unfix PCB
+  "H208 H207 H305 H306",             \ // Check unlift/unfix
+  "B0",                              \ // Band backward
+  "R1402 S1401 L308 H307 W5 E" }       // Back stopper up and repeat
+
+char a4shcatchonly[20][RECSIZE] = {  \
+  "S1402 R1401 H308 L307",           \ // Back stopper down
+  "S1405 R1406 F0",                  \ // Clamp PCB, band forward
+  "S1403 R1404 L208 L207 W5",        \ // Lift PCB
+  "S1407 R1408 W5",                  \ // Catch PCB
+  "S1307 R1308 H205 L206",           \ // Bar up
+  "S1305 R1306 L204 W10",            \ // Push PCB
+  "R1405 S1406 W5",                  \ // Unclamp PCB
+  "S1303 R1304 L305 L306 W3",        \ // Fix PCB
+  "R1407 S1408 W5",                  \ // Uncatch PCB
+  "R1403 S1404 H208 H207 W3",        \ // Unlift PCB
+  "S1302 R1301 H304 L303 H302 L301", \ // Band away from under PCB
+  "S1301 R1302 H303 L304 H301 L302", \ // Band in under PCB
+  "S1403 R1404 L208 L207 W2",        \ // Lift PCB
+  "R1407 S1408 R1303 S1304",         \ // Uncatch and unfix PCB
+  "S1306 R1305 H204 W3",             \ // Bar back
+  "R1307 S1308 L205 H206",           \ // Bar down
+  "R1403 S1404",                     \ // Unlift PCB
+  "H208 H207 H305 H306",             \ // Check unlift/unfix
+  "B0",                              \ // Band backward
+  "R1402 S1401 L308 H307 W5 E" }       // Back stopper up and repeat
+
+char a4halfauto[1][RECSIZE] = {      \
+  "E" }
+
+char a4fullauto[1][RECSIZE] = {      \
+  "E" }
+
+int longtask[1024]                     // Translated long task
+int longtaskptr                        // Long task pointer
+
+function int Readlongtask(char *a)
+  int i,j,k,q,n,cmd
+  longtaskptr=0; n=0                   // Reset current task
+  for i=0,1,i=i+RECSIZE do
+    if a[i]=='\0' break                // Task processed
+    j=i
+    while 1 do
+      switch a[j]
+      case ' ':
+        j++                            // Skip spaces
+      case 'S','R','H','L','W','F','B':
+        cmd=a[j]; j++
+        k=0
+        while Isdigit(a[j]) do
+          k=k*10+a[j]-'0'; j++
+        enddo
+        longtask[n]=(k & 0x00FFFFFF) | (cmd<<24)
+        n++
+      case 'E':
+        longtask[n]='E'<<24
+        return                         // Task processed
+      case '\0':
+        break                          // End of line reached
+      default:
+        break                          // Error, truncate rest of line
+      endsw
+    enddo
+  enddo
+  longtask[n]='E'<<24                  // Mark end of task
+end
+
+// Perform continuous test of mechanics and pneumatics.
+function int Createlongtest()
+  int i,j,t,ret,run,cmd,port,base,physport,total,errors,redraw
+  int elapsed,tstart,tredraw,twait,e,e2008,e2011,e2012
+  int mode,next,sent[NTEST],ok[NTEST]
+  char s[64]
+  handle hshuttle,hhalf,hfull,hchkerr,htotal,herrors,httime,hlist
+  handle hspeed,hspeedscr,hstart,hstop,hclear
+  clear hgraph                         // This deletes all available controls
+  nact=0; ninp=0; nout=0; nreg=0; nadj=0
+  for i=0,i<24,i++ do
+    modiused[i]=0
+    modoused[i]=0
+  enddo
+  draw window=hgraph show
+  if demo then
+    draw font=HUGEFONT color=PINK mode=M_CENTERED at 300,150 text="DEMO"
+  endif
+  draw font=INFOFONT color=BLACK mode=M_LEFT
+  hshuttle=control RADIO
+    window=hgraph
+    position=370,20,170,22
+    name="Shuttle only"
+    help="循环测试架板框机械部分"
+  endc
+  hhalf=control RADIO
+    window=hgraph
+    position=370,44,170,22
+    name="Shuttle and output"
+    help="按下可以测试架板框和输出装置中的机械装置"
+  endc
+  if testertype==0 || nmodule<=4 disable hhalf
+  hfull=control RADIO
+    window=hgraph
+    position=370,68,170,22
+    name="Full test"
+    help="检查测试架板框、输入和输出单元中的机械装置"
+  endc
+  hchkerr=control CHECKBOX
+    window=hgraph
+    position=370,97,170,22
+    name="Report SPS errors"
+    help="检查是否要查看SPS内部检测到的错误"
+    mode=M_CHECKED
+  endc
+  if nmodule<12 disable hfull
+  i=0; bandspeed=1500
+  getini("SPS","Long test type","%i,%i",&i,&bandspeed)
+  bandspeed=Max(300,Min(3500,bandspeed))
+  if testertype==0 then
+    if i==0 || nmodule==4 then
+      change hshuttle mode=M_CHECKED
+      Readlongtask(a2shonly)
+    else
+      change hfull mode=M_CHECKED
+      Readlongtask(a2auto)
+    endif
+  else if testertype==1 then
+    if i==0 || nmodule==4 then
+      change hshuttle mode=M_CHECKED
+      if catchers==0 then
+        Readlongtask(a4shonly)
+      else
+        Readlongtask(a4shcatchonly)
+      endif
+    else if i==1 || nmodule==8 then
+      change hhalf mode=M_CHECKED
+      Readlongtask(a4halfauto)
+    else
+      change hfull mode=M_CHECKED
+      Readlongtask(a4fullauto)
+    endif
+  endif
+  draw at 10,38 text="Requested band velocity:"
+  hspeed=control TEXT
+    window=hgraph
+    position=180,20,60,22
+    text=format(" %i",bandspeed)
+    help="频带速度，内部SPS单元"
+    font=MEDIUMFONT
+    color=BLACK
+    mode=M_BORDER
+  endc
+  hspeedscr=control VSCROLL
+    window=hgraph
+    position=240,20,20,22
+    help="按下可调整波段速度"
+    limits=1,-1
+  endc
+  draw at 10,67 text="Number of single tests:"
+  htotal=control TEXT
+    window=hgraph
+    position=180,49,80,22
+    help="测试循环总数"
+    font=MEDIUMFONT
+    mode=M_BORDER
+  endc
+  draw at 10,96 text="Number of detected errors:"
+  herrors=control TEXT
+    window=hgraph
+    position=180,78,80,22
+    help="检测到的错误总数"
+    font=MEDIUMFONT
+    color=LIGHTRED
+    mode=M_BORDER
+  endc
+  draw at 10,125 text="Elapsed time, seconds:"
+  httime=control TEXT
+    window=hgraph
+    position=180,107,80,22
+    help="已用的测试时间，秒"
+    font=MEDIUMFONT
+    mode=M_BORDER
+  endc
+  hlist=control LIST
+    window=hgraph
+    position=5,140,580,210
+    help="测试期间检测到的错误列表"
+    mode=M_VSCROLL|M_TSTAMP
+    font=FIXEDFONT
+    size=262144                        // Able to keep up to 7000 errors
+  endc
+  add hlist text="Please remove all boards from the band before starting test!"
+  add hlist text=""
+  hstart=control BUTTON
+    window=hgraph
+    position=265,355,100,24
+    name="Start test"
+    help="按下开始连续力学测试"
+  endc
+  hstop=control BUTTON
+    window=hgraph
+    position=375,355,100,24
+    name="Stop test"
+    help="按下即可停止测试"
+  endc
+  disable hstop
+  hclear=control BUTTON
+    window=hgraph
+    position=485,355,100,24
+    name="Clear"
+    help="按可清除统计信息和检测到的错误列表"
+  endc
+  Drawstep(560,30,stepcount)
+  draw show
+  run=0; redraw=1; next=0
+  longtaskptr=0
+  while 1 do
+    t=Time()
+    if Pressed(hspeedscr) then
+      if Status(hspeedscr)>0 then bandspeed=Min(bandspeed+100,3500);
+      else if Status(hspeedscr)<0 then bandspeed=Max(bandspeed-100,300);
+      endif;
+      change hspeed text=format(" %i",bandspeed)
+      change hspeedscr select=0
+    else if Pressed(hstart) then
+      disable hstart
+      enable hstop
+      tstart=Time()
+      run=1; redraw=1
+    else if Pressed(hstop) then
+      disable hstop
+      enable hstart
+      elapsed=elapsed+Time()-tstart
+      run=0; redraw=1
+    else if Pressed(hclear) then
+      total=0
+      errors=0
+      elapsed=0
+      clear hlist
+      tstart=Time()
+      redraw=1
+    else if Pressed(hshuttle) then
+      if testertype==0 then
+        Readlongtask(a2shonly)
+      else if testertype==1 then
+        Readlongtask(a4shonly)
+      endif
+    else if Pressed(hhalf) then
+      Readlongtask(a4halfauto)
+    else if Pressed(hfull) then
+      if testertype==0 then
+        Readlongtask(a2auto)
+      else if testertype==1 then
+        Readlongtask(a4fullauto)
+      endif
+    else if Pressed(hmode[0]) then
+      ret=0; break
+    else if Pressed(hmode[1]) then
+      ret=1; break
+    else if Pressed(hmode[2]) then
+      ret=2; break
+    else if Pressed(hmode[3]) then
+      ret=3; break
+    else if Pressed(hmode[4]) then
+      ret=4; break
+    else if Pressed(hmode[5]) then
+      Highlight(5)
+    else if Pressed(hmode[6]) then
+      ret=-1; break
+    else if demo then
+      delay 100
+    else if run then
+      Drawstep(560,30,stepcount)
+      draw show
+      stepcount++
+      for j=0,j<32,j++ do              // Limit number of commands
+        cmd=longtask[longtaskptr]
+        longtaskptr++
+        port=cmd & 0x00FFFFFF
+        if port>=400+festo then
+          physport=port+foffset
+        else if testertype==1 && port>=900 then
+          physport=port+outoffset
+        else
+          physport=port
+        endif
+        cmd=(cmd>>24) & 0xFF
+        switch cmd
+        case 'E':                      // End of task
+          if Status(hchkerr)!=0 then
+            i=0
+            e=Readregister(2008)
+            if e!=e2008 then
+              e2008=e; i=1
+            endif
+            e=Readregister(2011)
+            if e!=e2011 then
+              e2011=e; i=1
+            endif
+            e=Readregister(2012)
+            if e!=e2012 then
+              e2012=e; i=1
+            endif
+            if (i) then
+              add hlist text=format("SPS reports error %04X, I/O timeout %i, " \
+              "Slave timeout %i",e2008,e2011,e2012)
+            endif
+          endif
+          longtaskptr=0
+          total++; redraw=1
+          break
+        case 'S':                      // Set output
+          Writeoutput(physport,1)
+          twait=Time()
+        case 'R':                      // Reset output
+          Writeoutput(physport,0)
+          twait=Time()
+        case 'W':                      // Pause in 100-ms timeslices
+          delay port*100
+          twait=Time()
+          break
+        case 'H':                      // Verify that input high
+          i=Readinput(physport)
+          if i!=1 then                 // Input still low!
+            if Time()-twait>3000 then
+              add hlist text=format("Input %i (physical %i) low",port,physport)
+              errors++; redraw=1
+            else
+              longtaskptr--
+              break
+            endif
+          endif
+        case 'L':                      // Verify that input low
+          i=Readinput(physport)
+          if i!=0 then                 // Input still high!
+            if Time()-twait>3000 then
+              add hlist text=format("Input %i (physical %i) high",port,physport)
+              errors++; redraw=1
+            else
+              longtaskptr--
+              break
+            endif
+          endif
+        case 'F','B':                  // Move band forward or backward
+          if (port==0) then            // Shuttle band
+            base=10100
+          else if port==1 then         // Loader band
+            base=12100
+          else if nmodule==13 then     // A4 output band (full automat)
+            base=13100
+          else                         // A4 output band (half automat)
+            base=12100
+          endif
+          Writeregister(base+4,48)     // Deactivate step-motor inputs
+          Writeregister(base+1,0)      // Stop axis
+          delay 80
+          if port==0 Writeoutput(105,1)// Enable shuttle step-motor
+          Writeregister(base+1,3)      // Reset current band position
+          Writeregister(base+2,0)      // Reset requested position
+          Writeregister(base+3,bandspeed) // Maximal speed
+          Writeregister(base+5,25)     // Start ramp
+          Writeregister(base+6,50)     // Stop ramp
+          Writeregister(base+8,10)     // Start speed
+          Writeregister(base+1,18)     // Absolute positioning
+          if cmd=='F' then             // Move band forward
+            Writeregister(base+2,2000)
+          else
+            Writeregister(base+2,-1000)
+          endif
+          delay 300+1000000/bandspeed
+        endsw
+      enddo
+    endif
+    if redraw || t>tredraw then
+      change htotal text=format(" %i",total)
+      if errors!=0 then
+        change herrors text=format(" %i",errors)
+      else
+        change herrors text=""
+      endif
+      tredraw=t+500                    // Redraw at least twice per second
+      t=elapsed+(run?t-tstart:0)
+      change httime text=format(" %.0f",t/1000)
+      redraw=0
+    endif
+    wait
+  enddo
+  if Status(hfull) then
+    i=2
+  else if Status(hhalf) then
+    i=1
+  else
+    i=0
+  endif
+  setini("SPS","Long test type","%i,%i",i,bandspeed)
+  return ret
+end
+
+function int Burnsoftware()
+  int i,err,l,n,len
+  char name[260],buf[256]
+  handle f,hstatus,hname,hprogress,hbrowse,hstart,hquit
+  change hmain position=*,*,*,190
+  hstatus=control TEXT
+    window=hmain
+    position=10,20,330,26
+    text="Select .ENx file to transfer to SPS"
+    help=" "
+    font=MEDIUMFONT
+    mode=M_CENTERED
+  endc
+  hname=control COMBOEDIT
+    window=hmain
+    position=10,70,330,150
+    name="ENB文件"
+    help="选择要传输到SPS的.ENx文件"
+  endc
+  hbrowse=control BUTTON
+    window=hmain
+    position=10,160,105,24
+    name="浏览"
+    help="按下可浏览.ENx文件"
+  endc
+  hstart=control BUTTON
+    window=hmain
+    position=125,160,105,24
+    name="开始"
+    help="按下启动传输"
+  endc
+  hquit=control BUTTON
+    window=hmain
+    position=240,160,100,24
+    name="取消"
+    help="按下取消传输文件"
+  endc
+  // Wait for user selection.
+  while 1 do
+    if Pressed(hbrowse) then
+      Text(hname,name)
+      if name[0]=='\0' Strcpy(name,"file.enb")
+      if SYS.Browse(hmain,name,"Select .ENx file",0)!=0 then
+        change hname text=name
+        change hstatus text="Select .ENx file to transfer to SPS"
+        change hstatus color=BLACK
+        confirm hname
+      endif
+    else if Pressed(hstart) then
+      Text(hname,name)
+      f=Fopen(name,"rb")
+      if f==NULL then
+        change hstatus text="Unable to open specified file"
+        change hstatus color=LIGHTRED
+      else
+        break
+      endif
+    else if Pressed(hquit) then
+      return
+    endif
+    wait
+  enddo
+  // File open, prepare to transfer it to SPS.
+  destroy hname
+  destroy hbrowse
+  destroy hstart
+  hprogress=control PROGRESS
+    window=hmain
+    position=10,70,330,26
+    text=""
+    help="文件传输进度"
+    font=MEDIUMFONT
+    mode=M_CENTERED|M_PERCENT
+  endc
+  change hstatus text="Transferring data..."
+  change hstatus color=BLACK
+  change hquit position=10,160,330,24
+  err=0
+  // Get size of file.
+  Fseek(f,0,2)
+  len=Ftell(f)
+  Fseek(f,0,0)
+  if len==0 err=1                      // Zero length of file
+  // If communication via crate, disable hardware in debug mode.
+  if h==NULL then
+    buf[0]=S_DEBUG
+    buf[1]=0x01
+    $uint2(buf+2)=$GLOBAL.debugmode | 0x40
+    $uint2(buf+4)=$GLOBAL.disabledrails
+    $uint2(buf+6)=$GLOBAL.videomode
+    SYS.Sendimm(1,8,buf)
+  endif
+  // For the sake of security, stop program again!
+  if err==0 then
+    buf[0]='N'; buf[1]=2; buf[2]=0xAA
+    i=Sendcmd(buf,3,buf)
+    if i<0 then err=i;
+    else if i!=1 || buf[0]!=0x20 then err=2;
+    endif
+  endif
+  // Send header.
+  if err==0 then
+    buf[0]='W'; buf[1]=0xAA; buf[2]=0; buf[3]=0
+    i=Sendcmd(buf,4,buf)
+    if i<0 then err=i;
+    else if i!=1 || buf[0]!=0x20 then err=2;
+    endif
+  endif
+  // Send program.
+  while err==0 && l<len do
+    n=len-l
+    if n>64 n=64
+    buf[0]='Y'
+    $xint3(buf+1)=l
+    if Fread(buf+4,n,f)!=n then
+      err=1
+    else
+      l=l+n
+      change hprogress limits=l,len
+      i=Sendcmd(buf,4+n,buf)
+      if i<0 then err=i;
+      else if i!=1 || buf[0]!=0x20 then err=2;
+      endif
+    endif
+    if Pressed(hquit) err=3
+  enddo
+  Fclose(f)
+  // Finish transfer.
+  if err==0 then
+    buf[0]='X'
+    i=Sendcmd(buf,1,buf)
+    if i<0 then err=i;
+    else if i!=1 || buf[0]!=0x20 then err=2;
+    endif
+  endif
+  // Copy program to flash.
+  if err==0 then
+    change hprogress limits=0,0
+    change hstatus text="Flashing data..."
+    buf[0]='V'; buf[1]=0xAA
+    i=Sendcmd(buf,2,buf)
+    if i<0 then err=i;
+    else if i!=1 || (buf[0] & 0xFE)!=0x20 then err=2;
+    endif
+  endif
+  // Wait until data is flashed.
+  while err==0 do
+    buf[0]='F'
+    i=Sendcmd(buf,1,buf)
+    if i<0 then err=i;
+    else if i!=2 || (buf[0] & 0xFE)!=0x20 then err=2;
+    else if buf[1]==0xFE then break;
+    else if buf[1]>=0x80 then err=4;
+    endif
+    wait
+  enddo
+  // Restart new program.
+  if err==0 then
+    // Stop SPS.
+    buf[0]='N'; buf[1]=2; buf[2]=0xAA
+    i=Sendcmd(buf,3,buf)
+    if i<0 then err=i;
+    else if i!=1 || buf[0]!=0x20 then err=2;
+    endif
+    // Start SPS.
+    buf[0]='N'; buf[1]=1; buf[2]=0xAA
+    i=Sendcmd(buf,3,buf)
+    if i<0 then err=i;
+    else if i!=1 || buf[0]!=0x20 then err=2;
+    endif
+    // Restart SPS again to avoid some weird Jetter problems.
+    buf[0]='N'; buf[1]=1; buf[2]=0xAA
+    i=Sendcmd(buf,3,buf)
+    if i<0 then err=i;
+    else if i!=1 || buf[0]!=0x20 then err=2;
+    endif
+  endif
+  // Report error if any.
+  if err==(-4) then
+    change hstatus text="Unexpected response from SPS"
+  else if err==(-3) then
+    change hstatus text="SPS is not responding"
+  else if err==0 then
+    change hstatus text="SUCCESS!"
+    change hquit text="确定"
+    change hquit help="按下可以关闭此窗口"
+    destroy hprogress
+  else if err==1 then
+    change hstatus text="Unable to read .ENx file"
+  else if err==2 then
+    change hstatus text=format("Communication error (0x%02X)",buf[0])
+  else if err==3 then
+    change hstatus text="Transfer interrupted"
+  else if err==4 then
+    change hstatus text="Error when flashing program"
+  else
+    change hstatus text=format("Unable to transfer data (%i)",err)
+  endif
+  change hstatus color=LIGHTRED
+  // Reenable hardware in debug mode.
+  if h==NULL then
+    buf[0]=S_DEBUG
+    buf[1]=0x01
+    $uint2(buf+2)=$GLOBAL.debugmode
+    $uint2(buf+4)=$GLOBAL.disabledrails
+    $uint2(buf+6)=$GLOBAL.videomode
+    SYS.Sendimm(1,8,buf)
+  endif
+  while 1 do
+    if Pressed(hquit) break
+    wait
+  enddo
+end
+
+function int main()
+  int i,j,k,n,t,err,slaveok
+  int serialok[4]
+  char buf[128]
+  handle hchild,hasps,hasch,hcom[4],h9600,h19200
+  handle hslave,hok,hburn,hexit,hdemoa2,hdemoa4,hdemoa6
+  nmodule=0
+  // Check available serial channels.
+  if $GLOBAL.a5==0 then
+    slaveok=SYS.Slavepresent()
+    baud=9600
+  else
+    slaveok=1
+    baud=19200                         // Default, may be changed later
+  endif
+  if slaveok==1 then n=999;
+  else n=-1; endif
+  hmain=control WINDOW
+    window=NULL
+    position=10,10,350,330
+    name=format("自动测试%s",VERSION)
+    help=" "
+    size=512
+  endc
+  for i=0,i<4,i++
+    h=Fserial(i+1,baud,8,EVENPARITY)
+    if h==NULL then
+      serialok[i]=0
+    else
+      if n<0 n=i
+      serialok[i]=1
+      Fclose(h)
+    endif
+  enddo
+  if n<0 then                          // No serial channels, no slave!
+    draw window=hmain mode=M_CENTERED
+    draw at 176,81 color=RED font=HUGEFONT text="Sorry!"
+    draw at 174,79 color=LIGHTRED font=HUGEFONT text="Sorry!"
+    draw at 175,110 font=MEDIUMFONT text="There are no (free) serial channels"
+    draw at 175,135 font=MEDIUMFONT
+    if n==(-1) then
+      draw text="and no connection to A2/A3/A4 tester!"
+    else
+      draw text="and tester is not loaded!"
+    endif
+    draw show
+    hexit=control BUTTON
+      window=hmain
+      position=125,180,100,30
+      name="！！..."
+      help="不可能，伙计！只能按下！"
+    endc
+    t=Time()+10000
+    while Pressed(hexit)==0 && t>Time() do
+      wait
+    enddo
+    destroy hmain
+    return
+  endif
+  // Let user select serial channel and connect to SPS
+  draw window=hmain font=TIMESFONT at 12,25 wrap=342
+  draw color=BLACK text="使用特殊的线缆，把SPS与电脑连接起来。 "
+  draw color=BLACK text="然后选择串口接口，按\"OK\"或者在\"SPS\""
+  draw text="已经准备好连接到飞针上时，选择\"Tester\""
+  if n==999 then
+    //draw text="Or, select \"Tester\" if SPS is already connected to the "
+    //draw text="loaded Flying Probe Tester."
+  endif
+  getini("SPS","Selection","%i,%i,%i",&n,&showlog,&baud)
+  if (n<0 || n>3) then
+    n=999
+  else if serialok[n]==0 then
+    n=999
+  endif
+  if slaveok==0 && n==999 then
+    for n=0,n<4,n++ do
+      if serialok[n] break
+    enddo
+  endif
+  hchild=control CHILD
+    window=hmain
+    position=43,81,266,48
+    help=" "
+    color=DARKGRAY
+    mode=M_BORDER
+  endc
+  hasps=control RADIO
+    window=hchild
+    position=7,2,250,23
+    name=" 显示物理I/O地址"
+    help="显示CAN总线上的物理I / O地址"
+    color=DARKGRAY
+    mode=(showlog?0:M_CHECKED)
+  endc
+  hasch=control RADIO
+    window=hchild
+    position=7,25,250,23
+    name=" 显示示意图中的地址"
+    help="如文档中所示显示I / O地址"
+    color=DARKGRAY
+    mode=(showlog?M_CHECKED:0)
+  endc
+  draw color=DARKGRAY at 42,140 rect 120,260
+  for i=0,i<4,i++
+    hcom[i]=control RADIO
+      window=hmain
+      position=50,143+23*i,65,23
+      text=format(" COM%i",i+1)
+      help=format("SPS已连接到COM%i",i+1)
+      mode=(n==i?M_CHECKED:0)
+    endc
+    if serialok[i]==0 disable hcom[i]
+  enddo
+  hslave=control RADIO
+    window=hmain
+    position=50,143+23*4,65,23
+    text=" Tester"
+    mode=(n>3?M_CHECKED:0)
+    help="SPS已连接到飞针机上的I/O扩展器"
+  endc
+  if slaveok==0 disable hslave
+  hchild=control CHILD
+    window=hmain
+    position=43,270,76,50
+    help=" "
+    color=DARKGRAY
+    mode=M_BORDER
+  endc
+  h9600=control RADIO
+    window=hchild
+    position=7,2,65,23
+    text=" 9600"
+    mode=(baud==9600?M_CHECKED:0)
+    help="选择串行波特率9600 bps"
+  endc
+  h19200=control RADIO
+    window=hchild
+    position=7,25,65,23
+    text=" 19200"
+    mode=(baud==19200?M_CHECKED:0)
+    help="选择串行波特率19200 bps"
+  endc
+  hok=control BUTTON
+    window=hmain
+    position=140,140,170,30
+    text="确定"
+    help="按下确认连接"
+  endc
+  hdemoa2=control BUTTON
+    window=hmain
+    position=140,178,170,23
+    text="演示2"
+    help="演示不带SPS的A2/A3的功能"
+    color=GRAY
+    bkcolor=WHITE
+  endc
+  hdemoa4=control BUTTON
+    window=hmain
+    position=140,204,170,23
+    text="演示4"
+    help="演示不带SPS的A4的功能"
+    color=GRAY
+    bkcolor=WHITE
+  endc
+  hdemoa6=control BUTTON
+    window=hmain
+    position=140,230,170,23
+    text="演示6"
+    help="演示不带SPS的A5/A6的功能"
+    color=GRAY
+    bkcolor=WHITE
+  endc
+  hburn=control BUTTON
+    window=hmain
+    position=140,261,170,23
+    text="载入"
+    help="将软件从.ENx文件加载到SPS"
+  endc
+  hexit=control BUTTON
+    window=hmain
+    position=140,291,170,30
+    text="退出"
+    help="按下退出SPS测试"
+  endc
+  draw show
+  while 1 do
+    if Pressed(hexit) then
+      destroy hmain
+      return 0
+    else if Pressed(hdemoa2) then
+      demo=1; testertype=0
+      break
+    else if Pressed(hdemoa4) then
+      demo=1; testertype=1; labelprinter=1
+      break
+    else if Pressed(hdemoa6) then
+      demo=1; testertype=2; labelprinter=1
+      break
+    else if Pressed(hburn) then
+      burn=1
+      break
+    else if Pressed(hok) then
+      demo=0
+      break
+    endif
+    wait
+  enddo
+  if Status(hcom[0]) then n=0;
+  else if Status(hcom[1]) then n=1;
+  else if Status(hcom[2]) then n=2;
+  else if Status(hcom[3]) then n=3;
+  else n=999; endif;
+  if Status(h19200) then baud=19200;
+  else baud=9600; endif;
+  showlog=Status(hasch)
+  setini("SPS","Selection","%i,%i,%i",n,showlog,baud)
+  clear hmain
+  change hmain position=*,*,350,270
+  draw window=hmain mode=M_CENTERED
+  draw at 179,151 color=DARKGRAY font=HUGEFONT text="稍等..."
+  draw at 177,149 color=GRAY font=HUGEFONT text="稍等..."
+  draw show
+  // Check that SPS is responding
+  if demo!=0 then
+    h=NULL
+    if testertype==0 then
+      nmodule=12
+      festo=800
+      foffset=0; a2offset=0
+    else if testertype==1 then
+      nmodule=13
+      festo=900
+      foffset=0; ldoffset=0; outoffset=0
+    else if testertype==2 then
+      nmodule=5
+      //////////////////////////////////////////////======================================
+    endif
+    err=0
+  else if n<4 then                     // Connection via serial interface
+    h=Fserial(n+1,baud,8,EVENPARITY)
+    err=(h==NULL?1:0)
+  else                                 // Connection via embedded software
+    h=NULL
+    err=($GLOBAL.headloaded==(-1) && burn==0?4:0)
+  endif
+  if demo==0 then
+    if err==0 then                     // Check communication with SPS, step 1
+      buf[0]='U'; buf[1]=0x55;
+      i=Sendcmd(buf,2,buf)
+      if i<0 then err=i;
+      else if i!=1 || buf[0]!=0xAA then err=2;
+      endif
+    endif
+    if err==0 then                     // Check communication with SPS, step 2
+      buf[0]='U'; buf[1]=0xAA;
+      i=Sendcmd(buf,2,buf)
+      if i<0 then err=i;
+      else if i!=1 || buf[0]!=0x55 then err=2;
+      endif
+    endif
+    if err==0 then                     // Stop SPS and set high RS232 priority
+      buf[0]='N'
+      buf[1]=2; buf[2]=0xAA
+      i=Sendcmd(buf,3,buf)
+      if i<0 err=i
+      buf[0]='L'
+      $xuint2(buf+1)=2056
+      i=Sendcmd(buf,3,buf)
+      if i<0 err=i
+    endif
+    if err==0 && burn==0 then          // Read tester version
+      k=Readregister(5)
+      i=k & 0x3C                       // rConfig bits 543210:
+      if i==0x00 then
+        testertype=0                   //           ..0000xx - A2/A3
+        labelprinter=0
+      else if i==0x04 then
+        testertype=1                   //           ..0001x0 - A4
+        labelprinter=0
+      else if i==0x14 then
+        testertype=1                   //           ..0101xx - A4 LP
+        labelprinter=1
+      else
+        err=5                          // Not yet supported
+      endif
+      if (k & 0x40)==0 || testertype==0 then
+        catchers=0                     // A2 does not support catchers
+      else
+        catchers=1                     // A4 with side catchers
+      endif
+    endif
+    if err==0 && burn==0 then          // Read number of controllers
+      nmodule=Readregister(2013)
+      if testertype==0 then
+        if nmodule!=0 && nmodule!=4 && nmodule!=8 && nmodule!=12 err=3
+        festo=800
+        if nmodule==4 then
+          foffset=-festo; a2offset=0
+        else if nmodule==8 then
+          foffset=0; a2offset=-400
+        else
+          foffset=0; a2offset=0
+        endif
+      else if testertype==1 then
+        if nmodule!=0 && nmodule!=4 && nmodule!=8 && nmodule!=13 err=3
+        festo=900
+        if nmodule==4 then
+          foffset=-festo; ldoffset=0; outoffset=0
+        else if nmodule==8 then
+          foffset=400-festo; ldoffset=0; outoffset=-500
+        else if nmodule==13 then
+          foffset=0; ldoffset=0; outoffset=0
+        endif
+      endif
+    endif
+    if err!=0 then                     // Report error and quit test
+      clear hmain
+      draw window=hmain mode=M_CENTERED
+      draw at 176,81 color=RED font=HUGEFONT text="Error!"
+      draw at 174,79 color=LIGHTRED font=HUGEFONT text="Error!"
+      draw at 175,110 font=MEDIUMFONT
+      if err==(-3) then
+        draw text="SPS is not responding,"
+      else if err==(-4) || err==1 then
+        draw text="Unexpected response from SPS,"
+      else if err==3 then
+        draw text=format("Wrong number of SPS modules (%i),",nmodule)
+      else if err==4 then
+        draw text="Tester not loaded,"
+      else if err==5 then
+        draw text="Unrecognized tester type,"
+      else
+        draw text="Communication error,"
+      endif
+      draw at 175,140 font=MEDIUMFONT text="unable to test automation"
+      draw show
+      hexit=control BUTTON
+        window=hmain
+        position=125,180,100,30
+        name="！！..."
+        help="不可能，伙计！只能按下！"
+      endc
+      t=Time()+10000
+      while Pressed(hexit)==0 && t>Time() do
+        wait
+      enddo
+      destroy hmain
+      goto restartsps
+    endif
+  endif
+  clear hmain
+  if burn then
+    Burnsoftware()
+    destroy hmain
+    goto restartsps
+  endif
+  monster=0
+  if testertype==1 && nmodule==8 then
+    i=Readregister(2400)
+    if i!=(-1) monster=(i & 0x80)!=0
+  endif
+  draw window=hmain mode=M_CENTERED
+  draw at 175,45 color=BLACK font=MEDIUMFONT
+  draw text="Tester type:"
+  draw at 175,120 color=RED font=HUGEFONT
+  if testertype==0 then
+    draw text="A2/A3"
+  else if testertype==1 then
+    draw text=format("A4%s%s",monster==0?"":"-Exa",labelprinter==0?"":" LP")
+  else
+    draw text=format("A6%s",labelprinter==0?"":" LP")
+  endif
+  draw at 175,165 color=BLACK font=MEDIUMFONT
+  draw text="Number of SPS extention modules:"
+  draw at 175,240 color=RED font=HUGEFONT
+  draw text=format("%i",nmodule)
+  draw show
+  delay 1000
+  clear hmain
+  change hmain position=*,*,600,420
+  hmode[0]=control BUTTON
+    window=hmain
+    position=5,5,60,24
+    name="架板框"
+    help="按下测试架板框功能"
+  endc
+  hmode[1]=control BUTTON
+    window=hmain
+    position=70,5,65,24
+    name="加载器"
+    help="按下测试载入器的功能"
+  endc
+  if testertype==0 then
+    hmode[3]=control BUTTON
+      window=hmain
+      position=140,5,115,24
+      name="电位计"
+      help="按下可设置电位计"
+    endc
+  else
+    hmode[3]=control BUTTON
+      window=hmain
+      position=140,5,115,24
+      name="输出单位"
+      help="按下可测试输出单元的功能"
+    endc
+  endif
+  hmode[2]=control BUTTON
+    window=hmain
+    position=260,5,90,24
+    name="命令"
+    help="按下可测试软件控制的命令序列"
+  endc
+  hmode[4]=control BUTTON
+    window=hmain
+    position=355,5,80,24
+    name="系列I/O"
+    help="按下可测试连接到SPS的串行线"
+  endc
+  hmode[5]=control BUTTON
+    window=hmain
+    position=440,5,80,24
+    name="长测试"
+    help="按下测试压力和机械"
+  endc
+  hmode[6]=control BUTTON
+    window=hmain
+    position=525,5,70,24
+    name="放弃"
+    help="按下退出测试"
+  endc
+  hgraph=control GRAPH
+    window=hmain
+    position=5,30,590,385
+    help=" "
+    color=WHITE                        // No visible border
+    bkcolor=WHITE
+  endc
+  testmode=-1
+  i=-1
+  if testertype==0 then
+    if nmodule==0 || nmodule==8 then
+      Disable(hmode[0])
+      Disable(hmode[5])
+    endif
+    if nmodule==0 || nmodule==4 Disable(hmode[1])
+    if nmodule!=12 Disable(hmode[2])
+    if nmodule!=12 Disable(hmode[3])
+    if nmodule==4 || nmodule==12 then
+      Highlight(0)
+      Createshuttle()
+    else if nmodule==8 then
+      Highlight(1)
+      CreateA2loader()
+    else if nmodule==0 then
+      Highlight(4)
+      i=Createio()
+      if i<0 goto restartsps
+    endif
+  else if testertype==1 then
+    if nmodule==0 Disable(hmode[0])
+    if nmodule!=13 Disable(hmode[1])
+    if nmodule==0 || nmodule==4 Disable(hmode[3])
+    if nmodule==4 || nmodule==8 || nmodule==13 then
+      Highlight(0)
+      Createshuttle()
+    else if nmodule==0 then
+      Highlight(4)
+      i=Createio()
+      if i<0 goto restartsps
+    endif
+  endif
+  while 1 do
+    Queryall()
+    Checkactuators()
+    if testmode==3 && testertype==1 && hprint!=NULL then
+      if Pressed(hprint) then          // Send Smiley to LINX printer
+        Createsmileycat(buf)
+        change hprint color=DARKGRAY
+        change hprint bkcolor=GRAY
+        j=Decodelinxbitmap(buf,32,16,200,100)
+        change hprint color=BLACK
+        if j==0 then
+          change hprint bkcolor=LIGHTGREEN
+        else if j<0 then
+          change hprint bkcolor=LIGHTRED
+        else
+          change hprint bkcolor=YELLOW
+        endif
+      endif
+    endif
+    if (i==0 || Pressed(hmode[0])) && testmode!=0 then
+      i=-1; Highlight(0)
+      Createshuttle()
+    else if (i==1 || Pressed(hmode[1])) && testmode!=1 then
+      i=-1; Highlight(1)
+      if testertype==0 then
+        CreateA2loader()
+      else
+        CreateA4loader()
+      endif
+    else if (i==2 || Pressed(hmode[2])) && testmode!=2 then
+      Highlight(2)
+      if testertype==0 then
+        i=CreateA2command()
+      else
+        i=CreateA4command()
+      endif
+      if i<0 break
+    else if (i==3 || Pressed(hmode[3])) && testmode!=3 then
+      Highlight(3)
+      if testertype==0 then
+        i=Createwidth()
+        if i<0 break
+      else if testertype==1 then
+        Createoutputunit()
+      endif
+    else if (i==4 || Pressed(hmode[4])) && testmode!=4 then
+      Highlight(4)
+      i=Createio()
+      if i<0 break
+    else if (i==5 || Pressed(hmode[5])) && testmode!=5 then
+      Highlight(5)
+      i=Createlongtest()
+      if i<0 break
+    else if Pressed(hmode[6]) then
+      break
+    endif
+    wait
+  enddo
+  // Task finished, restart SPS.
+restartsps:
+  if nmodule!=0 then
+    buf[0]='M'
+    $xuint2(buf+1)=2056
+    Sendcmd(buf,3,buf)                 // Set low RS232 priority
+    buf[0]='N'
+    buf[1]=1; buf[2]=0xAA
+    Sendcmd(buf,3,buf)                 // Restart all tasks
+  endif
+end
+

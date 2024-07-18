@@ -1,0 +1,233 @@
+#include "ls.icl"
+
+#define MAINX    404                   // Dimensions of main window
+#define MAINY    303
+
+#define X0       15
+#define X1       90
+#define X2       165
+#define X3       240
+#define X4       315
+#define X5       385
+
+#define Y0       13
+#define Y1       81
+#define Y2       181
+#define Y3       270
+
+#define MAXINP   48                    // Maximal number of displayed bytes
+
+function int Drawdata(handle hw,char *data,int n)
+  int i,j,x,y
+  draw window=hw color=WHITE bkcolor=WHITE clear
+  draw color=RED font=MEDIUMFONT
+  j=Max(0,n-MAXINP)
+  for i=j,i<n,i++ do
+    draw at (i%12)*22+((i%12)/4)*7+7,(i/12)*20+22 text=format("%02X",data[i])
+  enddo
+  draw show
+end
+
+function int main()
+  int i,j,n,baudrate,bits,parity,ndig,channel,ninp
+  char inp[MAXINP],s[256]
+  handle hcom[4],hbaud,hbits,hparity,h
+  handle hmain,hinp,hout,hstart,hclear,hsend,hquit
+  hmain=control WINDOW
+    window=NULL
+    position=10,10,MAINX,MAINY
+    name="连续测试"
+    help=" "
+    bkcolor=LIGHTGRAY
+  endc
+  hcom[0]=control RADIO
+    window=hmain
+    position=X0,Y0,60,20
+    name="COM1"
+    help="检查外部计算机是否连接到COM1:"
+  endc
+  hcom[1]=control RADIO
+    window=hmain
+    position=X1,Y0,60,20
+    name="COM2"
+    help="检查外部计算机是否连接到COM2:"
+  endc
+  hcom[2]=control RADIO
+    window=hmain
+    position=X2,Y0,60,20
+    name="COM3"
+    help="检查外部计算机是否连接到COM3:"
+  endc
+  hcom[3]=control RADIO
+    window=hmain
+    position=X3,Y0,60,20
+    name="COM4"
+    help="检查外部计算机是否连接到COM4:"
+  endc
+  hbaud=control COMBOLIST
+    window=hmain
+    position=X0,Y0+24,X1-X0,200
+    help="选择连接速度"
+  endc
+  add hbaud text="600"
+  add hbaud text="1200"
+  add hbaud text="2400"
+  add hbaud text="4800"
+  add hbaud text="9600"
+  add hbaud text="19200"
+  add hbaud text="38400"
+  add hbaud text="115200"
+  change hbaud select=4
+  hbits=control COMBOLIST
+    window=hmain
+    position=X1,Y0+24,X2-X1,200
+    help="选择字符中的位数"
+  endc
+  add hbits text="7"
+  add hbits text="8"
+  change hbits select=1
+  hparity=control COMBOLIST
+    window=hmain
+    position=X2,Y0+24,X3-X2,200
+    help="选择奇偶校验"
+  endc
+  add hparity text="EVEN"
+  add hparity text="ODD"
+  add hparity text="NOPAR"
+  change hparity select=2
+  hstart=control BUTTON
+    window=hmain
+    position=X4,Y0,X5-X4,20
+    name="开始"
+    help="按下即可开始测试"
+  endc
+  hinp=control GRAPH
+    window=hmain
+    position=X0+1,Y1+1,X4-X0-10-2,90-2
+    help="来自外部计算机的数据"
+    bkcolor=WHITE
+  endc
+  hclear=control BUTTON
+    window=hmain
+    position=X4,Y1,X5-X4,20
+    name="清除"
+    help="清除输入窗口的内容"
+  endc
+  disable hclear
+  hout=control COMBOEDIT
+    window=hmain
+    position=X0,Y2,X4-X0-10,120
+    name="连续测试数据"
+    help="在此输入要发送的十六进制数据"
+  endc
+  disable hout
+  hsend=control BUTTON
+    window=hmain
+    position=X4,Y2,X5-X4,20
+    name="发送"
+    help="将十六进制数据发送到外部计算机"
+  endc
+  disable hsend
+  hquit=control BUTTON
+    window=hmain
+    position=X4,Y3,X5-X4,20
+    name="放弃"
+    help="断开并关闭窗口"
+  endc
+  // Detect available COM ports.
+  for i=0,i<4,i++ do
+    h=Fserial(i+1,9600,8,NOPARITY)
+    if h==NULL then
+      disable hcom[i]
+    else
+      Fclose(h)
+      if n==0 then
+        change hcom[i] mode=M_CHECKED
+        channel=i+1
+      endif
+      n++
+    endif
+  enddo
+  while 1 do
+    if Pressed(hquit) return 0
+    if Pressed(hstart) break
+    wait
+  enddo
+  // Open communication port.
+  h=NULL
+  Text(hbaud,s); baudrate=9600; sscanf(s,"%i",&baudrate)
+  Text(hbits,s); bits=8; sscanf(s,"%i",&bits)
+  Text(hparity,s);
+  if s[0]=='E' then parity=EVENPARITY;
+  else if s[0]=='O' then parity=ODDPARITY;
+  else parity=NOPARITY; endif
+  for i=0,i<4,i++ do
+    j=Status(hcom[i])
+    disable hcom[i]
+    if j==0 continue
+    h=Fserial(i+1,baudrate,bits,parity)
+  enddo
+  if h==NULL return
+  disable hstart
+  disable hbaud
+  disable hbits
+  disable hparity
+  enable hclear
+  enable hout
+  enable hsend
+  // Main loop.
+  while 1 do
+    if Pressed(hquit) then
+      break
+    else if Pressed(hclear) then
+      ninp=0
+      Drawdata(hinp,inp,ninp)
+    else if Pressed(hsend) then
+      confirm hout
+      Text(hout,s)
+      i=0
+      while 1 do
+        // Get hex number, skipping all non-hex characters
+        if s[i]==0 break
+        ndig=0
+        while 1 do
+          if s[i]==0 break
+          if Isxdigit(s[i]) then
+            if s[i]<='9' then j=s[i]-'0';
+            else j=Toupper(s[i])-'A'+10; endif
+            ndig++; i++; break
+          endif
+          i++
+        enddo
+        while 1 do
+          if s[i]==0 break
+          if Isxdigit(s[i]) then
+            if s[i]<='9' then j=j*16+s[i]-'0';
+            else j=j*16+Toupper(s[i])-'A'+10; endif
+            ndig++; i++; break
+          endif
+          i++
+        enddo
+        // Send gathered byte.
+        if ndig!=2 break
+        s[0]=j
+        Fwrite(s,1,h)
+      enddo
+    endif
+    n=Fread(s,MAXINP,h)
+    if n>0 then
+      j=ninp+n-MAXINP
+      if j>0 then
+        if j!=MAXINP Memcpy(inp,inp+j,MAXINP-j)
+        ninp=ninp-j
+      endif
+      Memcpy(inp+ninp,s,n)
+      ninp=ninp+n
+      Drawdata(hinp,inp,ninp)
+    endif
+    wait
+  enddo
+  Fclose(h)
+end
+
+

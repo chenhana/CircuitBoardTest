@@ -1,0 +1,230 @@
+#include "ls.icl"
+
+#stack 32768
+
+#define VERSION        "1.00"
+#define DESCRIPTION    "Viewer for ScanFertigung"
+
+function int main()
+  int i,j,zoom,bright,contr,videochanged,redrawgrid
+  int mousex,mousey,buttons,xprev,yprev,btnprev
+  float x,y,gridx,gridy,x0,y0,scale
+  handle hmain,syslist,hdummy,hview,hscale,hplus,hminus
+  handle hbri,hcontr,hzoom,hdx,hdy,hexit
+  hmain=SYS.Getmainwindow()
+  change hmain name="扫描卡查看器"
+  change hmain position=10,10,868,586
+  change hmain bkcolor=PINK
+  syslist=SYS.Getsyslist();
+  change syslist position=-10,-10,1,1
+  hview=control GRAPH
+    window=hmain
+    position=5,5,768,576
+    help="视频查看器"
+    bkcolor=VIDEOFILL
+  endc
+  hdummy=control TEXT
+    window=hmain
+    position=778,10,85,20
+    text="Scale, um/pix:"
+    font=INFOFONT
+    mode=M_CENTERED
+  endc
+  hscale=control TEXT
+    window=hmain
+    position=797,35,47,22
+    help="放大倍率，微米每像素"
+    font=MEDIUMFONT
+    mode=M_CENTERED|M_BORDER
+    bkcolor=WHITE
+  endc
+  hminus=control BUTTON
+    window=hmain
+    position=778,35,20,22
+    name="<"
+    help="按下可减小放大倍数"
+    font=MEDIUMFONT
+    mode=M_REPEAT
+  endc
+  hplus=control BUTTON
+    window=hmain
+    position=843,35,20,22
+    name=">"
+    help="按下可增加放大倍数"
+    font=MEDIUMFONT
+    mode=M_REPEAT
+  endc
+  hdummy=control TEXT
+    window=hmain
+    position=778,80,85,20
+    text="Brightness:"
+    font=INFOFONT
+    mode=M_CENTERED
+  endc
+  hbri=control HSCROLL
+    window=hmain
+    position=778,104,85,22
+    name="亮度"
+    help="滚动可以更改视频图像的明亮度"
+    limits=-100,100
+  endc
+  hdummy=control TEXT
+    window=hmain
+    position=778,140,85,20
+    text="Contrast:"
+    font=INFOFONT
+    mode=M_CENTERED
+  endc
+  hcontr=control HSCROLL
+    window=hmain
+    position=778,164,85,22
+    name="对比度"
+    help="滚动可以更改视频图像的对比度"
+    limits=-100,100
+  endc
+  hzoom=control BUTTON
+    window=hmain
+    position=778,215,85,24
+    text="Zoom x1"
+    help="按下可更改缩放比例"
+  endc
+  hdummy=control TEXT
+    window=hmain
+    position=778,277,25,22
+    text="dX"
+    font=MEDIUMFONT
+  endc
+  hdx=control TEXT
+    window=hmain
+    position=806,275,57,22
+    help="距十字架的X距离，mm"
+    font=MEDIUMFONT
+    mode=M_BORDER
+    color=LIGHTRED
+    bkcolor=WHITE
+  endc
+  hdummy=control TEXT
+    window=hmain
+    position=778,307,25,22
+    text="dY"
+    font=MEDIUMFONT
+  endc
+  hdy=control TEXT
+    window=hmain
+    position=806,305,57,22
+    help="距十字架的Y距离，mm"
+    font=MEDIUMFONT
+    mode=M_BORDER
+    color=LIGHTRED
+    bkcolor=WHITE
+  endc
+  hexit=control BUTTON
+    window=hmain
+    position=778,558,85,24
+    text="Quit"
+    help="按下关闭查看器"
+  endc
+  scale=10.0
+  getini("Scanfertigung","Scale","%f",&scale);
+  zoom=1; videochanged=1
+  gridx=0.0; gridy=0.0; redrawgrid=1
+  xprev=0; yprev=0; btnprev=0
+  while 1 do
+    i=Mousexy(hview,&mousex,&mousey,&buttons)
+    if mousex!=xprev || mousey!=yprev || buttons!=btnprev then
+      xprev=mousex
+      yprev=mousey
+      btnprev=buttons
+      if i==0 then
+        change hdx text=""
+        change hdy text=""
+      else
+        x=(mousex-384.0)/zoom
+        y=(mousey-288.0)/zoom
+        if buttons & 1 then
+          gridx=x
+          gridy=y
+          redrawgrid=1
+        endif
+        change hdx text=format(" %.3f",(x-gridx)*scale/1000.0)
+        change hdy text=format(" %.3f",(gridy-y)*scale/1000.0)
+      endif
+    endif
+    if Pressed(hminus) then
+      scale=scale/1.01; redrawgrid=1
+    else if Pressed(hplus) then
+      scale=scale*1.01; redrawgrid=1
+    else if Pressed(hbri) then
+      videochanged=1
+    else if Pressed(hcontr) then
+      videochanged=1
+    else if Pressed(hzoom) then
+      zoom=3-zoom; videochanged=1; redrawgrid=1
+      if zoom==1 then
+        change hzoom color=BLACK
+        change hzoom text="Zoom x1"
+      else
+        change hzoom color=LIGHTRED
+        change hzoom text="Zoom x2"
+      endif
+    else if Pressed(hexit) then
+      break
+    endif
+    if videochanged then
+      bright=Status(hbri)
+      contr=Status(hcontr)
+      bright=Status(hbri)-contr/5
+      SYS.Videoex(hview,0,0,zoom,bright,contr,2)
+      videochanged=0
+    endif
+    if redrawgrid then
+      scale=Min(20.0,Max(5.0,scale))
+      change hscale text=format("%.1f",scale)
+      draw window=hview bkcolor=VIDEOFILL clear
+      draw color=LIGHTRED 
+      x0=gridx*zoom+384.0;
+      y0=gridy*zoom+288.0;
+      draw at 0,y0 to 768,y0
+      draw at x0,0 to x0,576
+      for i=-50,i<=50,i++ do
+        x=x0+i*100.0/scale*zoom
+        draw at x,y0-3 to x,y0+4
+        y=y0+i*100.0/scale*zoom
+        draw at x0-3,y to x0+4,y
+      enddo
+      draw font=SMALLFONT mode=M_CENTERED
+      for i=-15,i<=15,i++ do
+        x=x0+i*1000.0/scale*zoom
+        if x<(-10) continue
+        if x>778 break
+        if i!=0 then
+          draw at x,y0-8 to x,y0+8
+          draw at x,y0-8 text=format("%i",i)
+        endif
+        for j=-15,j<=15,j++ do
+          y=y0+j*1000.0/scale*zoom
+          if y<(-10) continue
+          if y>586 break
+          draw at x-3,y to x+4,y
+          draw at x,y-3 to x,y+4
+        enddo
+      enddo
+      draw mode=M_LEFT
+      for i=-15,i<=15,i++ do
+        y=y0+i*1000.0/scale*zoom
+        if y<(-10) continue
+        if y>586 break
+        if i!=0 then
+          draw at x0-8,y to x0+8,y
+          draw at x0+8,y+8 text=format("%i",-i)
+        endif
+      enddo
+      draw show
+      redrawgrid=0
+    endif
+    wait
+  enddo
+  setini("Scanfertigung","Scale","%f",scale);
+  SYS.Quit();
+end
+

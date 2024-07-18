@@ -1,0 +1,1262 @@
+#include "ls.icl"
+#include "or.icl"
+#cmdbuff 18
+
+#define VERSION        ""
+
+// 1.01: Added contacting time.
+// 1.02: Small improvements.
+// 1.03: Support of head cameras.
+// 1.04: Option to enable individual quadrants.
+// 1.05: Extended stroke options.
+// 1.06: Finer accuracy settings for S-type testers.
+// 1.07: Option to print .PGM bitmaps.
+
+#define DX             570             // Width of video window
+#define DY             570             // Height of video and control windows
+#define DC             130             // Width of control windows
+
+#define X0             5               // X position of video window
+#define X1             (X0+DX+5)       // X position of fisrt control window
+#define X2             (X0+DX+DC+10)   // X position of second control window
+
+// Layout configuration bits in $LAY.config.
+#define LC_SMASK2      0x20000000      // Extention of LC_SMASK
+#define LC_AUTOPROBE   0x10000000      // Autodetect probes (Kelvin or standard)
+#define LC_TYPEMASK    0x0B000000      // General type of machine
+#define   LC_STD       0x00000000      // LC_TYPEMASK: standard A5/A6 tester
+#define   LC_NEWA1     0x01000000      // LC_TYPEMASK: new A1 (slow A5) tester
+#define   LC_S1        0x02000000      // LC_TYPEMASK: S1/S2
+#define   LC_A8        0x03000000      // LC_TYPEMASK: A7/A8
+#define   LC_S3        0x08000000      // LC_TYPEMASK: S3
+#define LC_VACUUMBOX   0x04000000      // Disable movements on bottom side
+#define LC_MOREMASK    0x00C00000      // Mask for more space bits
+#define   LC_MOREBOT   0x00800000      // Give more space on bottom
+#define   LC_MORETOP   0x00400000      // Give more space on the top
+#define LC_DEADLOCKS   0x00200000      // Autoresolve deadlocks
+#define LC_ILLUM       0x00100000      // Auto switch video illumination on/off
+#define LC_HARDZ       0x00040000      // Hard Z contacting (A2/A4/A5 only)
+#define LC_QUAKE       0x00020000      // Earthquake protection on (M2 only)
+#define LC_SMASK1      0x0001C000      // Mask for type of loading system
+#define LC_RELAYS      0x00002000      // Slow (LATEST-compatible) relays
+#define LC_OHTYPE      0x00001C00      // Mask to extract on-head type
+#define   LC_NOFIELD   0x00001000      // On-heads without field amplifier
+#define   LC_PHADJ     0x00000C00      // On-heads with adjustable field phase
+#define   LC_ACTIVE    0x00000400      // Active on-heads (with Dallas/R1-R4)
+#define   LC_PASSIVE   0x00000000      // Passive on-heads (manual C adjust)
+#define LC_TRAFFICS    0x00000200      // Hitachi-style traffic lights
+#define LC_ZSENSORS    0x00000100      // A series: Z pressure sensors active
+#define LC_LOWBAUD     0x00000100      // M2: low AFMCU I/O baud rate
+#define LC_ISM2        0x00000080      // M2 tester
+#define LC_A2LOADER    0x00000040      // A2-style loader, enables LC_SMASK
+#define LC_ENCODERS    0x00000020      // Tester with encoders
+#define LC_COVER       0x00000010      // I have forgotten what it means
+#define LC_HIGHZ       0x00000008      // Z always moves with full hub (B1)
+#define LC_LDELAY      0x00000004      // Wait after light off (obsolete)
+#define LC_AMASK       0x00000003      // Mask for type of antennae
+#define   LC_EXTANT    0x00000000      // LC_AMASK: external (A1) antennae
+#define   LC_INTANT    0x00000001      // LC_AMASK: internal antennae (void)
+#define   LC_FINGANT   0x00000002      // LC_AMASK: finger antennae
+// Alternative (old) interpretation of LC_OHTYPE bits.
+#define LC_PHASEADJ    0x00000800      // On-heads with adjustable field phase
+#define LC_ACTIVEONHD  0x00000400      // Active on-heads (with Dallas/R1-R4)
+// Tester types in LC_SMASK=(LC_SMASK2|LC_SMASK1).
+#define LC_LMSPLIT     0x20000000      // L&M auto split shuttle
+#define LC_LMMAN       0x0001C000      // L&M manual tester
+#define LC_LMS2        0x00018000      // L&M for S2a
+#define LC_EPCOS       0x00014000      // L&M for EPCOS tester
+#define LC_LM          0x00010000      // L&M for A5a
+#define LC_A5WIDE      0x0000C000      // A5 wide shuttle
+#define LC_AUTOMATE    0x00008000      // Automatical shuttle
+#define LC_A2XSHUT     0x00004000      // A2X shuttle
+#define LC_A2SHUT      0x00000000      // A2 standard shuttle
+// Useful shortcuts and substitutions.
+#define LC_SMASK       (LC_SMASK2|LC_SMASK1)
+#define LC_LDMASK      (LC_SMASK2|LC_SMASK1|LC_A2LOADER)
+#define LC_SPLITAUTO   (LC_LMSPLIT|LC_A2LOADER)
+#define LC_LMAUTO      (LC_LM|LC_A2LOADER)
+#define LC_LMS2AUTO    (LC_LMS2|LC_A2LOADER)
+#define LC_EPCOSAUTO   (LC_EPCOS|LC_A2LOADER)
+
+// Features supported by crate controller.
+#define CF_PRESSFACT   0x00000001      // Support for psensfact
+#define CF_RETEST      0x00000002      // Instant retest (M_LIMITHI, M_LIMITLO)
+#define CF_CAMINFO     0x00000004      // Support for S_DEBUG:0x48
+#define CF_EXTSELF     0x00000008      // Extended self-test, D_EXTA5M/SLAVE5M
+#define CF_FINECORR    0x00000010      // Support for S_LOARDUN:18/19
+#define CF_FINEVAR     0x00000020      // S_LOARDUN:18/19 with variable step
+#define CF_XCORR       0x00000040      // Support for S_LOADRUN:17
+#define CF_3DCOR       0x00000080      // Supports 3-D calibration
+#define CF_LONGLAY     0x00000100      // Supports additional layout extentions
+#define CF_NANOMETER   0x00000200      // Supports sub-micrometer coordinates
+#define CF_UNICKHZ     0x00000400      // M_UNIC supports kHz and ext device
+#define CF_STROKEOPT   0x00000800      // Supports S_DEBUG:0x52, stroke options
+
+// Note that .PGM size is limited to 32000 pixel!
+#define PGMX           400            // Max. PGM bitmap size in X direction
+#define PGMY           400            // Max. PGM bitmap size in Y direction
+
+// Main controls.
+handle           hmain                 // Main window
+handle           hview                 // Video and display window
+handle           hpos                  // Positioning window
+handle           hvideo                // Video control window
+handle           hstr                  // Test and stroke control window
+handle           hspec                 // Special stroke settings
+handle           hprogress             // Progress bar
+// Positioning controls.
+handle           hhead                 // Head selector
+handle           hx                    // X coordinate display
+handle           hy                    // Y coordinate display
+handle           hup                   // Move camera up
+handle           hleft                 // Move camera left
+handle           hright                // Move camera right
+handle           hdown                 // Move camera down
+// Video viewer controls.
+handle           hbrightness           // Brightness slider
+handle           hcontrast             // Contrast slider
+handle           hzoom                 // Zoom selector
+handle           hgrid                 // Show grid selector
+// Test setup controls.
+handle           hsize                 // Size, points, of each quarter
+handle           hstep                 // Grid step
+handle           hloop                 // Number of loops
+handle           htcont                // Time of contacting
+handle           hrandom               // Random test
+handle           huse[4]               // Quadrant selectors
+handle           hstroke[4]            // Stroke selectors
+handle           hpress[4]             // Pressure selectors
+handle           hheight[4]            // Height selectors
+handle           hacc[4]               // Accuracy selectors
+// Special stroke controls.
+handle           hstroketype           // Stroke type
+handle           hoptimize             // Optimization
+handle           hbraking              // Prolongated braking
+handle           hlowaccel             // Lowered Z acceleration
+// Main buttons.
+handle           hselect               // Select X-Y button
+handle           hstart                // Start test
+handle           hstop                 // Stop test
+handle           hexit                 // Stop test
+// Test parameters.
+int              isstester             // Whether S1, S2 or S3
+int              cratefeatures         // Features of Crate controller
+int              head                  // Selected head
+float            xref                  // X coordinate of the center
+float            yref                  // Y coordinate of the center
+int              sizeindex             // Index of grid size (NSIZE: .PGM)
+int              stepindex             // Index of grid step
+int              loopindex             // Index of grid loop count
+int              tcontindex            // Index of grid contacting time
+int              randomtest            // Random test
+int              zoom                  // Selected zoom index
+int              quadrants             // Bitmask of used quadrants
+int              stroketype            // 0: layout, 1: standard, 2: soft land
+int              optimize              // 0: layout, 1: no, 2: aggressive
+int              braking               // 1: prolongated braking
+int              lowaccel              // 1: lowered Z acceleration
+int              strokeset             // 1: extended stroke options active
+int              stroke[4]             // Selected stroke indices
+int              press[4]              // Selected pressure indices
+int              height[4]             // Selected height indices
+int              acc[4]                // Selected accuracy indices
+float            mminpixel[2]          // Millimeters in pixel, top and bottom
+// Task buffer.
+int              ntask                 // Number of tasks
+char             task[32000][100]      // Task buffer
+// .PGM bitmap buffer.
+char             pgm[PGMY][PGMX]       // Bitmap
+int              pgmx                  // X bitmap size, pixel
+int              pgmy                  // Y bitmap size, pixel
+
+#define NSIZE          8               // Number of grid sizes
+#define NSTEP          10              // Number of grid steps
+#define NLOOP          13              // Number of grid loop counts
+#define NTCONT         7               // Number of grid contacting times
+#define NACC           9               // Number of grid accuracy steps
+#define NSTROKE        10              // Number of different strokes
+#define NPRESS         11              // Number of different pressures
+#define NHEIGHT        11              // Number of different heights
+#define NZOOM          4               // Number of different zooms
+
+int   gridsize[NSIZE]     = { 2, 3, 5, 8, 10, 15, 20, 25 }
+int   gridstep[NSTEP]     = { 5, 10, 15, 20, 30, 50, 70, 100, 150, 200 }
+int   gridloop[NLOOP]     = { 1, 2, 3, 5, 10, 20,50,100,200,500,1000,2000,5000 }
+int   gridtcont[NTCONT]   = { 0, 5, 10, 20, 50, 100, 200 }
+
+int   gridacca[NACC]      = { 5, 10, 15, 20, 30, 50, 70, 100, 255 }
+int   gridaccs[NACC]      = { 1,  2,  5, 10, 15, 20, 30,  50,  70 }
+
+int   gridstroke[NSTROKE] = { 5, 10, 15, 20, 30, 40, 50, 70, 100, 120 }
+int   gridpress[NPRESS]   = { 5, 10, 15, 20, 30, 40, 50, 60, 80, 100, 120 }
+float gridheight[NHEIGHT] = { 1., 1.5, 2., 2.5, 3., 4., 5., 7., 10., 15., 20. }
+float gridzoom[NZOOM]     = { 2.0, 1.0, 0.5, 0.2 }
+
+// Gets list of features supported by crate controller. If command fails, list
+// is zeroed assuming only basical functionality.
+function int Getfeatures()
+  int t
+  char buf[32]
+  cratefeatures=0
+  if $GLOBAL.a5==0 return
+  buf[0]=S_INPORT32
+  buf[1]=0xFF                          // Crate controller
+  $uint4(buf+2)=0x10000012             // Query crate features
+  SYS.Sendimm(0,6,buf)
+  t=Time()
+  while $A[0].length==0 do
+    if Time()-t>1500 break             // Timeout
+    wait
+  enddo
+  if $A[0].answer==S_INPORT32 then
+    cratefeatures=$uint4($A[0]+5)
+  endif
+end
+
+// Sets or resets extended stroke options. Returns 0 on success and -1 on error.
+function int Setstrokeoptions(int set)
+  int u,t
+  char buf[256]
+  if (cratefeatures & CF_STROKEOPT)==0                                         \
+    return 0                           // Unsupported function
+  if set==0 && strokeset==0                                                    \
+    return 0                           // Nothing to do
+  if strokeset==0 && stroketype==0 && optimize==0                              \
+    return 0                           // Unnecessary command
+  buf[0]=S_DEBUG
+  buf[1]=0x52                          // Set stroke parameters
+  if set==0 || stroketype==0 then
+    u=0
+  else if stroketype==1 then
+    u=0x80000000
+  else if stroketype==2 then
+    u=0x80000010
+  else
+    u=0
+  endif
+  $int4(buf+2)=u                       // Stroke type
+  if set==0 || optimize==0 then
+    u=0
+  else
+    u=0x80000000
+    if optimize==2 u=u|0x00000001
+    if braking u=u|0x00000020
+    if lowaccel u=u|0x00000010
+  endif
+  $int4(buf+6)=u                       // Contacting mode
+  $int4(buf+10)=0
+  $int4(buf+14)=0
+  $int4(buf+18)=0
+  $int4(buf+22)=0
+  $int4(buf+26)=0
+  $int4(buf+30)=0
+  SYS.Sendimm(0,34,buf)
+  t=Time()
+  while $A[0].length==0 do
+    if Time()-t>1500 break             // Timeout
+    wait
+  enddo
+  if $A[0].answer!=S_DEBUG return -1
+  strokeset=set
+  return 0
+end
+
+// Given head, returns associated video channel, or -1 if head is invalid or
+// carries no camera.
+function int Channelfromhead(int head)
+  int i,channel
+  if $LAY.cameras!=0 then
+    if head==$LAY.nfing*2 return 0
+    if head==$LAY.nfing*2+1 return 1
+  else if ($LAY.headcameras & (1<<head))!=0 then
+    channel=0
+    for i=0,i<head,i++ do
+      if ($LAY.headcameras & (1<<i))!=0 channel++
+    enddo
+    return channel
+  endif
+  return -1
+end
+
+// Given Y coordinate in millimeters and side, selects camera controller and
+// corresponding video channel. Returns head on success, and -1 on any error.
+function int Camerafromyside(float y,int *channel,int side,float *angle)
+  int head
+  float h,headcamradius
+  if $LAY.cameras!=0 then
+    channel[0]=side
+    angle[0]=0.0
+    return $LAY.nfing*2+side
+  else if $LAY.headcameras!=0 then
+    for head=0,head<$LAY.nfing*2,head++ do
+      if ($LAY.headcameras & (1<<head))==0 continue
+      if ($LAY.side[head/2]!=0)!=(side!=0) continue
+      if $LAY.top[head/2]/1000.0<=y continue
+      if $LAY.bottom[head/2]/1000.0>y continue
+      break
+    enddo
+    if head>=$LAY.nfing*2 return -1
+    headcamradius=$EXTLAY.headcamradius/1000.0
+    if headcamradius<=0.0 then
+      h=($LAY.top[0]-$LAY.bottom[0])/1000
+      if h<=160.0 then
+        headcamradius=118.0
+      else
+        headcamradius=153.0
+      endif
+    endif
+    channel[0]=Channelfromhead(head)
+    h=y-$LAY.yoffset[head/2]/1000.0
+    angle[0]=(Abs(h)>0.9*headcamradius?0.0:Asin(h/headcamradius))
+    if side!=0 angle[0]=-angle[0]
+    if (head & 1)!=0 angle[0]=-angle[0]
+    return head
+  else
+    return -1                          // No cameras
+  endif
+end
+
+// Enables or disables raster controls according to mode: 0 - ready to select,
+// 1 - ready to start, 2 - test is running.
+function int Controls(int mode)
+  int i
+  if mode==0 then
+    if quadrants!=0 then
+      enable hselect
+    else
+      disable hselect
+    endif
+    disable hstart
+    disable hstop
+  else if mode==1 then
+    disable hselect
+    if quadrants!=0 then
+      enable hstart
+    else
+      disable hstart
+    endif
+    disable hstop
+  else
+    disable hselect
+    disable hstart
+    if quadrants!=0 then
+      enable hstop
+    else
+      disable hstop
+    endif
+  endif
+  if mode==1 then
+    enable hhead
+    enable hup
+    enable hdown
+    enable hleft
+    enable hright
+  else
+    disable hhead
+    disable hup
+    disable hdown
+    disable hleft
+    disable hright
+  endif
+  if mode==2 then
+    disable hstep
+    disable hloop
+    disable htcont
+    disable hrandom
+    for i=0,i<4,i++ do
+      disable huse[i]
+      disable hstroke[i]; change hstroke[i] bkcolor=GRAY
+      disable hpress[i]; change hpress[i] bkcolor=GRAY
+      disable hheight[i]; change hheight[i] bkcolor=GRAY
+      disable hacc[i]; change hacc[i] bkcolor=GRAY
+    enddo
+  else
+    enable hstep
+    enable hloop
+    enable htcont
+    enable hrandom
+    for i=0,i<4,i++ do
+      enable huse[i]
+      if quadrants & (1<<i) then
+        enable hstroke[i]; change hstroke[i] bkcolor=WHITE
+        enable hpress[i]; change hpress[i] bkcolor=WHITE
+        enable hheight[i]; change hheight[i] bkcolor=WHITE
+        enable hacc[i]; change hacc[i] bkcolor=WHITE
+      else
+        disable hstroke[i]; change hstroke[i] bkcolor=GRAY
+        disable hpress[i]; change hpress[i] bkcolor=GRAY
+        disable hheight[i]; change hheight[i] bkcolor=GRAY
+        disable hacc[i]; change hacc[i] bkcolor=GRAY
+      endif
+    enddo
+  endif
+  if mode==0 || (mode==1 && sizeindex!=NSIZE) then
+    enable hsize
+  else
+    disable hsize
+  endif
+  if (cratefeatures & CF_STROKEOPT)==0 || mode==2 then
+    disable hstroketype
+    disable hoptimize
+    disable hbraking
+    disable hlowaccel
+  else
+    enable hstroketype
+    enable hoptimize
+    if optimize==0 then
+      disable hbraking
+      disable hlowaccel
+    else
+      enable hbraking
+      enable hlowaccel
+    endif
+  endif
+end
+
+// Redraws controls and viewer and reinitializes video.
+function int Redraw(int videoon,int gridon)
+  int i,j,k,n,d,dmax,side,channel
+  float x,y,angle,step,stepx,stepy
+  draw window=hview
+  side=($LAY.side[head/2]!=0)
+  k=Camerafromyside(yref,&channel,side,&angle)
+  if k>=0 then
+    SYS.Videoangle(hview,channel,side,gridzoom[zoom],                          \
+    Status(hbrightness),Status(hcontrast),videoon?2:0,angle)
+  endif
+  draw bkcolor=(videoon?VIDEOFILL:WHITE) clear
+  draw color=LIGHTRED bkcolor=LIGHTRED font=LARGEFONT mode=M_CENTERED
+  draw at 20,45 text="1"
+  draw at DX-20,45 text="2"
+  draw at 20,DY-5 text="3"
+  draw at DX-20,DY-5 text="4"
+  if videoon==0 || gridon!=0 then
+    draw at 10,DY/2 to DX-10,DY/2
+    draw mode=M_CENTERED font=SMALLFONT
+    step=(gridzoom[zoom]==2.0?0.5:1.0)
+    for x=-20.0,x<=20.0,x=x+step do
+      if Abs(x)<0.001 continue
+      i=DX/2+x/mminpixel[side]*gridzoom[zoom]
+      if i<12 || i>DX-12 continue
+      draw at i,DY/2-3 to i,DY/2+4
+      draw at i+1,DY/2+17 text=format("%g",x)
+    enddo
+    draw at DX-15,DY/2-3 text="mm"
+    draw at DX/2,10 to DX/2,DY-10
+    for y=-20.0,y<=20.0,y=y+step do
+      if Abs(y)<0.001 continue
+      i=DY/2+y/mminpixel[side]*gridzoom[zoom]
+      if i<12 || i>DY-12 continue
+      draw at DY/2-3,i to DY/2+4,i
+    enddo
+    stepindex=Max(0,Min(stepindex,NSTEP-1))
+    step=gridstep[stepindex]/1000.0/mminpixel[side]*gridzoom[zoom]
+    if sizeindex==NSIZE then
+      // Draw .PGM bitmap
+      dmax=4*Max(1.0,gridzoom[zoom])
+      for j=0,j<pgmy,j++ do            // For each Y
+        y=DY/2+(j-pgmy/2)*step+0.5
+        for i=0,i<pgmx,i++ do          // For each X
+          d=Max(0,Min((pgm[j,i]-10)*dmax/245,dmax))
+          if d==0 continue
+          x=DX/2+(i-pgmx/2)*step+0.5
+          draw at x,y fillellipse d,d
+        enddo
+      enddo
+    else
+      // Draw raster.
+      sizeindex=Max(0,Min(sizeindex,NSIZE-1))
+      n=gridsize[sizeindex]
+      for k=0,k<4,k++ do               // For each quadrant
+        if (quadrants & (1<<k))==0 continue
+        if k==0 then
+          stepx=-step; stepy=step      // In pixels
+        else if k==1 then
+          stepx=step; stepy=step
+        else if k==2 then
+          stepx=-step; stepy=-step
+        else
+          stepx=step; stepy=-step
+        endif
+        for j=0,j<n,j++ do             // For each Y
+          y=DY/2-(j+2)*stepy+0.5
+          for i=0,i<n,i++ do           // For each X
+            x=DX/2+(i+2)*stepx+0.5
+            draw at x,y ellipse 4*gridzoom[zoom],4*gridzoom[zoom]
+          enddo
+        enddo
+      enddo
+    endif
+  endif
+  draw show
+end
+
+// Generates test task (single loop).
+function int Createtask()
+  int i,j,k,l,n,a,v,p,vi,pi
+  float f,x,y,step,stepx,stepy,h
+  stepindex=Max(0,Min(stepindex,NSTEP-1))
+  step=gridstep[stepindex]/1000.0
+  ntask=0
+  if sizeindex==NSIZE then
+    // PGM bitmap.
+    if isstester then
+      a=gridaccs[acc[0]]
+    else
+      a=gridacca[acc[0]]
+    endif
+    v=gridstroke[stroke[0]]
+    p=gridpress[press[0]]
+    h=gridheight[height[0]]
+    for j=0,j<pgmy,j++ do              // For each Y
+      y=yref+(pgmy/2.0-j)*step
+      for i=0,i<pgmx,i++ do            // For each X
+        f=pgm[j,i]*pgm[j,i]/255.0/255.0
+        vi=v*(f*1.3-0.3)
+        pi=p*(f*1.3-0.3)
+        if vi<5.0 || pi<10.0 continue
+        x=xref+(i-pgmx/2.0)*step
+        l=sprintf(task[ntask],"M %i(%f,%fA%iV%iP%iH%.1f)",                     \
+          head,x,y,a,vi,pi,h)
+        if tcontindex==0 then
+          sprintf(task[ntask]+l," Z(%i)",head)
+        else
+          sprintf(task[ntask]+l," DLY(%i)",gridtcont[tcontindex])
+        endif
+        ntask++
+      enddo
+    enddo
+  else
+    // Raster.
+    sizeindex=Max(0,Min(sizeindex,NSIZE-1))
+    n=gridsize[sizeindex]
+    for k=0,k<4,k++ do                 // For each quadrant
+      if (quadrants & (1<<k))==0 continue
+      if k==0 then
+        stepx=-step; stepy=step
+      else if k==1 then
+        stepx=step; stepy=step
+      else if k==2 then
+        stepx=-step; stepy=-step
+      else
+        stepx=step; stepy=-step
+      endif
+      if isstester then
+        a=gridaccs[acc[k]]
+      else
+        a=gridacca[acc[k]]
+      endif
+      v=gridstroke[stroke[k]]
+      p=gridpress[press[k]]
+      h=gridheight[height[k]]
+      for j=0,j<n,j++ do               // For each Y
+        y=yref+(j+2)*stepy
+        for i=0,i<n,i++ do             // For each X
+          x=xref+(i+2)*stepx
+          l=sprintf(task[ntask],"M %i(%f,%fA%iV%iP%iH%.1f)",head,x,y,a,v,p,h)
+          if tcontindex==0 then
+            sprintf(task[ntask]+l," Z(%i)",head)
+          else
+            sprintf(task[ntask]+l," DLY(%i)",gridtcont[tcontindex])
+          endif
+          ntask++
+        enddo
+      enddo
+    enddo
+  endif
+end
+
+// Service function, reads single line from the .PGM file. Comments and empty
+// lines are skipped. Returns length on success, 0 on end-of-file and -1 on
+// error.
+function int Getpgmline(handle f,char *s)
+  int i,n
+  char t[2048]
+  while 1 do
+    t[0]='\0'; n=Fscanf(f,"%s\n",t)    // Get next line
+    if n<0 return 0                    // End of file reached
+    n=Strlen(t)
+    while n>0 && (t[n-1]==' '||t[n-1]=='\n'||t[n-1]=='\r'||t[n-1]=='\t') do
+      n--
+    enddo
+    t[n]='\0'
+    for i=0,i<n,i++ do
+      if t[i]!=' ' && t[i]!='\t' break
+    enddo
+    if i==n continue                   // Skip empty lines
+    if t[i]!='#' break                 // Skip comments
+  enddo
+  Strcpy(s,t+i)
+  return n-i
+end
+
+// Reads .PGM file into the buffer pgm[][] and sets pgmx and pgmy. Returns 0 on
+// success and -1 on error.
+function int Readpgm(char *path)
+  int i,j,n,x,y,maxcolor
+  handle f
+  char s[2048]
+  f=Fopen(path,"rt")
+  if f==NULL then
+    change hprogress text="Unable to open .PGM file"
+    return -1
+  endif
+  Getpgmline(f,s)
+  if Strncmp(s,"P2",2)!=0 then
+    change hprogress text="Not a 8-bit grayscale .PGM"
+    goto error
+  endif
+  Getpgmline(f,s)
+  if sscanf(s,"%i %i",&pgmx,&pgmy)!=2 then
+    change hprogress text="Not a 8-bit grayscale .PGM"
+    goto error
+  endif
+  Getpgmline(f,s)
+  if sscanf(s,"%i",&maxcolor)!=1 then
+    change hprogress text="Not a 8-bit grayscale .PGM"
+    goto error
+  endif
+  if pgmx<1 || pgmy<1 || maxcolor<1  then
+    change hprogress text="Not a 8-bit grayscale .PGM"
+    goto error
+  endif
+  if pgmx*pgmy>32000 then
+    change hprogress text="More than 32000 pixel"
+    goto error
+  endif
+  s[0]='\0'; i=0; n=0
+  while n<pgmx*pgmy do
+    while s[i]==' ' || s[i]=='\t' do i++; enddo
+    if s[i]=='\0' then
+      if Getpgmline(f,s)<0 then
+        change hprogress text="Unexpected end of .PGM file"
+        goto error
+      endif
+      i=0; continue
+    endif
+    if Isdigit(s[i])==0 then
+      change hprogress text="Invalid character in .PGM file"
+      goto error
+    endif
+    j=0
+    while Isdigit(s[i]) do
+      j=j*10+s[i]-'0'; i++
+    enddo
+    x=n%pgmx
+    y=n/pgmx
+    if x<PGMX && y<PGMY then
+      pgm[y][x]=j*256/maxcolor
+    endif
+    n++
+  enddo
+  Fclose(f)
+  pgmx=Min(pgmx,PGMX)
+  pgmy=Min(pgmy,PGMY)
+  return 0
+error:
+  Fclose(f)
+  return -1
+end
+
+function int main()
+  int i,j,k,x,y,yq,mode,redraw,move,channel,side,tillum
+  int nexttask,nexecuted,loopcount,startcount
+  float scalex,scaley,angle
+  char s[260]
+  // Get crate features.
+  Getfeatures()
+  if $LAY.software==0xA7 || $LAY.software==0xA8 ||                             \
+    $LAY.software==0xA9 || $LAY.software==0xAA ||                              \
+    ($LAY.config & LC_TYPEMASK)==LC_S1 ||                                      \
+    ($LAY.config & LC_TYPEMASK)==LC_S3 then
+    isstester=1
+  else
+    isstester=0
+  endif
+  // Read settings from the initialization file.
+  head=0; xref=$LAY.xoffset/1000.0; yref=$LAY.yoffset[0]/1000.0
+  sizeindex=2; stepindex=4; loopindex=0; tcontindex=0; randomtest=0
+  zoom=1; quadrants=0x0F
+  getini("Raster","Position","%i,%f,%f,%i,%i,%i,%i,%i,%i,%i",                  \
+    &head,&xref,&yref,&sizeindex,&stepindex,&loopindex,&randomtest,&zoom,      \
+    &tcontindex,&quadrants)
+  if head<0 || head>=$LAY.nfing*2 head=0
+  stroketype=0; optimize=0; braking=0; lowaccel=0
+  if (cratefeatures & CF_STROKEOPT)!=0 then
+    getini("Raster","Stroke","%i,%i,%i,%i",                                    \
+      &stroketype,&optimize,&braking,&lowaccel)
+    if stroketype<0 || stroketype>2 stroketype=0
+    if optimize<0 || optimize>2 optimize=0
+  endif
+  for i=0,i<4,i++ do
+    stroke[i]=4; press[i]=4; height[i]=5; acc[i]=4
+    sprintf(s,"Quadrant[%i]",i)
+    getini("Raster",s,"%i,%i,%i,%i",stroke+i,press+i,height+i,acc+i)
+  enddo
+  for i=0,i<2,i++ do
+    scalex=0.006*512.0                 // In millimeters per 512 pixels
+    scaley=0.006*512.0
+    sprintf(s,"Video scale[%i]",i)
+    getini("System",s,"%f,%f",&scalex,&scaley)
+    mminpixel[i]=(scalex+scaley)/1024.0
+  enddo
+  // Create main window.
+  hmain=control WINDOW
+    window=NULL
+    position=10,10,X2+DC+5,DY+10
+    name=format("针痕测试%s",VERSION)
+    help=" "
+    color=BLACK
+    bkcolor=WHITEBLUE
+    size=1024
+  endc
+  // Create panels.
+  hview=control GRAPH
+    window=hmain
+    position=X0,5,DX,DY
+    help="查看器"
+    color=BLACK
+    bkcolor=WHITE
+  endc
+  hpos=control CHILD
+    window=hmain
+    position=X1,5,DC,260
+    help=" "
+    color=BLACK
+    bkcolor=PINK
+    size=1024
+  endc
+  hvideo=control CHILD
+    window=hmain
+    position=X1,270,DC,158
+    help=" "
+    color=BLACK
+    bkcolor=PINK
+    size=1024
+  endc
+  hstr=control CHILD
+    window=hmain
+    position=X2,5,DC,423
+    help=" "
+    color=BLACK
+    bkcolor=PINK
+    size=1024
+  endc
+  hspec=control CHILD
+    window=hmain
+    position=X1,434,2*DC+5,64
+    color=BLACK
+    bkcolor=PINK
+    size=1024
+  endc
+  hprogress=control PROGRESS
+    window=hmain
+    position=X1-1,503,2*DC+7,18
+    help="测试进度"
+    color=BLACK
+    bkcolor=PINK
+  endc
+  // Create positioning controls.
+  draw window=hpos font=INFOFONT color=BLACK bkcolor=PINK
+  draw at 5,26 text="手臂"
+  hhead=control COMBOLIST
+    window=hpos
+    position=47,6,72,400
+    help="选择测试头做栅格测试"
+    mode=M_VSCROLL
+  endc
+  for i=0,i<$LAY.nfing*2,i++ do
+    add hhead text=format("%i (%i%c)",i,i/2,(i & 1?'R':'L'))
+  enddo
+  change hhead select=head
+  draw at 15,55 text="X="
+  hx=control TEXT
+    window=hpos
+    position=37,38,60,21
+    help="网格中心的X坐标"
+    color=BLACK
+    font=MEDIUMFONT
+  endc
+  draw at 98,55 text="mm"
+  draw at 15,79 text="Y="
+  hy=control TEXT
+    window=hpos
+    position=37,62,60,21
+    help="网格中心的Y坐标"
+    color=BLACK
+    font=MEDIUMFONT
+  endc
+  draw at 98,79 text="mm"
+  hup=control BUTTON
+    window=hpos
+    position=DC/2-17,88,34,34
+    name="上"
+    help="按住可向上移动相机"
+    mode=M_REPEAT
+    font=MEDIUMFONT
+  endc
+  hleft=control BUTTON
+    window=hpos
+    position=DC/2-51,122,34,34
+    name="左"
+    help="按住不放，将相机向上移动"
+    mode=M_REPEAT
+    font=MEDIUMFONT
+  endc
+  hright=control BUTTON
+    window=hpos
+    position=DC/2+17,122,34,34
+    name="右"
+    help="按住不放，将相机向右移动"
+    mode=M_REPEAT
+    font=MEDIUMFONT
+  endc
+  hdown=control BUTTON
+    window=hpos
+    position=DC/2-17,156,34,34
+    name="下"
+    help="按住可向下移动相机"
+    mode=M_REPEAT
+    font=MEDIUMFONT
+  endc
+  draw at 5,220 text="大小"
+  hsize=control COMBOLIST
+    window=hpos
+    position=47,200,72,250
+    help="每个网格1/4区域的点数"
+  endc
+  for i=0,i<NSIZE,i++ do
+    add hsize text=format("%ix%i",gridsize[i],gridsize[i])
+  enddo
+  add hsize text=".PGM"
+  change hsize select=sizeindex
+  draw at 5,248 text="步距"
+  hstep=control COMBOLIST
+    window=hpos
+    position=47,228,52,250
+    help="网格点之间的距离,微米"
+  endc
+  for i=0,i<NSTEP,i++ do
+    add hstep text=format("%i",gridstep[i])
+  enddo
+  change hstep select=stepindex
+  draw at 107,248 text="m"
+  draw show
+  // Create video controls.
+  draw window=hvideo font=INFOFONT color=BLACK bkcolor=PINK
+  draw at 5,22 text="明亮度:"
+  hbrightness=control HSCROLL
+    window=hvideo
+    position=15,24,DC-20,20
+    name="亮度"
+    help="调整图像的亮度"
+    limits=-100,100
+  endc
+  draw at 5,62 text="对比度:"
+  hcontrast=control HSCROLL
+    window=hvideo
+    position=15,64,DC-20,20
+    name="对比度"
+    help="调整图像的对比度"
+    limits=-100,100
+  endc
+  draw at 5,102 text="缩放:"
+  hzoom=control COMBOLIST
+    window=hvideo
+    position=15,104,50,100
+    help="选择缩放比例"
+  endc
+  add hzoom text="x2"
+  add hzoom text="x1"
+  add hzoom text=":2"
+  add hzoom text=":5"
+  change hzoom select=zoom
+  hgrid=control CHECKBOX
+    window=hvideo
+    position=15,134,90,21
+    text="显示栅格"
+    help="选中可以在实时视频上显示叠加"
+    font=INFOFONT
+    mode=M_CHECKED
+  endc
+  draw show
+  // Create stroke and accuracy controls, separate for each quarter.
+  draw window=hstr font=INFOFONT color=BLACK bkcolor=PINK
+  draw at 5,26 text="循环"
+  hloop=control COMBOLIST
+    window=hstr
+    position=47,6,62,250
+    help="循环数"
+  endc
+  for i=0,i<NLOOP,i++ do
+    add hloop text=format("%i",gridloop[i])
+  enddo
+  change hloop select=loopindex
+  draw at 5,52 text="T cont"
+  htcont=control COMBOLIST
+    window=hstr
+    position=47,32,52,250
+    help="接触时间,毫秒"
+  endc
+  for i=0,i<NTCONT,i++ do
+    add htcont text=format("%i",gridtcont[i])
+  enddo
+  change htcont select=tcontindex
+  draw at 107,52 text="ms"
+  hrandom=control CHECKBOX
+    window=hstr
+    position=6,58,110,20
+    text="随机测试"
+    help="选择随机接触栅格点"
+    font=INFOFONT
+    mode=(randomtest?M_CHECKED:0)
+  endc
+  draw at 5,95 text="使用象限:"
+  draw at 5,152 text="击测,mm/s:"
+  draw at 5,152+70 text="压力单位:"
+  draw at 5,152+140 text="高度,mm:"
+  draw at 5,152+210 text="精度,um:"
+  for i=0,i<4,i++ do
+    if i==0 then
+      x=0;  y=0;  yq=0;  Strcpy(s,"first (top left)")
+    else if i==1 then
+      x=58; y=0;  yq=0;  Strcpy(s,"second (top right)")
+    else if i==2 then
+      x=0;  y=26; yq=20; Strcpy(s,"third (bottom left)")
+    else
+      x=58; y=26; yq=20; Strcpy(s,"fourth (bottom right)")
+    endif
+    huse[i]=control CHECKBOX
+      window=hstr
+      position=15+x,97+yq,50,18
+      text=format("Q %i",i+1)
+      help=format("选中以使用%s象限",s)
+      font=INFOFONT
+      mode=(quadrants & (1<<i)?M_CHECKED:0)
+    endc
+    hstroke[i]=control COMBOLIST
+      window=hstr
+      position=15+x,154+y,50,250
+      help=format("击测，mm/s，用于%s季度",s)
+    endc
+    for j=0,j<NSTROKE,j++ do
+      add hstroke[i] text=format("%i",gridstroke[j])
+    enddo
+    change hstroke[i] select=stroke[i]
+    hpress[i]=control COMBOLIST
+      window=hstr
+      position=15+x,224+y,50,250
+      help=format("压力，单位，用于%s季度",s)
+    endc
+    for j=0,j<NPRESS,j++ do
+      add hpress[i] text=format("%i",gridpress[j])
+    enddo
+    change hpress[i] select=press[i]
+    hheight[i]=control COMBOLIST
+      window=hstr
+      position=15+x,294+y,50,250
+      help=format("高度，mm，用于%s季度",s)
+    endc
+    for j=0,j<NHEIGHT,j++ do
+      add hheight[i] text=format("%.2g",gridheight[j])
+    enddo
+    change hheight[i] select=height[i]
+    hacc[i]=control COMBOLIST
+      window=hstr
+      position=15+x,364+y,50,250
+      help=format("Accuracy, m, used in the %s quarter",s)
+    endc
+    for j=0,j<NACC,j++ do
+      add hacc[i] text=format("%i",(isstester?gridaccs[j]:gridacca[j]))
+    enddo
+    change hacc[i] select=acc[i]
+  enddo
+  draw show
+  // Create special stroke controls.
+  draw window=hspec color=BLACK font=INFOFONT
+  draw at 5,26 text="击测:"
+  hstroketype=control COMBOLIST
+    window=hspec
+    position=53,6,100,200
+    help="Select stroke, overwrites settings in layout"
+    mode=M_VSCROLL
+  endc
+  add hstroketype text="布局"
+  add hstroketype text="Standard"
+  add hstroketype text="Soft land"
+  change hstroketype select=stroketype
+  draw at 5,54 text="Opt:"
+  hoptimize=control COMBOLIST
+    window=hspec
+    position=53,34,100,200
+    help="Select movement optimization"
+    mode=M_VSCROLL
+  endc
+  add hoptimize text="布局"
+  add hoptimize text="None"
+  add hoptimize text="Aggressive"
+  change hoptimize select=optimize
+  hbraking=control CHECKBOX
+    window=hspec
+    position=167,3,94,19
+    name="长制动"
+    help="Check to activate prolongated Z braking"
+    font=INFOFONT
+    mode=(braking?M_CHECKED:0)
+  endc
+  hlowaccel=control CHECKBOX
+    window=hspec
+    position=167,23,94,19
+    name="低Z加速"
+    help="Check to activate lowered Z acceleration"
+    font=INFOFONT
+    mode=(lowaccel?M_CHECKED:0)
+  endc
+  if (cratefeatures & CF_STROKEOPT)==0 then
+    disable hstroketype
+    disable hoptimize
+    disable hbraking
+    disable hlowaccel
+  endif
+  draw show
+  // Create main buttons.
+  hselect=control BUTTON
+    window=hmain
+    position=X1-1,DY-19-26,DC+1,24
+    name="选择位置"
+    help="Press to select position for the next test"
+  endc
+  hstart=control BUTTON
+    window=hmain
+    position=X1-1,DY-18,DC+1,24
+    name="开始测试"
+    help="Press to start new test"
+  endc
+  hstop=control BUTTON
+    window=hmain
+    position=X2,DY-19-26,DC+1,24
+    name="停止测试"
+    help="Press to interrupt running test"
+  endc
+  hexit=control BUTTON
+    window=hmain
+    position=X2,DY-18,DC+1,24
+    name="退出"
+    help="Press to finish raster test"
+  endc
+  // Main loop.
+  mode=0; Controls(mode)
+  move=1; redraw=1
+  while 1 do
+    if Pressed(hhead) then
+      head=Status(hhead); redraw=1; move=1
+    else if Pressed(hup) then
+      yref=yref+0.2/gridzoom[zoom]*(Status(hup)+1); move=1
+    else if Pressed(hleft) then
+      xref=xref-0.2/gridzoom[zoom]*(Status(hleft)+1); move=1
+    else if Pressed(hright) then
+      xref=xref+0.2/gridzoom[zoom]*(Status(hright)+1); move=1
+    else if Pressed(hdown) then
+      yref=yref-0.2/gridzoom[zoom]*(Status(hdown)+1); move=1
+    else if Pressed(hbrightness) then
+      redraw=1
+    else if Pressed(hcontrast) then
+      redraw=1
+    else if Pressed(hzoom) then
+      zoom=Status(hzoom); redraw=1
+    else if Pressed(hgrid) then
+      redraw=1
+    else if Pressed(hsize) then
+      sizeindex=Status(hsize); redraw=1
+    else if Pressed(hstep) then
+      stepindex=Status(hstep); redraw=1
+    else if Pressed(hloop) then
+      loopindex=Status(hloop)
+    else if Pressed(htcont) then
+      tcontindex=Status(htcont)
+    else if Pressed(hrandom) then
+      randomtest=Status(hrandom)
+    else if Pressed(hstroketype) then
+      stroketype=Status(hstroketype)
+    else if Pressed(hoptimize) then
+      optimize=Status(hoptimize)
+      Controls(mode)
+    else if Pressed(hbraking) then
+      braking=Status(hbraking)
+    else if Pressed(hlowaccel) then
+      lowaccel=Status(hlowaccel)
+    else if Pressed(hselect) then
+      if sizeindex==NSIZE then
+        // Request to draw .PGM bitmap, load it from file.
+        Strcpy(s,"atg.pgm")
+        if SYS.Browse(hmain,s,"Select .PGM bitmap",0)==0 continue
+        if Readpgm(s)!=0 continue
+      endif
+      change hprogress color=BLACK
+      change hprogress bkcolor=PINK
+      change hprogress limits=0,0
+      change hprogress text=""
+      SYS.Killimm(16); $A[16].length=1
+      mode=1; tillum=0; Controls(mode); move=1; redraw=1
+    else if Pressed(hstart) then
+      // If necessary and possible, set special stroke parameters.
+      if Setstrokeoptions(1)!=0 then
+        change hprogress color=LIGHTRED
+        change hprogress bkcolor=YELLOW
+        change hprogress limits=0,0
+        change hprogress text="Unable to set stroke options"
+        mode=0; Controls(mode)
+        continue
+      endif
+      sprintf(s,"M %i(Z) NOP",head^1)
+      SERV.Cmdimm(16,s)
+      Createtask()
+      for i=0,i<16,i++ do
+        SYS.Killimm(i); $A[i].length=1
+      enddo
+      nexttask=0
+      loopcount=gridloop[Status(hloop)]
+      startcount=loopcount
+      change hprogress bkcolor=WHITE
+      change hprogress limits=0,ntask*loopcount
+      mode=2; Controls(mode); move=0; redraw=1
+    else if Pressed(hstop) then
+      change hprogress bkcolor=PINK
+      change hprogress limits=0,0
+      mode=0; Controls(mode); redraw=1
+    else if Pressed(hexit) then
+      break
+    endif
+    for i=0,i<4,i++ do
+      if Pressed(huse[i]) then
+        if Status(huse[i]) then
+          quadrants=quadrants|(1<<i)
+        else
+          quadrants=quadrants & (~(1<<i))
+        endif
+        redraw=1
+        Controls(mode)
+      else if Pressed(hstroke[i]) then
+        stroke[i]=Status(hstroke[i])
+      else if Pressed(hpress[i]) then
+        press[i]=Status(hpress[i])
+      else if Pressed(hheight[i]) then
+        height[i]=Status(hheight[i])
+      else if Pressed(hacc[i]) then
+        acc[i]=Status(hacc[i])
+      endif
+    enddo
+    side=($LAY.side[head/2]!=0)
+    if $LAY.cameras!=0 || $LAY.headcameras==0 then
+      if mode==1 && Time()-tillum>2000 then
+        // Keep lights on selected camera on.
+        sprintf(s,"OUTPORT %i,%i",0x2004+side,1)
+        SERV.Cmdimm(17,s)
+        tillum=Time()
+      endif
+      if mode==1 && move!=0 && $A[16].length!=0 then
+        // Move video camera to specified point.
+        xref=Max(($LAY.leftlimit+$LAY.videodeadx)/1000.0,xref)
+        xref=Min(xref,$LAY.rightlimit/1000.0-13.0)
+        yref=Max($LAY.bottom[head/2]/1000.0+13.0,yref)
+        yref=Min(yref,$LAY.top[head/2]/1000.0-13.0)
+        sprintf(s,"M %i(%g,%g) NOP",$LAY.nfing*2+side,xref,yref)
+        SERV.Cmdimm(16,s)
+        change hx text=format("%6.3f",xref)
+        change hy text=format("%6.3f",yref)
+        move=0
+      endif
+    else
+      if mode==1 && move!=0 && $A[16].length!=0 then
+        // Move head camera to specified point (and all other heads into the
+        // home position).
+        xref=Max($LAY.leftlimit/1000.0+13.0,xref)
+        xref=Min(xref,$LAY.rightlimit/1000.0-13.0)
+        yref=Max($LAY.bottom[head/2]/1000.0+13.0,yref)
+        yref=Min(yref,$LAY.top[head/2]/1000.0-13.0)
+        k=Camerafromyside(yref,&channel,side,&angle)
+        for i=0,i<$LAY.nfing*2,i++ do
+          if ($LAY.headcameras & (1<<i))==0 continue
+          if i==k then
+            sprintf(s,"M @%i[%g,%g] NOP",k,xref,yref)
+            SERV.Cmdimm(16,s)
+            sprintf(s,"OUTPORT32 HEAD(%i) 0x80000002,3",k)
+            SERV.Cmdimm(17,s)
+          else
+            sprintf(s,"M %i(Z) NOP",i)
+            SERV.Cmdimm(17,s)
+            sprintf(s,"OUTPORT32 HEAD(%i) 0x80000002,0",i)
+            SERV.Cmdimm(17,s)
+          endif
+        enddo
+        change hx text=format("%6.3f",xref)
+        change hy text=format("%6.3f",yref)
+        move=0
+        redraw=1
+      endif
+    endif
+    if mode==2 then
+      // Try to post next movement.
+      if loopcount>0 then
+        for i=0,i<16,i++ do
+          if $A[i].length!=0 break
+        enddo
+        if i<16 then
+          // In random test, each loop must be random.
+          if nexttask==0 && randomtest then
+            for j=0,j<ntask,j++ do
+              k=Random(ntask)
+              Strcpy(s,task[j])
+              Strcpy(task[j],task[k])
+              Strcpy(task[k],s)
+            enddo
+          endif
+          SERV.Cmdimm(i,task[nexttask])
+          nexttask++
+          if nexttask>=ntask then
+            nexttask=0
+            loopcount--
+          endif
+          nexecuted=Max(0,(startcount-loopcount)*ntask+nexttask-16)
+          change hprogress limits=nexecuted,ntask*startcount
+        endif
+      else
+        nexecuted=startcount*ntask-16
+        for i=0,i<16,i++ do
+          if $A[i].length!=0 nexecuted++
+        enddo
+        if nexecuted==ntask*startcount then
+          // All answers are back.
+          sprintf(s,"M %i(Z) NOP",head)
+          SERV.Cmdimm(17,s)
+          change hprogress bkcolor=PINK
+          change hprogress limits=0,0
+          mode=0; Controls(mode); redraw=1
+        else
+          change hprogress limits=nexecuted,ntask*startcount
+        endif
+      endif
+    endif
+    if redraw then
+      // Redraw viewer and start or stop live video.
+      change hx text=format("%6.3f",xref)
+      change hy text=format("%6.3f",yref)
+      Redraw(mode==1,Status(hgrid))
+      redraw=0
+    endif
+    wait
+  enddo
+  Setstrokeoptions(0)                  // Leave everything unchanged
+  if sizeindex==NSIZE sizeindex=2
+  setini("Raster","Position","%i,%f,%f,%i,%i,%i,%i,%i,%i,%i",                  \
+    head,xref,yref,sizeindex,stepindex,loopindex,randomtest,zoom,              \
+    tcontindex,quadrants)
+  setini("Raster","Stroke","%i,%i,%i,%i",                                      \
+    stroketype,optimize,braking,lowaccel)
+  for i=0,i<4,i++ do
+    sprintf(s,"Quadrant[%i]",i)
+    setini("Raster",s,"%i,%i,%i,%i",stroke[i],press[i],height[i],acc[i])
+  enddo
+  SYS.Softreset(0)
+end
+

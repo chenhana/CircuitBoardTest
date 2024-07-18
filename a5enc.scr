@@ -1,0 +1,2080 @@
+#include "ls.icl"
+#include "or.icl"
+#include "pa.icl"                  // Rich Text Format extentions
+#cmdbuff 17                            // 16+1 answer buffers
+#zeroid                                // Process answers with zero command ID
+
+#define VERSION        "1.01"          // Version of encoder self-test
+#define DESCRIPTION    "Encoder self-test"
+
+// 1.01: Protocolling to RTF file.
+
+#bitmap "bkground"<"aluminum.bmp"      // Alternative: "pcb1.bmp"
+
+//TODO: close all oscilloscope windows!
+
+// A7: 10000 INERRUPTS PER SECOND!
+
+
+#define MAINX          600
+#define MAINY          400
+#define SPLIT          330
+#define SERVY          25
+#define LEFTX          320             // (SPLIT-10)
+#define LEFTY          365             // (MAINY-SERVY-10)
+#define RIGHTX         265             // (MAINX-SPLIT-5)
+#define RIGHTY         335             // (MAINY-SERVY-SERVY-15)
+#define BTNY           290             // Y position of right buttons
+#define GRAPHX         LEFTX           // Width of data display window
+#define GRAPHY         285             // (LEFTY-80)
+
+#define OSCCOUNT       4096            // Max number of points in oscillogramm
+#define NPULSE         127             // Number of points in phase test
+#define NCIRCLE        100             // Number of points in phase circle
+#define NVECT          255             // Number of points in stability test
+
+// Available oscilloscope channels.
+#define OSC_NULL       0               // Always 0 (channel inactive)
+#define OSC_X          1               // X coordinate, um
+#define OSC_Y          2               // Y coordinate, um
+#define OSC_Z          3               // Z coordinate, um
+#define OSC_XEXP       4               // Expected X coordinate, um
+#define OSC_YEXP       5               // Expected Y coordinate, um
+#define OSC_ZEXP       6               // Expected Z coordinate, um
+#define OSC_XV         7               // X velocity, mm/s
+#define OSC_YV         8               // Y velocity, mm/s
+#define OSC_ZV         9               // Z velocity, mm/s
+#define OSC_XENCA      10              // X encoder phase A, ADC bits
+#define OSC_XENCB      11              // X encoder phase B, ADC bits
+#define OSC_XENC0      12              // X encoder zero pulse, ADC bits
+#define OSC_YENCA      13              // Y encoder phase A, ADC bits
+#define OSC_YENCB      14              // Y encoder phase B, ADC bits
+#define OSC_YENC0      15              // Y encoder zero pulse, ADC bits
+#define OSC_ZPOTI      16              // Raw Z coordinate, ADC bits
+#define OSC_ZDMS       17              // DMS signal, ADC bits
+#define OSC_ZENCA      18              // Z encoder phase A, ADC bits
+#define OSC_ZENCB      19              // Z encoder phase B, ADC bits
+#define OSC_ZENC0      20              // Z encoder zero pulse, ADC bits
+#define OSC_GROUND     21              // Ground voltage
+#define OSC_ZPOTI2     22              // Raw Z (second time), ADC bits
+#define OSC_ZVOLT      23              // Z DC motor voltage, DAC bits
+#define OSC_DEBUG1     24              // Debugging channel 1
+#define OSC_DEBUG2     25              // Debugging channel 2
+#define OSC_RT1        26              // Oscilloscope data 1 from RT driver
+#define OSC_RT2        27              // Oscilloscope data 2 from RT driver
+#define OSC_RT3        28              // Oscilloscope data 3 from RT driver
+#define OSC_ZSURF      29              // Z surface, micrometers
+#define OSC_XREG       30              // Output of X regulator, um
+#define OSC_YREG       31              // Output of Y regulator, um
+#define OSC_XCNT       32              // X counter, um
+#define OSC_YCNT       33              // Y counter, um
+#define OSC_XREL       34              // X coordinate relative to 0 pulse, um
+#define OSC_YREL       35              // Y coordinate relative to 0 pulse, um
+
+// Types of available tests and displays.
+#define A_FULL         0x40000000      // Full X-Y test
+#define A_XNOISE       0x20000000      // Test X encoder noise
+#define A_XPHAS        0x10000000      // Test X phases near zero pulse
+#define A_XCIRC        0x08000000      // Test X phases near zero pulse
+#define A_XAMPL        0x04000000      // Test X encoder amplitude
+#define A_XSTAB        0x02000000      // Test X encoder stability
+#define A_XWHEEL       0x01000000      // Test X toothwheel
+#define A_XBELT        0x00800000      // Test X belt tension
+#define A_XLOST        0x00400000      // Test X lost phases
+#define A_YNOISE       0x00002000      // Test Y encoder noise
+#define A_YPHAS        0x00001000      // Test Y phases near zero pulse
+#define A_YCIRC        0x00000800      // Test Y phases near zero pulse
+#define A_YAMPL        0x00000400      // Test Y encoder amplitude
+#define A_YSTAB        0x00000200      // Test Y encoder stability
+#define A_YLOST        0x00000040      // Test Y lost phases (camera only)
+
+typedef struct t_data                  // Data gathered per axis
+  int            valid                 // Set of bits A_xxx
+  // Noise measurements, valid when bit A_XNOISE/A_YNOISE is set.
+  float          noisea                // Noise of phase A (sigma)
+  float          noiseamax             // Noise of phase A (max amplitude)
+  float          noiseb                // Noise of phase B (sigma)
+  float          noisebmax             // Noise of phase B (max amplitude)
+  float          noisez                // Noise of zero pulse (sigma)
+  float          noisezmax             // Noise of zero pulse (max amplitude)
+  float          noiseg                // Noise of ground signal (sigma)
+  float          noisegmax             // Noise of ground signal (max amplitude)
+  // Phase measurements in the vicinity of zero pulse.
+  float          pstart                // Coordinate of initial point, um
+  float          pstep                 // Step between points, um
+  float          pa[NPULSE]            // Phase A, bits
+  float          pb[NPULSE]            // Phase B, bits
+  float          pz[NPULSE]            // Zero pulse, bits
+  // Phase circle.
+  float          circlea[NCIRCLE]      // Phase A, bits
+  float          circleb[NCIRCLE]      // Phase B, bits
+  // Variables shared by amplitude and stability measurements.
+  float          vstart                // Coordinate of initial point, mm
+  float          vstep                 // Step between points, mm
+  float          nvstep                // Number of used steps
+  // Amplitude measurements, valid when bit A_XAMPL/A_YAMPL is set.
+  float          amin[NVECT]           // Minimal amplitude of phase A, sigbits
+  float          amax[NVECT]           // Maximal amplitude of phase A, sigbits
+  float          bmin[NVECT]           // Minimal amplitude of phase B, sigbits
+  float          bmax[NVECT]           // Maximal amplitude of phase B, sigbits
+  float          zmin[NVECT]           // Minimal amplitude of 0 pulse, sigbits
+  float          zmax[NVECT]           // Maximal amplitude of 0 pulse, sigbits
+  // Stability measurements, valid when bit A_XSTAB/A_YSTAB is set.
+  float          vectmin[NVECT]        // Minimal phase vector length
+  float          vectmax[NVECT]        // Maximal phase vector length
+ends
+
+handle           hmain                 // Main window
+handle           hleft                 // Left pane
+handle           hright                // Right pane
+handle           hserv                 // Auxiliary placeholder for progress bar
+handle           hinfo                 // Progress bar
+handle           hexit                 // Close button
+char             protname[260]         // Name of protocol file
+
+int              testall               // Test all heads at once
+int              testhead              // Selected head or camera
+int              testlist              // Set of tests, A_xxx
+int              actualhead            // Head or camera under test
+
+int              osccount              // Requested number of points
+int              noscdata[4]           // Oscillogramm point counters
+float            osci[4][OSCCOUNT]     // Gathered oscillogramms
+
+struct t_data    data[18][2]           // Data per head and axis
+
+external int Checkdisplay()            // Pre-declaration
+
+
+////////////////////////////////////////////////////////////////////////////////
+///////////////////////////// INTERRUPT PROCESSING /////////////////////////////
+
+// Interrupt function that receives encoder errors and gathers oscilloscopic
+// data.
+function int Answerproc(char *answer,int info)
+  int i,n,ch,ofs
+  if answer[4]==S_TEST && answer[5]==0x03 && $uint2(answer+2)==0 &&            \
+    answer[6]==actualhead then
+    // Next portion of the oscillogramm. I expect that pieces are consecutive.
+    ch=answer[7]; if ch>=4 return      // Channel, check whether valid
+    ofs=$uint2(answer+10)              // Offset of first data point
+    n=$uint2(answer+12)                // Number of data points
+    if ofs!=noscdata[ch] return        // Non-consecutive data
+    if ofs+n>osccount return           // Invalid data
+    for i=0,i<n,i++ do
+      osci[ch][ofs+i]=$float4(answer+14+i*4)
+    enddo
+    noscdata[ch]=ofs+n
+  endif
+end
+
+
+////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////// STATISTICS //////////////////////////////////
+
+// Initializes statistics in array disp[5].
+function int Initsigma(float disp[])
+  disp[0]=0.0
+  disp[1]=0.0
+  disp[2]=0.0
+  disp[3]=0.0
+  disp[4]=0.0
+end
+
+// Adds next measured value to array disp[5] which accumulates data necessary
+// to calculate normal dispersion, mean, minimal and maximal.
+function int Addsigma(float disp[],float value)
+  if disp[0]<=0.0 then
+    disp[0]=1.0                        // First point, data is still undefined
+    disp[1]=value
+    disp[2]=value*value
+    disp[3]=value
+    disp[4]=value
+  else
+    disp[0]=disp[0]+1.0
+    disp[1]=disp[1]+value
+    disp[2]=disp[2]+value*value
+    disp[3]=Min(disp[3],value)
+    disp[4]=Max(disp[4],value)
+  endif
+end
+
+// Returns number of data items gathered by Addsigma().
+function int Getcount(float disp[])
+  return disp[0]
+end
+
+// Clculates mean value based on data gathered by Addsigma().
+function float Getmean(float disp[])
+  if disp[0]<1.0 then
+    return 0.0
+  else
+    return disp[1]/disp[0]
+  endif
+end
+
+// Calculates minimal value based on data gathered by Addsigma().
+function float Getmin(float disp[])
+  return disp[3]
+end
+
+// Calculates minimal value based on data gathered by Addsigma().
+function float Getmax(float disp[])
+  return disp[4]
+end
+
+// Calculates normal dispersion based on data gathered by Addsigma().
+function float Getsigma(float disp[])
+  float r
+  if disp[0]<2.0 then
+    return 0.0
+  else
+    r=(disp[0]*disp[2]-disp[1]*disp[1])/disp[0]/(disp[0]-1.0)
+    if r<=0 then                       // Possible due to rounding errors
+      return 0.0
+    else
+      return Sqrt(r)
+    endif
+  endif
+end
+
+
+////////////////////////////////////////////////////////////////////////////////
+////////////////////////////// SERVICE FUNCTIONS ///////////////////////////////
+
+// Service function, enables or disables control h.
+function int Setenable(handle h,int state)
+  if state then
+    enable h
+  else
+    disable h
+  endif
+end
+
+// Service function, enables or disables bits in testlist according to checkbox.
+function int Setlist(handle h,int bits)
+  if Status(h) then
+    testlist=testlist | bits
+  else
+    testlist=testlist & (~bits)
+  endif
+end
+
+// Service function, generates name of encoder.
+function int Encodername(char *name,int head,int axis)
+  if head>=$LAY.nfing*2 then
+    sprintf(name,"%s_%s",head & 1?"VTop":"VBot",axis==0?"X":"Y")
+  else
+    sprintf(name,"%i%c_%s",head/2,head & 1?'R':'L',axis==0?"X":"Y")
+  endif
+end
+
+// Service function, sets drawing color depending on the specified limit.
+function int Setcolor(float value,float limit)
+  if Abs(value)<=0.7*limit then
+    draw color=BLACK
+  else if Abs(value)<=limit then
+    draw color=RED
+  else
+    draw color=LIGHTRED
+  endif
+end
+
+// Service function, displays error message. Returns 0 on confirmation and -1
+// if user pressed Close button.
+function int Error(char *title,format s)
+  handle hok
+  clear hright
+  change hinfo limits=0,0
+  change hinfo color=LIGHTRED
+  change hinfo text=title
+  draw window=hright font=TIMESFONT
+  draw color=BLACK at 6,30 wrap=RIGHTX-5 text=s
+  draw show
+  hok=control BUTTON
+    window=hright
+    position=RIGHTX/2-(RIGHTX-30)/4,BTNY,(RIGHTX-30)/2,24
+    text="确定"
+    help="按下确认错误"
+  endc
+  while 1 do
+    if Pressed(hexit) then
+      return -1
+    else if Pressed(hok) then
+      clear hright
+      change hinfo color=BLACK
+      change hinfo text="稍等..."
+      return 0
+    endif
+    Checkdisplay()                     // Replaces wait
+  enddo
+end
+
+// Service function, sets debug mode for heads and cameras. Returns 0 on
+// success, 1 on error and -1 if user interrupted the test.
+function int Setdebugmode(int debugmode,int videomode,int disabledrails)
+  int t
+  char buf[32]
+  // Send command.
+  SYS.Killimm(16)
+  buf[0]=S_DEBUG
+  buf[1]=0x01                          // Set debugging mode
+  $uint2(buf+2)=debugmode|$GLOBAL.debugmode
+  $uint2(buf+4)=disabledrails|$GLOBAL.disabledrails
+  $uint2(buf+6)=videomode|$GLOBAL.videomode
+  SYS.Sendimm(16,8,buf)
+  // Wait for answer.
+  t=Time()
+  while $A[16].length==0 do
+    if Time()-t>2000 then              // Timeout!
+      Error("Timeout!","Script is unable to set debugging mode. Tester does "  \
+        "not answer.")
+      return 1
+    else if Pressed(hexit) then        // User interrupted the test
+      return -1
+    endif
+    Checkdisplay()                     // Replaces wait
+  enddo
+  if $A[16].answer!=S_DEBUG then       // Error detected
+      Error("Error!","Script is unable to set debugging mode. Tester "         \
+        "returns unexpected answer. Please check that tester is loaded.")
+    return 1
+  endif
+end
+
+// Starts oscillogramm with specified trigger and number of points. Returns
+// 0 on success, 1 if command cannot be executed and -1 if user intrerupted the
+// test.
+function int Startosci(int cnt,int onmove,int src1,int src2,int src3,int src4)
+  int i,t
+  char buf[32]
+  SYS.Killimm(16)
+  osccount=Max(1,Min(cnt,OSCCOUNT))
+  // Clear oscillogramm buffers.
+  for i=0,i<4,i++ do
+    noscdata[i]=0
+  enddo
+  // Start oscillogramm.
+  buf[0]=S_TEST
+  buf[1]=0x03                          // Setup A5 oscilloscope
+  buf[2]=actualhead                    // Head
+  buf[3]=(onmove?8:1)                  // Trigger (on move or manual)
+  $uint2(buf+4)=1                      // No compression
+  $uint2(buf+6)=osccount               // Length of protocol
+  buf[8]=src1                          // Data source for channel 1
+  buf[9]=src2                          // Data source for channel 2
+  buf[10]=src3                         // Data source for channel 3
+  buf[11]=src4                         // Data source for channel 4
+  SYS.Sendimm(16,12,buf)
+  // Wait for confirmation that command is accepted (not the oscillogramm!)
+  t=Time()
+  while $A[16].length==0 do
+    if Time()-t>2000 then              // Timeout!
+      Error("Timeout!","Script is unable to get movement oscillogramm from "   \
+        "the tester. Please check that tester is loaded.")
+      return 1
+    else if Pressed(hexit) then        // User interrupted the test
+      return -1
+    endif
+    Checkdisplay()                     // Replaces wait
+  enddo
+  if $A[16].answer!=S_TEST || $A[16].subcmd!=0x03 then
+    Error("Error!","On attempt to get movement oscillogramm, tester returned " \
+      "unexpected answer. Please check that tester is loaded.")
+    return 1
+  endif
+end
+
+// Waits for complete oscillogramm. Returns 0 on success, 1 if oscillogramm
+// is not available and -1 if user interrupted the test. Data is returned in
+// global array osci[].
+function int Waitosci(int src1,int src2,int src3,int src4)
+  int t
+  // Compression x1 means that maximal duration of test does not exceed
+  // count/5 milliseconds - not more than 800 ms. I set timeout to 2 s.
+  t=Time()
+  while Time()-t<2000 do
+    if Pressed(hexit) return -1        // User interrupted the test
+    Checkdisplay()                     // Replaces wait
+    if src1>0 && noscdata[0]<osccount continue
+    if src2>0 && noscdata[1]<osccount continue
+    if src3>0 && noscdata[2]<osccount continue
+    if src4>0 && noscdata[3]<osccount continue
+    return 0                           // Data gathered
+  enddo
+  Error("Error!","Script is unable to get movement oscillogramm from the "     \
+    "tester. Please check that tester is loaded.")
+  return 1                             // Timeout!
+end
+
+// Gets instant oscillogramm (manual trigger) from speciiled sources (0 to turn
+// channel off) of cnt data points (sampled at 200 us intervals). Returns 0
+// on success, 1 if oscillogramm is not available and -1 if user interrupted
+// the test. Data is returned in global array osci[].
+function int Getoscillogramm(int cnt,int src1,int src2,int src3,int src4)
+  int err
+  // Start oscilloscope. Note that controller is unable to gather several
+  // oscillogrammes at once.
+  err=Startosci(cnt,0,src1,src2,src3,src4)
+  if err!=0 return err
+  // Wait for oscillogramm.
+  return Waitosci(src1,src2,src3,src4)
+end
+
+// Service function, reads actual X-Y head and camera velocities from the
+// crate in meters per second. Returns 0 on success, 1 on erorr and -1 if user
+// interrupted the test.
+function int Getspeed(float *vxhead,float *vyhead,float *vxcam,float *vycam)
+  int t
+  char buf[128]
+  // Send command.
+  SYS.Killimm(16)
+  buf[0]=S_DEBUG
+  buf[1]=0x23                          // Query original movement parameters
+  SYS.Sendimm(16,2,buf)
+  // Wait for answer.
+  t=Time()
+  while $A[16].length==0 do
+    if Pressed(hexit) return -1
+    if Time()-t>2000 then
+      Error("Timeout!","Script is unable to get original head velocites and "  \
+        "accelerations. Please check that tester is loaded.")
+      return 1
+    endif
+    Checkdisplay()                     // Replaces wait
+  enddo
+  if $A[16].answer!=S_READY then
+    Error("Error!","Script is unable to get original head velocities and "     \
+      "accelerations. Please check that tester is loaded.")
+    return 1
+  endif
+  // Extract data.
+  vxhead[0]=$float4($A[16]+9)
+  vyhead[0]=$float4($A[16]+9+16)
+  vxcam[0] =$float4($A[16]+9+32)
+  vycam[0] =$float4($A[16]+9+48)
+end
+
+// Service function, sets new X-Y head and camera velocities (meters per
+// second). To restore original parameters, set corresponding items to zero.
+// Returns 0 on success, 1 on erorr and -1 if user interrupted the test.
+function int Setspeed(float vxhead,float vyhead,float vxcam,float vycam)
+  int t
+  char buf[128]
+  // Send command.
+  SYS.Killimm(16)
+  Memset(buf,0,66)
+  buf[0]=S_DEBUG
+  buf[1]=0x24                          // Set movement parameters
+  $float4(buf+6   )=vxhead
+  $float4(buf+6+16)=vyhead
+  $float4(buf+6+32)=vxcam
+  $float4(buf+6+48)=vycam
+  SYS.Sendimm(16,66,buf)
+  // Wait for answer.
+  t=Time()
+  while $A[16].length==0 do
+    if Pressed(hexit) return -1
+    if Time()-t>5000 then
+      Error("Timeout!","Script is unable to set head velocites and "           \
+        "accelerations. Please check that tester is loaded.")
+      return 1
+    endif
+    Checkdisplay()                     // Replaces wait
+  enddo
+  if $A[16].answer!=S_DEBUG then
+    Error("Error!","Script is unable to set head velocities and "              \
+      "accelerations. Please check that tester is loaded.")
+    return 1
+  endif
+end
+
+// Service function, reads 24 items from specified statistics page and then
+// resets it. Returns 0 on success, 1 on error and -1 if user interrupted the
+// test.
+function int Getstatpage(int head,int page,int stat[])
+  int t
+  char buf[32]
+  // Send command.
+  SYS.Killimm(16)
+  buf[0]=S_DEBUG
+  buf[1]=0x2F                          // Statistical data
+  buf[2]=head                          // Controller
+  buf[3]=1                             // Reset statistics after reading
+  $int2(buf+4)=page                    // Page
+  $int4(buf+6)=0                       // Reserved
+  SYS.Sendimm(16,10,buf)
+  // Wait for answer. Answer must be quick, or erse we may loose information.
+  t=Time()
+  while $A[16].length==0 do
+    if Pressed(hexit) return -1
+    if Time()-t>1000 then
+      Error("Timeout!","Script is unable to read movement statistics. Please " \
+        "check that tester is loaded.")
+      return 1
+    endif
+    Checkdisplay()                     // Replaces wait
+  enddo
+  if $A[16].answer!=S_DEBUG then
+    Error("Error!","Script is unable to read movement statistics. Please "     \
+      "check that tester is loaded.")
+    return 1
+  endif
+  // Extract 24 data items.
+  Memcpy(stat,$A[16]+5,24*4)
+end
+
+// Service function, moves head and opposite (all heads if -1) into the home
+// position. Returns 0 on success, 1 on error and -1 if user interrupted test.
+function int Movehome(int head)
+  int i,n,t,nhead
+  char s[512]
+  nhead=$LAY.nfing*2
+  // Send command.
+  SYS.Killimm(16)
+  if head<0 then
+    n=sprintf(s,"M")
+    for i=0,i<nhead,i++ do
+      if $LAY.excludedrails & (1<<(i/2)) continue
+      n=n+sprintf(s+n," %i(Z)",i)
+    enddo
+    sprintf(s+n," NOP")
+  else if head<$LAY.nfing*2 then
+    sprintf(s,"M %i(Z) %i(Z) NOP",head,head^1)
+  else
+    sprintf(s,"M %i(Z) NOP",head)
+  endif
+  SERV.Cmdimm(16,s)
+  // Wait for answer.
+  t=Time()
+  while $A[16].length==0 do
+    if Pressed(hexit) return -1
+    if Time()-t>5000 then
+      Error("Timeout!","Script is unable to move heads in home position. "     \
+        "Please check that tester is loaded.")
+      return 1
+    endif
+    Checkdisplay()                     // Replaces wait
+  enddo
+  if $A[16].answer!=S_READY then
+    Error("Error!","Script is unable to move heads in home position. Please "  \
+      "check that tester is loaded and that the state of the shuttle allows "  \
+      "movements.")
+    return 1
+  endif
+end
+
+
+////////////////////////////////////////////////////////////////////////////////
+///////////////////////// DISPLAYING OF GATHERED DATA //////////////////////////
+
+handle           hgraph                // Graph window
+handle           hhead                 // Head selector
+handle           hnext                 // Button Next
+handle           hreset                // Button Reset
+handle           hprotocol             // Button Protocol
+handle           hxnoise,hynoise       // Noise buttons
+handle           hxphas,hyphas         // Phase buttons (linear)
+handle           hxcirc,hycirc         // Phase buttons (circle)
+handle           hxampl,hyampl         // Amplitude buttons
+handle           hxstab,hystab         // Stability buttons
+handle           hxwheel               // X wheel button
+handle           hxbelt                // X belt tension
+handle           hxlost,hylost         // Lost phase buttons
+
+int              showhead              // Head to display
+int              showmode              // Data to display, one of A_xxx
+
+// Variables used by graph plotter.
+float            xscale                // X plot scale, pixels/unit
+float            xoffs                 // X plot offset, pixels
+float            yscale                // Y plot scale, pixels/unit
+float            yoffs                 // Y plot offset, pixels
+int              xcenter               // Center of the graph, pixels
+
+// Prepares X-Y plot in the specified rectangle.
+function int Drawaxes(int x0,int y0,int x1,int y1,                             \
+  float xmin,float xmax,float ymin,float ymax,char *xlegend,char *ylegend)
+  int x,y,xa,ya,dl,dr,dt,db
+  float d,r,step
+  // Set borders, in pixels.
+  dl=40; dr=10; dt=10; db=20
+  // Calculate scales. Screen coordinates can be obtained from the data
+  // coordinates as screen=data*scale+offs.
+  xscale=(x1-x0-dl-dr)/(xmax-xmin)
+  xoffs=x0+dl-xmin*xscale
+  yscale=(y1-y0-dt-db)/(ymin-ymax)        // Y pixel coordinate grows down
+  yoffs=y1-db-ymin*yscale
+  xcenter=(xmin+xmax)/2.0*xscale+xoffs
+  // Draw Y zero line (parallel to X axis).
+  if ymin<0.0 && ymax>0.0 then
+    y=yoffs
+    draw color=GRAY
+    draw at x0+dl,y to x1-dr+1,y
+  endif
+  // Draw X axis.
+  draw color=DARKGRAY mode=M_CENTERED font=SMALLFONT
+  ya=y1-db
+  draw at x0+dl,ya to x1-dr+1,ya
+  d=Abs(xmax-xmin)/5.0; r=1.0e12; step=0.0
+  while r>1.0e-12 do
+    if d>=r*5.0 then step=r*5.0; break; endif
+    if d>=r*2.0 then step=r*2.0; break; endif
+    if d>=r*1.0 then step=r*1.0; break; endif
+    r=r*0.1
+  enddo
+  r=Ceil(xmin/step)*step
+  while r<=xmax do
+    x=r*xscale+xoffs
+    draw at x,ya+4 to x,ya
+    draw at x,ya+16 text=format("%.6g",r)
+    r=r+step
+  enddo
+  draw mode=M_RIGHT at x1-5,ya-1 text=xlegend
+  // Draw X zero line (parallel to Y axis).
+  if xmin<0.0 && xmax>0.0 then
+    x=xoffs
+    draw color=GRAY
+    draw at x,y0+dt to x,y1-db+1
+  endif
+  // Draw Y axis.
+  draw color=DARKGRAY mode=M_RIGHT font=SMALLFONT
+  xa=x0+dl
+  draw at xa,y0+dt to xa,y1-db+1
+  d=Abs(ymax-ymin)/4.0; r=1.0e12; step=0.0
+  while r>1.0e-12 do
+    if d>=r*5.0 then step=r*5.0; break; endif
+    if d>=r*2.0 then step=r*2.0; break; endif
+    if d>=r*1.0 then step=r*1.0; break; endif
+    r=r*0.1
+  enddo
+  r=Ceil(ymin/step)*step
+  while r<=ymax do
+    y=r*yscale+yoffs
+    draw at xa-4,y to xa,y
+    draw at xa-5,y+7 text=format("%.6g",r)
+    r=r+step
+  enddo
+  draw mode=M_LEFT at xa+3,y0+13 text=ylegend
+end
+
+// Plots graphic in the specified rectangle. Call after Drawaxes(). First
+// character of legend means positioning: plus - over the graph, minus - under.
+function int Drawgraph(float x0,float xstep,int n,float *y,                    \
+  int color,char *legend)
+  int i,xs,ys,ymin,ymax
+  ymin=1000000; ymax=-1000000
+  draw window=hgraph color=color
+  xs=x0*xscale+xoffs
+  ys=y[0]*yscale+yoffs
+  draw at xs,ys
+  for i=1,i<n,i++ do
+    x0=x0+xstep
+    xs=x0*xscale+xoffs
+    ys=y[i]*yscale+yoffs
+    draw to xs,ys
+    if xs>xcenter-50 && xs<xcenter+50 then
+      ymin=Min(ymin,ys)
+      ymax=Max(ymax,ys)
+    endif
+  enddo
+  if legend[0]!='\0' then
+    draw mode=M_CENTERED font=SMALLFONT
+    if legend[0]=='-' then
+      draw at xcenter,ymax+14 text=legend+1
+    else if legend[0]=='+' then
+      draw at xcenter,ymin text=legend+1
+    else
+      draw at xcenter,ymin text=legend
+    endif
+  endif
+end
+
+// Creates display controls in the left window.
+function int Createdisplay()
+  int i,nhead
+  nhead=$LAY.nfing*2
+  clear hleft
+  // Create main data display.
+  hgraph=control GRAPH
+    window=hleft
+    position=0,0,GRAPHX,GRAPHY
+    help="显示测试结果"
+    color=DARKGRAY
+    bkcolor=WHITE
+  endc
+  // Create head selection controls.
+  draw window=hleft mode=M_LEFT font=INFOFONT color=BLACK
+  draw at 8,LEFTY-53 text="Head"
+  draw show
+  hhead=control COMBOLIST
+    window=hleft
+    position=47,LEFTY-72,95,300
+    help="选择测试头"
+    font=FIXEDSYS
+    mode=M_VSCROLL
+  endc
+  for i=0,i<nhead+2,i++ do
+    if $LAY.excludedrails & (1<<(i/2)) continue
+    if i<nhead then
+      add hhead text=format("%2i (%i%c)",i,i/2,(i & 1?'R':'L'))
+    else
+      if ($LAY.cameras & (1<<(i-nhead)))==0 continue
+      add hhead text=format("%2i (%s)",i,i==nhead?"VTop":"VBot")
+    endif
+  enddo
+  hnext=control BUTTON
+    window=hleft
+    position=141,LEFTY-72,43,23
+    text="Next"
+    help="按选择下一个测试头"
+  endc
+  hreset=control BUTTON
+    window=hleft
+    position=191,LEFTY-72,61,23
+    text="Reset"
+    help="双击重置为所选测试头收集数据"
+    mode=M_DBLCLICK
+  endc
+  hprotocol=control BUTTON
+    window=hleft
+    position=259,LEFTY-72,55,23
+    text="保存"
+    help="按下将所有收集的数据保存到RTF文件"
+  endc
+  // Create data type selection controls.
+  hxnoise=control BUTTON
+    window=hleft
+    position=7,LEFTY-44,43,18
+    text="X noise"
+    help="按下可查看X编码器噪声测试的结果"
+    font=SMALLFONT
+  endc
+  hynoise=control BUTTON
+    window=hleft
+    position=7,LEFTY-25,43,18
+    text="Y noise"
+    help="按此查看Y编码器噪声测试结果"
+    font=SMALLFONT
+  endc
+  hxphas=control BUTTON
+    window=hleft
+    position=51,LEFTY-44,43,18
+    text="X phas"
+    help="按下可查看零脉冲附近的X个编码器相位"
+    font=SMALLFONT
+  endc
+  hyphas=control BUTTON
+    window=hleft
+    position=51,LEFTY-25,43,18
+    text="Y phas"
+    help="按下可查看零脉冲附近的Y编码器相位"
+    font=SMALLFONT
+  endc
+  hxcirc=control BUTTON
+    window=hleft
+    position=95,LEFTY-44,43,18
+    text="X circle"
+    help="按下可查看X编码器相位循环"
+    font=SMALLFONT
+  endc
+  hycirc=control BUTTON
+    window=hleft
+    position=95,LEFTY-25,43,18
+    text="Y circle"
+    help="按下可查看Y编码器相位循环"
+    font=SMALLFONT
+  endc
+  hxampl=control BUTTON
+    window=hleft
+    position=139,LEFTY-44,43,18
+    text="X ampl"
+    help="按下可查看X编码器幅度测试的结果"
+    font=SMALLFONT
+  endc
+  hyampl=control BUTTON
+    window=hleft
+    position=139,LEFTY-25,43,18
+    text="Y ampl"
+    help="按下可查看Y编码器幅度测试的结果"
+    font=SMALLFONT
+  endc
+  hxstab=control BUTTON
+    window=hleft
+    position=183,LEFTY-44,43,18
+    text="X stab"
+    help="按下可查看X编码器稳定性测试的结果"
+    font=SMALLFONT
+  endc
+  hystab=control BUTTON
+    window=hleft
+    position=183,LEFTY-25,43,18
+    text="Y stab"
+    help="按下可查看Y编码器稳定性测试的结果"
+    font=SMALLFONT
+  endc
+  hxwheel=control BUTTON
+    window=hleft
+    position=227,LEFTY-44,43,18
+    text="X gear"
+    help="按此查看X转轮稳定性测试的结果"
+    font=SMALLFONT
+  endc
+  hxbelt=control BUTTON
+    window=hleft
+    position=227,LEFTY-25,43,18
+    text="X belt"
+    help="按下可以查看X皮带张力测试的结果"
+    font=SMALLFONT
+  endc
+  hxlost=control BUTTON
+    window=hleft
+    position=271,LEFTY-44,43,18
+    text="X lost"
+    help="按此查看长距离X相位丢失测试的结果"
+    font=SMALLFONT
+  endc
+  if $LAY.cameras!=0 then
+    hylost=control BUTTON
+      window=hleft
+      position=271,LEFTY-25,43,18
+      text="Y lost"
+      help="按此查看长距离Y相位丢失测试的结果"
+      font=SMALLFONT
+    endc
+  endif
+end
+
+// Selects head and type of data to display (as one of bits A_xxx).
+function int Setdisplay(int head,int mode)
+  int i,j,n,x,y,nhead,axis,isfirst
+  float p[NPULSE],v[NVECT]
+  char aname[10]
+  struct t_data d
+  nhead=$LAY.nfing*2
+  // Set new head.
+  n=0
+  for i=0,i<nhead+2,i++ do         // Display selected head
+    if $LAY.excludedrails & (1<<(i/2)) continue
+    if i==head then
+      change hhead select=n; break
+    endif
+    if i>=nhead && ($LAY.cameras & (1<<(i-nhead)))==0 continue
+    n++
+  enddo
+  showhead=head
+  // Set axis and data type. To simplify processing, data of similar type
+  // belonging to different motor is placed into the different structure
+  // t_data.
+  axis=((mode & 0x7FFF0000)==0)
+  Encodername(aname,head,axis)
+  Memcpy(d,data[head][axis],Sizeof(d))
+  showmode=mode
+  // Clear data window and data type buttons, prepare for drawing.
+  draw window=hgraph clear
+  draw mode=M_CENTERED font=MAINFONT color=BLACK
+  draw at LEFTX/2,24
+  change hxnoise bkcolor=GRAY
+  change hynoise bkcolor=GRAY
+  change hxphas bkcolor=GRAY
+  change hyphas bkcolor=GRAY
+  change hxcirc bkcolor=GRAY
+  change hycirc bkcolor=GRAY
+  change hxampl bkcolor=GRAY
+  change hyampl bkcolor=GRAY
+  change hxstab bkcolor=GRAY
+  change hystab bkcolor=GRAY
+  change hxwheel bkcolor=GRAY
+  change hxbelt bkcolor=GRAY
+  change hxlost bkcolor=GRAY
+  change hylost bkcolor=GRAY
+  // Data-specific processing.
+  if mode & (A_XNOISE|A_YNOISE) then
+    // Noise test.
+    change (mode & A_XNOISE?hxnoise:hynoise) bkcolor=YELLOW
+    draw text=format("%s noise test",aname)
+    if d.valid & (A_XNOISE|A_YNOISE) then
+      draw mode=M_LEFT font=MAINFONT color=DARKGRAY
+      draw at 140,70 text="Sigma"
+      draw at 210,70 text="Max"
+      draw at 20, 100 text="Phase A"     at 280,100 text="bits"
+      draw at 20, 125 text="Phase B"     at 280,125 text="bits"
+      draw at 20, 150 text="Zero pulse"  at 280,150 text="bits"
+      draw at 20, 175 text="Ground"      at 280,175 text="bits"
+      Setcolor(d.noisea,1000)
+      draw at 140,100 text=format("%.1f",d.noisea)
+      Setcolor(d.noiseamax,3000)
+      draw at 210,100 text=format("%.1f",d.noiseamax)
+      Setcolor(d.noiseb,1000)
+      draw at 140,125 text=format("%.1f",d.noiseb)
+      Setcolor(d.noisebmax,3000)
+      draw at 210,125 text=format("%.1f",d.noisebmax)
+      Setcolor(d.noisez,1000)
+      draw at 140,150 text=format("%.1f",d.noisez)
+      Setcolor(d.noisezmax,3000)
+      draw at 210,150 text=format("%.1f",d.noisezmax)
+      Setcolor(d.noiseg,100)
+      draw at 140,175 text=format("%.1f",d.noiseg)
+      Setcolor(d.noisegmax,300)
+      draw at 210,175 text=format("%.1f",d.noisegmax)
+    endif
+  else if mode & (A_XPHAS|A_YPHAS) then
+    // Phase test near zero pulse, linear view.
+    change (mode & A_XPHAS?hxphas:hyphas) bkcolor=YELLOW
+    draw text=format("%s phase test",aname)
+    if d.valid & (A_XPHAS|A_YPHAS) then
+      Drawaxes(0,30,LEFTX,250,d.pstart,d.pstart+d.pstep*NPULSE,                \
+        -25000.0,25000.0,(axis==0?"X, um":"Y, um"),"Ampl, bits")
+      draw font=SMALLFONT mode=M_RIGHT
+      draw color=RED at LEFTX-5,30 text="Phase A"
+      draw color=GREEN at LEFTX-5,42 text="Phase B"
+      draw color=BLACK at LEFTX-5,54 text="0 pulse"
+      for i=0,i<NPULSE,i++ do p[i]=d.pz[i]; enddo
+      Drawgraph(d.pstart,d.pstep,NPULSE,p,BLACK,"")
+      for i=0,i<NPULSE,i++ do p[i]=d.pa[i]; enddo
+      Drawgraph(d.pstart,d.pstep,NPULSE,p,RED,"")
+      for i=0,i<NPULSE,i++ do p[i]=d.pb[i]; enddo
+      Drawgraph(d.pstart,d.pstep,NPULSE,p,GREEN,"")
+    endif
+  else if mode & (A_XCIRC|A_YCIRC) then
+    // Phase test near zero pulse, circle view.
+    change (mode & A_XCIRC?hxcirc:hycirc) bkcolor=YELLOW
+    draw text=format("%s phase circle",aname)
+    if d.valid & (A_XCIRC|A_YCIRC) then
+      Drawaxes(LEFTX/2-130,30,LEFTX/2+110,250,                                 \
+        -25000.0,25000.0,-25000.0,25000.0,"Phase A","Phase B")
+      isfirst=1
+      draw window=hgraph color=BLACK
+      for i=0,i<NCIRCLE*2,i++ do
+        j=(i<NCIRCLE?i:i-NCIRCLE)      // Guaranteed closed circle
+        if d.circlea[j]==0.0 && d.circleb[j]==0.0 continue
+        x=d.circlea[j]*xscale+xoffs
+        y=d.circleb[j]*yscale+yoffs
+        if isfirst then
+          draw at x,y; isfirst=0
+        else
+          draw to x,y
+        endif
+      enddo
+    endif
+  else if mode & (A_XAMPL|A_YAMPL) then
+    // Amplitude test.
+    change (mode & A_XAMPL?hxampl:hyampl) bkcolor=YELLOW
+    draw text=format("%s amplitude test",aname)
+    if d.valid & (A_XAMPL|A_YAMPL) then
+      Drawaxes(0,30,LEFTX,250,d.vstart,d.vstart+d.vstep*d.nvstep,              \
+        -25000.0,25000.0,(axis==0?"X, mm":"Y, mm"),"Ampl, bits")
+      draw font=SMALLFONT mode=M_RIGHT
+      draw color=RED at LEFTX-5,30 text="Phase A"
+      draw color=GREEN at LEFTX-5,42 text="Phase B"
+      draw color=BLACK at LEFTX-5,54 text="0 pulse"
+      for i=0,i<d.nvstep,i++ do v[i]=d.zmax[i]; enddo
+      Drawgraph(d.vstart,d.vstep,d.nvstep,v,BLACK,"")
+      for i=0,i<d.nvstep,i++ do v[i]=d.amin[i]; enddo
+      Drawgraph(d.vstart,d.vstep,d.nvstep,v,RED,"")
+      for i=0,i<d.nvstep,i++ do v[i]=d.amax[i]; enddo
+      Drawgraph(d.vstart,d.vstep,d.nvstep,v,RED,"")
+      for i=0,i<d.nvstep,i++ do v[i]=d.bmin[i]; enddo
+      Drawgraph(d.vstart,d.vstep,d.nvstep,v,GREEN,"")
+      for i=0,i<d.nvstep,i++ do v[i]=d.bmax[i]; enddo
+      Drawgraph(d.vstart,d.vstep,d.nvstep,v,GREEN,"")
+    endif
+  else if mode & (A_XSTAB|A_YSTAB) then
+    // Stability test.
+    change (mode & A_XSTAB?hxstab:hystab) bkcolor=YELLOW
+    draw text=format("%s stability test",aname)
+    if (d.valid & (A_XSTAB|A_YSTAB))!=0 && d.vstep!=0 && d.nvstep>0 then
+      Drawaxes(0,30,LEFTX,250,d.vstart,d.vstart+d.vstep*d.nvstep,              \
+        0.0,25000.0,(axis==0?"X, mm":"Y, mm"),"Ampl, bits")
+      for i=0,i<d.nvstep,i++ do v[i]=d.vectmin[i]; enddo
+      Drawgraph(d.vstart,d.vstep,d.nvstep,v,RED,"-Min amplitude")
+      for i=0,i<d.nvstep,i++ do v[i]=d.vectmax[i]; enddo
+      Drawgraph(d.vstart,d.vstep,d.nvstep,v,GREEN,"+Max amplitude")
+    endif
+  else if mode & A_XWHEEL then
+    // Wheel test.
+    change hxwheel bkcolor=YELLOW
+    draw text=format("%s wheel test",aname)
+
+
+
+  else if mode & A_XBELT then
+    // Belt tension test.
+    change hxbelt bkcolor=YELLOW
+    draw text=format("%s belt tension test",aname)
+
+
+
+  else if mode & (A_XLOST|A_YLOST) then
+    // Test for lost phases.
+    change (mode & A_XLOST?hxlost:hylost) bkcolor=YELLOW
+    draw text=format("%s long test for lost phases",aname)
+
+
+
+  endif
+  draw show
+end
+
+// Redraws currently displayed data.
+function int Updatedisplay()
+  Setdisplay(showhead,showmode)
+end
+
+// Fills RTF protocol file with data.
+function int Protocol()
+  int head,n
+  char s[256]
+  // Header.
+  RParagraph(RTF_CENTERED)
+  RFmt(RTF_TIMES,RTF_BOLD|RTF_UL,24)
+  RAddtext("Encoder self-test protocol\n")
+  RFmt(RTF_TIMES,RTF_NORMAL,12)
+  Strtime(s,"\nCreated on: %a %d-%b-%Y, %H:%M\n\n",0,0)
+  RAddtext(s)
+  // For all rails.
+  for head=0,head<18,head++ do
+    if data[head][0].valid==0 && data[head][1].valid==0                        \
+      continue                         // No data for the given head
+    RParagraph(RTF_CENTERED)
+    RFmt(RTF_TIMES,RTF_BOLD,18)
+    if head==$LAY.nfing*2 then
+      RAddtext("Top video camera\n")
+    else if head==$LAY.nfing*2+1 then
+      RAddtext("Bottom video camera\n")
+    else
+      RAddfmt("Head %i (%i%c)\n\n",head,head/2,head & 1?'R':'L')
+    endif
+    // Add noise.
+    n=0
+    if data[head][0].valid & A_XNOISE then
+      Setdisplay(head,A_XNOISE)
+      RAddpiczoom(hgraph,0,0,GRAPHX,GRAPHY,1,0.85)
+      n++
+    endif
+    if data[head][1].valid & A_YNOISE then
+      if n>0 RAddtext("  ")
+      Setdisplay(head,A_YNOISE)
+      RAddpiczoom(hgraph,0,0,GRAPHX,GRAPHY,1,0.85)
+      n++
+    endif
+    if n>0 RAddtext("\n\n")
+    // Add phases near zero pulse.
+    n=0
+    if data[head][0].valid & A_XPHAS then
+      Setdisplay(head,A_XPHAS)
+      RAddpiczoom(hgraph,0,0,GRAPHX,GRAPHY,1,0.85)
+      n++
+    endif
+    if data[head][1].valid & A_YPHAS then
+      if n>0 RAddtext("  ")
+      Setdisplay(head,A_YPHAS)
+      RAddpiczoom(hgraph,0,0,GRAPHX,GRAPHY,1,0.85)
+      n++
+    endif
+    if n>0 RAddtext("\n\n")
+    // Add phase circles.
+    n=0
+    if data[head][0].valid & A_XCIRC then
+      Setdisplay(head,A_XCIRC)
+      RAddpiczoom(hgraph,0,0,GRAPHX,GRAPHY,1,0.85)
+      n++
+    endif
+    if data[head][1].valid & A_YCIRC then
+      if n>0 RAddtext("  ")
+      Setdisplay(head,A_YCIRC)
+      RAddpiczoom(hgraph,0,0,GRAPHX,GRAPHY,1,0.85)
+      n++
+    endif
+    if n>0 RAddtext("\n\n")
+    // Add phase amplitudes.
+    n=0
+    if data[head][0].valid & A_XAMPL then
+      Setdisplay(head,A_XAMPL)
+      RAddpiczoom(hgraph,0,0,GRAPHX,GRAPHY,1,0.85)
+      n++
+    endif
+    if data[head][1].valid & A_YAMPL then
+      if n>0 RAddtext("  ")
+      Setdisplay(head,A_YAMPL)
+      RAddpiczoom(hgraph,0,0,GRAPHX,GRAPHY,1,0.85)
+      n++
+    endif
+    if n>0 RAddtext("\n\n")
+    // Add amplitude stability.
+    n=0
+    if data[head][0].valid & A_XSTAB then
+      Setdisplay(head,A_XSTAB)
+      RAddpiczoom(hgraph,0,0,GRAPHX,GRAPHY,1,0.85)
+      n++
+    endif
+    if data[head][1].valid & A_YSTAB then
+      if n>0 RAddtext("  ")
+      Setdisplay(head,A_YSTAB)
+      RAddpiczoom(hgraph,0,0,GRAPHX,GRAPHY,1,0.85)
+      n++
+    endif
+    if n>0 RAddtext("\n\n")
+    RAddtext("\n")
+  enddo
+end
+
+// Checks whether some button in the left window (data display selection) is
+// pressed and updates display correspondingly.
+function int Checkdisplay()
+  int i,n,nhead,head,mode
+  nhead=$LAY.nfing*2
+  if Pressed(hhead) then
+    // Select head from the list.
+    head=showhead
+    n=0
+    for i=0,i<nhead+2,i++ do
+      if $LAY.excludedrails & (1<<(i/2)) continue
+      if n==Status(hhead) then
+        head=i; break
+      endif
+      if i>=nhead && ($LAY.cameras & (1<<(i-nhead)))==0 continue
+      n++
+    enddo
+    Setdisplay(head,showmode)
+  else if Pressed(hnext) then
+    // Select next head, dependless whether it contains data.
+    head=showhead+1
+    while ($LAY.excludedrails & (1<<(head/2)))!=0 ||                           \
+      (head>=nhead && head<nhead+2 && ($LAY.cameras & (1<<(head-nhead)))==0) do
+      head++; enddo
+    if head>=nhead+2 head=0
+    Setdisplay(head,showmode)
+  else if Pressed(hreset) then
+    // Clear data gathered by selected head.
+    Memset(data[showhead],0,Sizeof(data[showhead]))
+    Updatedisplay()
+  else if Pressed(hprotocol) then
+    if protname[0]=='\0' Strcpy(protname,"encoder.rtf");
+    if SYS.Browse(hmain,protname,"Open protocol",0)!=0 then
+      if ROpen(protname)!=0 then
+        change hinfo color=LIGHTRED
+        change hinfo text="Unable to create file!"
+      else
+        Protocol()
+        RClose()
+      endif
+    endif
+  else if Pressed(hxnoise) then
+    Setdisplay(showhead,A_XNOISE)
+  else if Pressed(hynoise) then
+    Setdisplay(showhead,A_YNOISE)
+  else if Pressed(hxphas) then
+    Setdisplay(showhead,A_XPHAS)
+  else if Pressed(hyphas) then
+    Setdisplay(showhead,A_YPHAS)
+  else if Pressed(hxcirc) then
+    Setdisplay(showhead,A_XCIRC)
+  else if Pressed(hycirc) then
+    Setdisplay(showhead,A_YCIRC)
+  else if Pressed(hxampl) then
+    Setdisplay(showhead,A_XAMPL)
+  else if Pressed(hyampl) then
+    Setdisplay(showhead,A_YAMPL)
+  else if Pressed(hxstab) then
+    Setdisplay(showhead,A_XSTAB)
+  else if Pressed(hystab) then
+    Setdisplay(showhead,A_YSTAB)
+  else if Pressed(hxwheel) then
+    Setdisplay(showhead,A_XWHEEL)
+  else if Pressed(hxbelt) then
+    Setdisplay(showhead,A_XBELT)
+  else if Pressed(hxlost) then
+    Setdisplay(showhead,A_XLOST)
+  else if Pressed(hylost) then
+    Setdisplay(showhead,A_YLOST)
+  endif
+  wait
+end
+
+
+////////////////////////////////////////////////////////////////////////////////
+//////////////////////////////////// TESTS /////////////////////////////////////
+
+// Encoder noise test. Measures noise of phases A, B, zero pulse and ground
+// for X axis (axis=0) or Y axis (axis=1). Returns 0 on success, -1 if user
+// cancelled test and 1 on interrupt or any detected error.
+function int Noisetest(int axis)
+  int i,n,t
+  float noisea[5],noiseb[5],noisez[5],noiseg[5]
+  char s[256]
+  handle hinterrupt
+  struct t_data d
+  // Display legend.
+  clear hright
+  change hinfo limits=0,0
+  change hinfo color=BLACK
+  Encodername(s,actualhead,axis)
+  change hinfo text=format("Noise test of %s",s)
+  draw window=hright font=TIMESFONT
+  draw color=BLACK at 6,30 wrap=RIGHTX-5
+  draw text="Noise test measures noise produced by three encoder phase (A, B "
+  draw text="and zero) at rest. High noise is the indication of electrical "
+  draw text="(ground) problems and may cause sporadical losses of accuracy "
+  draw text="curable only by soft reset or reboot. For comparison, script "
+  draw text="also checks noise from the ground (must be negligible)."
+  draw show
+  hinterrupt=control BUTTON
+    window=hright
+    position=RIGHTX/2-(RIGHTX-30)/4,BTNY,(RIGHTX-30)/2,24
+    text="Interrupt"
+    help="按下可中断电流测试"
+  endc
+  // Disable feedback and wait a bit to stop vibrations.
+  i=Setdebugmode(0x2000,0x2000,0x0000)
+  if i!=0 return i
+  t=Time()
+  while Time()-t<2000 do
+    if Pressed(hinterrupt) return 1
+    if Pressed(hexit) return -1
+    Checkdisplay()                     // Replaces wait
+  enddo
+  // Initialize test-related data.
+  Memcpy(d,data[actualhead][axis],Sizeof(d))
+  d.valid=d.valid & (~(A_XNOISE|A_YNOISE))
+  Initsigma(noisea)
+  Initsigma(noiseb)
+  Initsigma(noisez)
+  Initsigma(noiseg)
+  // Repeat test 10 times (approx. 4 seconds) for better reliability.
+  for n=0,n<10,n++ do
+    change hinfo limits=n,10
+    // Request oscillogramm.
+    if axis==0 then
+      i=Getoscillogramm(2048,OSC_XENCA,OSC_XENCB,OSC_XENC0,OSC_GROUND)
+    else
+      i=Getoscillogramm(2048,OSC_YENCA,OSC_YENCB,OSC_YENC0,OSC_GROUND)
+    endif
+    if i!=0 return i
+    // Oscillogramm received, process data.
+    for i=0,i<osccount,i++ do
+      Addsigma(noisea,osci[0][i])
+      Addsigma(noiseb,osci[1][i])
+      Addsigma(noisez,osci[2][i])
+      Addsigma(noiseg,osci[3][i])
+    enddo
+  enddo
+  // Calculate statistics and save it to data.
+  d.noisea=Getsigma(noisea)
+  d.noiseamax=(Getmax(noisea)-Getmin(noisea))/2.0
+  d.noiseb=Getsigma(noiseb)
+  d.noisebmax=(Getmax(noiseb)-Getmin(noiseb))/2.0
+  d.noisez=Getsigma(noisez)
+  d.noisezmax=(Getmax(noisez)-Getmin(noisez))/2.0
+  d.noiseg=Getsigma(noiseg)
+  d.noisegmax=(Getmax(noiseg)-Getmin(noiseg))/2.0
+  d.valid=d.valid | (axis==0?A_XNOISE:A_YNOISE)
+  Memcpy(data[actualhead][axis],d,Sizeof(d))
+  // Show data in display.
+  Setdisplay(actualhead,axis==0?A_XNOISE:A_YNOISE)
+end
+
+// Tests encoder phases in the vicinity of zero pulse.
+function int Circtest(int axis)
+  int i,j,t,err,npulse[NPULSE],ncircle[NCIRCLE]
+  float turn,xmin,xmax,ymin,ymax
+  char s[256],buf[256]
+  handle hinterrupt
+  struct t_data d
+  // Display legend.
+  clear hright
+  change hinfo limits=0,0
+  change hinfo color=BLACK
+  Encodername(s,actualhead,axis)
+  change hinfo text=format("Phase test of %s",s)
+  draw window=hright font=TIMESFONT
+  draw color=BLACK at 6,30 wrap=RIGHTX-5
+  draw text="Phase test checks quality of encoder phases in the vicinity of "
+  draw text="zero pulse. Invalid position of zero pulse, low amplitudes or "
+  draw text="deviations from sine/cosine may reduce accuracy, especially in "
+  draw text="vertical direction."
+  draw show
+  hinterrupt=control BUTTON
+    window=hright
+    position=RIGHTX/2-(RIGHTX-30)/4,BTNY,(RIGHTX-30)/2,24
+    text="Interrupt"
+    help="按下可中断电流测试"
+  endc
+  // Enable full feedback.
+  err=Setdebugmode(0,0,0)
+  if err!=0 return err
+  // Calculate necessary distance. Oscillogramm will feature approximately 4
+  // phases on each side from zero pulse.
+  if actualhead<$LAY.nfing*2 then      // Ordinary head
+    if axis==0 then
+      turn=0.020                       // Linear scale: 20 um phase
+      xmin=-4.0*turn; ymin=0.0
+      xmax=4.0*turn; ymax=0.0
+    else
+      turn=0.200                       // Rotational encoder: 200 um phase
+      xmin=0.0; ymin=-4.0*turn
+      xmax=0.0; ymax=4.0*turn
+    endif
+  else
+    turn=0.200                         // Rotational encoder: 200 um phase
+    if axis==0 then
+      xmin=-4.0*turn; ymin=0.0
+      xmax=4.0*turn; ymax=0.0
+    else
+      xmin=0.0; ymin=-4.0*turn
+      xmax=0.0; ymax=4.0*turn
+    endif
+  endif
+  // Move axis into the initial position, close to zero pulse (absolute encoder
+  // movement).
+  SYS.Killimm(16)
+  buf[0]=S_MOVE
+  buf[1]=0x92                          // Absolute encoder movement
+  buf[2]=actualhead                    // Head
+  $uint2(buf+3)=32000                  // Height
+  buf[5]=0                             // Bending
+  $int3(buf+6)=xmin*1000.0             // X phase, micrometers
+  $int3(buf+9)=ymin*1000.0             // Y phase, micrometers
+  $uint2(buf+12)=0                     // Radius, must be zero
+  buf[14]=Min(255,turn*250.0)          // Accuracy, micrometers
+  buf[15]=40                           // Stroke
+  buf[16]=40                           // Pressure
+  buf[17]=0                            // M_NOP
+  SYS.Sendimm(16,18,buf)
+  // Wait till movement is finished.
+  t=Time()
+  while $A[16].length==0 do
+    if Pressed(hinterrupt) return 1
+    if Pressed(hexit) return -1
+    if Time()-t>5000 then
+      Error("Timeout!","Script is unable to move head. Please check mechanics.")
+      return 1
+    endif
+    Checkdisplay()                     // Replaces wait
+  enddo
+  if $A[16].answer!=S_READY then
+    Error("Error!","Script has attempted to move head, but tester returned "   \
+      "unexpected answer. Please check that tester is loaded and that the "    \
+      "state of the shuttle allows movements.")
+    return 1
+  endif
+  // Set velocity so low that movement will take same time as the oscillogramm
+  // of maximal length (4096 data points = ca. 800 ms, 8 phases = 160/1600 um).
+  // The following movement will be really, really, REALLY slow!
+  err=Setspeed(0.0002,0.002,0.0002,0.0002)
+  if err!=0 return err
+  // Initialize test-related data.
+  Memcpy(d,data[actualhead][axis],Sizeof(d))
+  d.valid=d.valid & (~(A_XPHAS|A_XCIRC|A_YPHAS|A_YCIRC))
+  // Prepare oscilloscope to start on the next movement.
+  if axis==0 then
+    err=Startosci(OSCCOUNT,1,OSC_XENCA,OSC_XENCB,OSC_XENC0,OSC_XREL)
+  else
+    err=Startosci(OSCCOUNT,1,OSC_YENCA,OSC_YENCB,OSC_YENC0,OSC_YREL)
+  endif
+  // Start sloooow movement to the final point and wait for its end.
+  if err==0 then
+    $int3(buf+6)=xmax*1000.0           // X phase, micrometers
+    $int3(buf+9)=ymax*1000.0           // Y phase, micrometers
+    SYS.Sendimm(16,18,buf)
+    t=Time()
+    while $A[16].length==0 do
+      if Pressed(hinterrupt) err=1
+      if Pressed(hexit) err=-1
+      if err break
+      if Time()-t>5000 then            // Movement will take 800 ms
+        Error("Timeout!",                                                      \
+          "Script is unable to move head. Please check mechanics.")
+        err=1
+      endif
+      Checkdisplay()                   // Replaces wait
+    enddo
+    if err==0 && $A[16].answer!=S_READY then
+      Error("Error!","Script has attempted to move head, but tester returned " \
+        "unexpected answer. Please check that tester is loaded and that the "  \
+        "state of the shuttle allows movements.")
+      err=1
+    endif
+  endif
+  // Now wait for the oscillogramm. It must be already on the way...
+  if err==0 err=Waitosci(1,2,3,4)      // Exact channel IDs are unimportant
+  // Restore standard velocity.
+  err=err|Setspeed(0.0,0.0,0.0,0.0)
+  if err!=0 return err
+  // Extract phase data.
+  if err==0 && (testlist & (A_FULL|A_XPHAS|A_YPHAS))!=0 then
+    d.pstart=-turn*2.0*1000.0
+    d.pstep=turn*4.0/NPULSE*1000.0
+    for j=0,j<NPULSE,j++ do
+      d.pa[j]=0.0; d.pb[j]=0.0; d.pz[j]=0.0; npulse[j]=0
+    enddo
+    for i=0,i<osccount,i++ do
+      j=(osci[3,i]-d.pstart+d.pstep/2.0)/d.pstep
+      if j<0 || j>=NPULSE continue
+      d.pa[j]=d.pa[j]+osci[0,i]
+      d.pb[j]=d.pb[j]+osci[1,i]
+      d.pz[j]=d.pz[j]+osci[2,i]
+      npulse[j]++
+    enddo
+    for j=0,j<NPULSE,j++ do
+      if npulse[j]==0 continue
+      d.pa[j]=d.pa[j]/npulse[j]
+      d.pb[j]=d.pb[j]/npulse[j]
+      d.pz[j]=d.pz[j]/npulse[j]
+    enddo
+    d.valid=d.valid | (axis==0?A_XPHAS:A_YPHAS)
+  endif
+  // Extract circle data.
+  if err==0 && (testlist & (A_FULL|A_XCIRC|A_YCIRC))!=0 then
+    for j=0,j<NCIRCLE,j++ do
+      d.circlea[j]=0.0; d.circleb[j]=0.0; ncircle[j]=0
+    enddo
+    for i=0,i<osccount,i++ do
+      j=Atan2(osci[0,i],osci[1,i])/6.2831853*NCIRCLE
+      if j<0 j=j+NCIRCLE
+      if j>=NCIRCLE j=j-NCIRCLE
+      d.circlea[j]=d.circlea[j]+osci[0,i]
+      d.circleb[j]=d.circleb[j]+osci[1,i]
+      ncircle[j]++
+    enddo
+    for j=0,j<NCIRCLE,j++ do
+      if ncircle[j]==0 continue
+      d.circlea[j]=d.circlea[j]/ncircle[j]
+      d.circleb[j]=d.circleb[j]/ncircle[j]
+    enddo
+    d.valid=d.valid | (axis==0?A_XCIRC:A_YCIRC)
+  endif
+  // Save results and show data in display.
+  Memcpy(data[actualhead][axis],d,Sizeof(d))
+  if testlist & (A_FULL|A_XPHAS|A_YPHAS) then
+    Setdisplay(actualhead,axis==0?A_XPHAS:A_YPHAS)
+    if testlist & (A_FULL|A_XCIRC|A_YCIRC) delay 1000
+  endif
+  if testlist & (A_FULL|A_XCIRC|A_YCIRC) then
+    Setdisplay(actualhead,axis==0?A_XCIRC:A_YCIRC)
+  endif
+  return err
+end
+
+// Encoder amplitude and stability test. Checks phase amplitudes and length of
+// encoder's phase vector along the whole working area. Returns 0 on success,
+// -1 if user cancelled test and 1 on interrupt or any detected error.
+function int Stabilitytest(int axis)
+  int i,t,err,pass,stat[24]
+  float xmin,xmax,ymin,ymax,start,step,nstep
+  float cmin,cmax,amin,amax,bmin,bmax,zmin,zmax,pmin,pmax
+  char s[256]
+  handle hinterrupt
+  struct t_data d
+  // Display legend.
+  clear hright
+  change hinfo limits=0,0
+  change hinfo color=BLACK
+  Encodername(s,actualhead,axis)
+  change hinfo text=format("Stability test of %s",s)
+  draw window=hright font=TIMESFONT
+  draw color=BLACK at 6,30 wrap=RIGHTX-5
+  draw text="Phase test moves axis through the whole working area and checks "
+  draw text="amplitudes and stability of encoder output. Rapid amplitude "
+  draw text="variation may indicate dirty glass scale or half-broken cable. "
+  draw show
+  hinterrupt=control BUTTON
+    window=hright
+    position=RIGHTX/2-(RIGHTX-30)/4,BTNY,(RIGHTX-30)/2,24
+    text="Interrupt"
+    help="按下可中断电流测试"
+  endc
+  // Enable full feedback.
+  err=Setdebugmode(0,0,0)
+  if err!=0 return err
+  // Get extent for the coordinates reachable by axis. Note that this test
+  // works only with A5/A6, so I do not apply right dead camera area.
+  if actualhead<$LAY.nfing*2 then
+    if axis==0 then                    // Head X
+      if (actualhead & 1)==0 then
+        xmin=$LAY.leftlimit/1000.0-0.5
+        xmax=$LAY.rightlimit/1000.0+0.5
+        start=xmin-$LAY.xoffset/1000.0
+      else
+        xmin=$LAY.rightlimit/1000.0+0.5
+        xmax=$LAY.leftlimit/1000.0-0.5
+        start=$LAY.xoffset/1000.0-xmin
+      endif
+      ymin=$LAY.yoffset[actualhead/2]/1000.0
+      ymax=ymin
+      step=5.0
+      nstep=Abs(xmax-xmin)/step
+    else                               // Head Y
+      if (actualhead & 1)==0 then
+        xmin=$LAY.leftlimit/1000.0+10.0
+      else
+        xmin=$LAY.rightlimit/1000.0-10.0
+      endif
+      xmax=xmin
+      ymin=$LAY.bottom[actualhead/2]/1000.0-2.0
+      ymax=$LAY.top[actualhead/2]/1000.0+2.0
+      start=ymin-$LAY.yoffset[actualhead/2]/1000.0
+      step=2.0
+      nstep=Abs(ymax-ymin)/step
+    endif
+  else
+    if axis==0 then                    // Camera X
+      xmin=$LAY.rightlimit/1000.0+0.5
+      xmax=($LAY.leftlimit+$LAY.videodeadx)/1000.0-0.5
+      ymin=$LAY.yoffset[actualhead/2]/1000.0
+      ymax=ymin
+      start=xmin-$LAY.xoffset/1000.0
+      step=5.0
+      nstep=Abs(xmax-xmin)/step
+    else
+      xmin=$LAY.xoffset/1000.0
+      xmax=xmin
+      ymin=$LAY.bottom[actualhead/2]/1000.0-0.5
+      ymax=$LAY.top[actualhead/2]/1000.0+0.5
+      start=ymin-$LAY.yoffset[actualhead/2]/1000.0
+      step=5.0
+      nstep=Abs(ymax-ymin)/step
+    endif
+  endif
+  // Move axis into the leftmost/bottommost position.
+  SYS.Killimm(16)
+  sprintf(s,"M %i[%f,%fA20] NOP",actualhead,xmin,ymin)
+  SERV.Cmdimm(16,s)
+  t=Time()
+  while $A[16].length==0 do
+    if Pressed(hinterrupt) return 1
+    if Pressed(hexit) return -1
+    if Time()-t>5000 then
+      Error("Timeout!","Script is unable to move head. Please check mechanics.")
+      return 1
+    endif
+    Checkdisplay()                     // Replaces wait
+  enddo
+  if $A[16].answer!=S_READY then
+    Error("Error!","Script has attempted to move head, but tester returned "   \
+      "unexpected answer. Please check that tester is loaded and that the "    \
+      "state of the shuttle allows movements.")
+    return 1
+  endif
+  // Reset encoder statistics.
+  err=Getstatpage(actualhead,0x26,stat)
+  if err!=0 return err
+  // Set low velocity. All following movements will be sloooooow!
+  err=Setspeed(0.08,0.04,0.05,0.05)
+  if err!=0 return err
+  // Initialize test-related data.
+  Memcpy(d,data[actualhead][axis],Sizeof(d))
+  d.valid=d.valid & (~(A_XAMPL|A_XSTAB|A_YAMPL|A_YSTAB))
+  d.vstart=start
+  d.vstep=step
+  d.nvstep=nstep
+  for i=0,i<NVECT,i++ do
+    if testlist & (A_FULL|A_XAMPL|A_YAMPL) then
+      d.amin[i]=32768.0
+      d.amax[i]=-32768.0
+      d.bmin[i]=32768.0
+      d.bmax[i]=-32768.0
+      d.zmin[i]=32768.0
+      d.zmax[i]=-32768.0
+    endif
+    if testlist & (A_FULL|A_XSTAB|A_YSTAB) then
+      d.vectmin[i]=65536.0
+      d.vectmax[i]=0.0
+    endif
+  enddo
+  // Make 4 full moves to locate hidden errors.
+  err=0
+  for pass=0,pass<4 && err==0,pass++ do
+    change hinfo limits=pass,4
+    // Start movement.
+    if pass & 1 then
+      sprintf(s,"M %i[%f,%fA20] NOP",actualhead,xmin,ymin)
+    else
+      sprintf(s,"M %i[%f,%fA20] NOP",actualhead,xmax,ymax)
+    endif
+    SERV.Cmdimm(0,s)
+    // While head moves, gather encoder data.
+    t=Time()
+    while err==0 && $A[0].length==0 do
+      if Time()-t>40000 then
+        Error("Error!","Movement takes significantly longer time than "        \
+          "expected. Please check your hardware and state of the shuttle.")
+        err=1
+      endif
+      if Pressed(hinterrupt) err=1
+      if Pressed(hexit) err=-1
+      // Get next piece of data.
+      if err==0 err=Getstatpage(actualhead,0x26,stat)
+      if err!=0 break
+      if axis==0 then
+        cmin=stat[0]; cmax=stat[1]     // Get X coordinate range, um
+        pmin=stat[2]; pmax=stat[3]     // Get X vector length range, bits
+        amin=stat[4]; amax=stat[5]     // Get X amplitude of phase A, bits
+        bmin=stat[6]; bmax=stat[7]     // Get X amplitude of phase B, bits
+        zmin=stat[8]; zmax=stat[9]     // Get X amplitude of zero pulse, bits
+      else
+        cmin=stat[12]; cmax=stat[13]   // Get Y coordinate range, um
+        pmin=stat[14]; pmax=stat[15]   // Get Y vector length range, bits
+        amin=stat[16]; amax=stat[17]   // Get Y amplitude of phase A, bits
+        bmin=stat[18]; bmax=stat[19]   // Get Y amplitude of phase B, bits
+        zmin=stat[20]; zmax=stat[21]   // Get Y amplitude of zero pulse, bits
+      endif
+      if pmin==0.0 && pmax==0.0 && cmin==0.0 && cmax==0.0 then
+        Error("Error!","Embedded software does not support stability test. "   \
+          "Please update f_prog.bin.")
+        err=1
+      else if cmin>cmax then
+        continue                       // Even more improbable things happen
+      endif
+      // Rotate coordinates for right heads.
+      if actualhead<$LAY.nfing*2 && (actualhead & 1)!=0 then
+        cmin=-cmin
+        cmax=-cmax
+      endif
+      // Save data.
+      i=((cmin+cmax)/2000.0-start)/step
+      if i>=0 && i<NVECT then
+        if testlist & (A_FULL|A_XAMPL|A_YAMPL) then
+          d.amin[i]=Min(d.amin[i],amin)
+          d.amax[i]=Max(d.amax[i],amax)
+          d.bmin[i]=Min(d.bmin[i],bmin)
+          d.bmax[i]=Max(d.bmax[i],bmax)
+          d.zmin[i]=Min(d.zmin[i],zmin)
+          d.zmax[i]=Max(d.zmax[i],zmax)
+        endif
+        if testlist & (A_FULL|A_XSTAB|A_YSTAB) then
+          d.vectmin[i]=Min(d.vectmin[i],pmin)
+          d.vectmax[i]=Max(d.vectmax[i],pmax)
+        endif
+      endif
+    enddo
+    if err==0 && $A[0].answer!=S_READY then
+      Error("Error!","Tester is unable to make movement. Please check "        \
+        "that tester is loaded and that the state of the shuttle allows "      \
+        "movements.")
+      err=1
+    endif
+  enddo
+  // Restore standard velocity.
+  err=err|Setspeed(0.0,0.0,0.0,0.0)
+  if err!=0 return err
+  // Save results.
+  if testlist & (A_FULL|A_XAMPL|A_YAMPL) then
+    d.valid=d.valid | (axis==0?A_XAMPL:A_YAMPL)
+  endif
+  if testlist & (A_FULL|A_XSTAB|A_YSTAB) then
+    d.valid=d.valid | (axis==0?A_XSTAB:A_YSTAB)
+  endif
+  Memcpy(data[actualhead][axis],d,Sizeof(d))
+  // Show data in display.
+  if testlist & (A_FULL|A_XAMPL|A_YAMPL) then
+    Setdisplay(actualhead,axis==0?A_XAMPL:A_YAMPL)
+    if testlist & (A_FULL|A_XSTAB|A_YSTAB) delay 1000
+  endif
+  if testlist & (A_FULL|A_XSTAB|A_YSTAB) then
+    Setdisplay(actualhead,axis==0?A_XSTAB:A_YSTAB)
+  endif
+end
+
+
+////////////////////////////////////////////////////////////////////////////////
+////////////////////////// SELECTION AND MAIN PROGRAM //////////////////////////
+
+// Selects tests to perform. Returns mask with specified tests or 0 if user
+// pressed Close.
+function int Selectaction()
+  int i,n,redraw,nhead
+  handle hall,hsingle,hhead,hnext,hok,hclose
+  handle hfull,hxnoise,hynoise,hxcirc,hycirc
+  handle hxstab,hystab,hxwheel,hxbelt,hxlost
+  handle hylost
+  nhead=$LAY.nfing*2
+  clear hright
+  change hinfo limits=0,0
+  change hinfo color=BLACK
+  change hinfo text="Select action"
+  draw window=hright color=LIGHTGRAY bkcolor=LIGHTGRAY
+  draw at 0,0 fillrect RIGHTX,RIGHTY
+  draw color=BLACK font=TIMESFONT at 6,30 wrap=RIGHTX-5
+  draw text="Please select head and set tests:"
+  draw color=DARKGRAY bkcolor=WHITE
+  draw at 10,35 fillrect RIGHTX-10,99
+  draw at 10,107 fillrect RIGHTX-10,278
+  draw color=BLACK font=INFOFONT
+  draw at 25,132 text="Full test"
+  draw at 25,157 text="Encoder noise"
+  draw at 25,179 text="Phases & circle"
+  draw at 25,201 text="Amplitudes & stability"
+  draw at 25,223 text="X gear wheel"
+  draw at 25,245 text="X belt tension"
+  draw at 25,267 text="Lost phases"
+  draw show
+  // Create head selection controls.
+  hall=control RADIO
+    window=hright
+    position=25,42,190,22
+    name=($LAY.cameras==0?"所有测试头":"所有测试头和相机")
+    help="测试所有可用的测试头"
+    mode=(testall?M_CHECKED:0)
+  endc
+  hsingle=control RADIO
+    window=hright
+    position=25,69,57,22
+    name="测试头"
+    help="仅测试一个选中的测试头"
+    mode=(testall?0:M_CHECKED)
+  endc
+  hhead=control COMBOLIST
+    window=hright
+    position=82,67,96,400
+    help="选择测试头"
+    font=FIXEDSYS
+    mode=M_VSCROLL
+  endc
+  for i=0,i<nhead+2,i++ do
+    if $LAY.excludedrails & (1<<(i/2)) continue
+    if i<nhead then
+      add hhead text=format("%2i (%i%c)",i,i/2,(i & 1?'R':'L'))
+    else
+      if ($LAY.cameras & (1<<(i-nhead)))==0 continue
+      add hhead text=format("%2i (%s)",i,i==nhead?"VTop":"VBot")
+    endif
+  enddo
+  hnext=control BUTTON
+    window=hright
+    position=177,67,57,23
+    text="Next"
+    help="按选择下一个测试头"
+  endc
+  // Create test selection controls.
+  hfull=control CHECKBOX
+    window=hright
+    position=170,115,45,20
+    text="X-Y"
+    help="对X和Y编码器进行全面测试"
+    font=INFOFONT
+    mode=(testlist & A_FULL?M_CHECKED:0)
+  endc
+  hxnoise=control CHECKBOX
+    window=hright
+    position=170,140,28,20
+    text="X"
+    help="测试X编码器的电气噪声"
+    font=INFOFONT
+    mode=(testlist & A_XNOISE?M_CHECKED:0)
+  endc
+  hynoise=control CHECKBOX
+    window=hright
+    position=210,140,28,20
+    text="Y"
+    help="测试Y编码器的电气噪声"
+    font=INFOFONT
+    mode=(testlist & A_YNOISE?M_CHECKED:0)
+  endc
+  hxcirc=control CHECKBOX
+    window=hright
+    position=170,162,28,20
+    text="X"
+    help="测试零脉冲附近的X编码器相位"
+    font=INFOFONT
+    mode=(testlist & (A_XPHAS|A_XCIRC)?M_CHECKED:0)
+  endc
+  hycirc=control CHECKBOX
+    window=hright
+    position=210,162,28,20
+    text="Y"
+    help="测试零脉冲附近的Y编码器相位"
+    font=INFOFONT
+    mode=(testlist & (A_YPHAS|A_YCIRC)?M_CHECKED:0)
+  endc
+  hxstab=control CHECKBOX
+    window=hright
+    position=170,184,28,20
+    text="X"
+    help="测试X编码器的相位幅度和稳定性"
+    font=INFOFONT
+    mode=(testlist & (A_XAMPL|A_XSTAB)?M_CHECKED:0)
+  endc
+  hystab=control CHECKBOX
+    window=hright
+    position=210,184,28,20
+    text="Y"
+    help="测试Y编码器的相位幅度和稳定性"
+    font=INFOFONT
+    mode=(testlist & (A_YAMPL|A_YSTAB)?M_CHECKED:0)
+  endc
+  hxwheel=control CHECKBOX
+    window=hright
+    position=170,206,28,20
+    text="X"
+    help="测试X齿轮夹具的稳定性"
+    font=INFOFONT
+    mode=(testlist & A_XWHEEL?M_CHECKED:0)
+  endc
+  hxbelt=control CHECKBOX
+    window=hright
+    position=170,228,28,20
+    text="X"
+    help="测试X皮带张力"
+    font=INFOFONT
+    mode=(testlist & A_XBELT?M_CHECKED:0)
+  endc
+  hxlost=control CHECKBOX
+    window=hright
+    position=170,250,28,20
+    text="X"
+    help="对X相位丢失进行长时间测试"
+    font=INFOFONT
+    mode=(testlist & A_XLOST?M_CHECKED:0)
+  endc
+  if $LAY.cameras!=0 then
+    hylost=control CHECKBOX
+      window=hright
+      position=210,250,28,20
+      text="Y"
+      help="对Y相位丢失进行长时间测试"
+      font=INFOFONT
+      mode=(testlist & A_YLOST?M_CHECKED:0)
+    endc
+  endif
+  // Create action controls.
+  hok=control BUTTON
+    window=hright
+    position=10,BTNY,(RIGHTX-30)/2,24
+    text="Start"
+    help="按下可以开始选定的测试"
+  endc
+  hclose=control BUTTON
+    window=hright
+    position=RIGHTX-10-(RIGHTX-30)/2,BTNY,(RIGHTX-30)/2,24
+    text="关闭"
+    help="按下即可完成编码器测试"
+  endc
+  redraw=1
+  // Selection loop.
+  while 1 do
+    // Actions if some control is activated.
+    if Pressed(hall) then
+      testall=1
+      redraw=1
+    else if Pressed(hsingle) then
+      testall=0
+      redraw=1
+    else if Pressed(hhead) then
+      n=0
+      for i=0,i<nhead+2,i++ do
+        if $LAY.excludedrails & (1<<(i/2)) continue
+        if n==Status(hhead) then
+          testhead=i; break
+        endif
+        if i>=nhead && ($LAY.cameras & (1<<(i-nhead)))==0 continue
+        n++
+      enddo
+    else if Pressed(hnext) then
+      testhead++
+      while ($LAY.excludedrails & (1<<(testhead/2)))!=0 ||                     \
+        (testhead>=nhead && testhead<nhead+2 &&                                \
+        ($LAY.cameras & (1<<(testhead-nhead)))==0) do
+        testhead++; enddo
+      if testhead>=nhead+2 testhead=0
+      redraw=1
+    else if Pressed(hfull) then
+      Setlist(hfull,A_FULL)
+      redraw=1
+    else if Pressed(hxnoise) then
+      Setlist(hxnoise,A_XNOISE); redraw=1
+    else if Pressed(hynoise) then
+      Setlist(hynoise,A_YNOISE); redraw=1
+    else if Pressed(hxcirc) then
+      Setlist(hxcirc,A_XPHAS|A_XCIRC); redraw=1
+    else if Pressed(hycirc) then
+      Setlist(hycirc,A_YPHAS|A_YCIRC); redraw=1
+    else if Pressed(hxstab) then
+      Setlist(hxstab,A_XAMPL|A_XSTAB); redraw=1
+    else if Pressed(hystab) then
+      Setlist(hystab,A_YAMPL|A_YSTAB); redraw=1
+    else if Pressed(hxwheel) then
+      Setlist(hxwheel,A_XWHEEL); redraw=1
+    else if Pressed(hxbelt) then
+      Setlist(hxbelt,A_XBELT); redraw=1
+    else if Pressed(hxlost) then
+      Setlist(hxlost,A_XLOST); redraw=1
+    else if Pressed(hylost) then
+      Setlist(hylost,A_YLOST); redraw=1
+    else if Pressed(hok) then
+      if testlist!=0 return testlist
+    else if Pressed(hclose) then
+      return 0
+    else if Pressed(hexit) then
+      return 0
+    endif
+    // Update state of the controls.
+    if redraw then
+      n=0
+      for i=0,i<nhead+2,i++ do         // Display selected head
+        if $LAY.excludedrails & (1<<(i/2)) continue
+        if i==testhead then
+          change hhead select=n; break
+        endif
+        if i>=nhead && ($LAY.cameras & (1<<(i-nhead)))==0 continue
+        n++
+      enddo
+      Setenable(hhead,testall==0)
+      Setenable(hnext,testall==0)
+      Setenable(hxnoise,(testlist & A_FULL)==0)
+      Setenable(hynoise,(testlist & A_FULL)==0)
+      Setenable(hxcirc,(testlist & A_FULL)==0)
+      Setenable(hycirc,(testlist & A_FULL)==0)
+      Setenable(hxstab,(testlist & A_FULL)==0)
+      Setenable(hystab,(testlist & A_FULL)==0)
+      Setenable(hxwheel,(testlist & A_FULL)==0)
+      Setenable(hxbelt,(testlist & A_FULL)==0)
+      Setenable(hxlost,(testlist & A_FULL)==0)
+      Setenable(hylost,(testlist & A_FULL)==0 && (testall || testhead>=nhead))
+      Setenable(hok,testlist)
+      redraw=0
+    endif
+    Checkdisplay()                     // Replaces wait
+  enddo
+end
+
+// Main function.
+function int main()
+  int err,nhead
+  // Create windows.
+  hmain=control WINDOW
+    window=NULL
+    position=10,10,MAINX,MAINY
+    name=format("编码器自检 v%s",VERSION)
+    help=" "
+    size=128
+  endc
+  hleft=control CHILD
+    window=hmain
+    position=5,5,LEFTX,LEFTY
+    help=" "
+    color=DARKGRAY
+    bkcolor=LIGHTGRAY
+    size=16384
+  endc
+  hright=control CHILD
+    window=hmain
+    position=SPLIT,10+SERVY,RIGHTX,RIGHTY
+    help=" "
+    color=DARKGRAY
+    size=1024
+  endc
+  hserv=control CHILD
+    window=hmain
+    position=SPLIT,5,RIGHTX,SERVY
+    help="当前编码器自检状态"
+    color=DARKGRAY
+  endc
+  hinfo=control PROGRESS
+    window=hserv
+    position=-1,-1,RIGHTX+2,SERVY+2
+    text="Welcome!"
+    help="当前编码器自检状态"
+    mode=M_PERCENT
+    font=MEDIUMFONT
+    limits=0,0
+  endc
+  hexit=control BUTTON
+    window=hmain
+    position=MAINX-84,MAINY-SERVY,80,SERVY-3
+    name="关闭"
+    help="双击终止自检并关闭此窗口"
+    mode=M_DBLCLICK
+  endc
+  draw window=hmain bitmap=0,0,1,"bkground" show
+  // Restore test parameters.
+  testhead=0
+  testlist=0
+  testall=0
+  getini("A5 encoder test","General","%i,%X,%i",&testhead,&testlist,&testall)
+  testlist=testlist & (                                                        \
+    A_FULL|A_XNOISE|A_XPHAS|A_XCIRC|A_XAMPL|A_XSTAB|A_XWHEEL|A_XBELT|A_XLOST|  \
+    A_YNOISE|A_YPHAS|A_YCIRC|A_YAMPL|A_YSTAB|A_YLOST)
+  // Create data display.
+  Createdisplay()
+  Setdisplay(testhead,0)
+  // Main loop.
+  while 1 do
+    // Restore original debug mode and move heads in home position.
+    err=Setdebugmode(0,0,0)
+    if err<0 return
+    if err==0 err=Movehome(-1)
+    if err<0 return
+    // Select next test(s).
+    if Selectaction()==0 break
+    // Run test(s).
+    err=0
+    nhead=$LAY.nfing*2
+    for actualhead=0,actualhead<nhead+2,actualhead++ do
+      if testall==0 then
+        if actualhead!=testhead continue
+      else
+        if $LAY.excludedrails & (1<<(actualhead/2)) continue
+        if actualhead>=nhead && ($LAY.cameras & (1<<(actualhead-nhead)))==0    \
+        continue
+      endif
+      if testlist & (A_FULL|A_XNOISE) then
+        // Make X noise test.
+        err=Noisetest(0)
+        if err!=0 break
+      endif
+      if testlist & (A_FULL|A_YNOISE) then
+        // Make Y noise test.
+        err=Noisetest(1)
+        if err!=0 break
+      endif
+      if testlist & (A_FULL|A_XPHAS|A_XCIRC) then
+        // Make X phase test around zero pulse.
+        err=Circtest(0)
+        if err!=0 break
+      endif
+      if testlist & (A_FULL|A_YPHAS|A_YCIRC) then
+        // Make Y phase test around zero pulse.
+        err=Circtest(1)
+        if err!=0 break
+      endif
+      if testlist & (A_FULL|A_XAMPL|A_XSTAB) then
+        // Make X amplitude and stability tests.
+        err=Stabilitytest(0)
+        if err!=0 break
+      endif
+      if testlist & (A_FULL|A_YAMPL|A_YSTAB) then
+        // Make Y amplitude and stability tests.
+        err=Stabilitytest(1)
+        if err!=0 break
+      endif
+      if testlist & (A_FULL|A_XWHEEL) then
+        // Make X wheel test.
+        ////////////////////////////////////////////////////////////
+      endif
+      if testlist & (A_FULL|A_XBELT) then
+        // Make X belt tension test.
+        ////////////////////////////////////////////////////////////
+      endif
+      if testlist & (A_FULL|A_XLOST|A_YLOST) then
+        // Make long X-Y test for lost phases.
+        ////////////////////////////////////////////////////////////
+      endif
+      // After tests are finished, move head into the home position.
+      err=Movehome(actualhead)
+      if err!=0 break
+    enddo
+    if err<0 break
+  enddo
+  // Say goodbye and save parameters to initialization file.
+  clear hright
+  change hinfo limits=0,0
+  change hinfo color=BLACK
+  change hinfo text="Bye!"
+  setini("A5 encoder test","General","%i,%X,%i",testhead,testlist,testall)
+  // Restore original debug mode, velocities and move heads in home position.
+  if Setdebugmode(0,0,0)!=0 return
+  if Setspeed(0.0,0.0,0.0,0.0)!=0 return
+  Movehome(-1)
+end
+

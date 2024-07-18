@@ -1,0 +1,281 @@
+#include "ls.icl"                  // Standard functions
+#include "or.icl"                // A2 command names
+#cmdbuff 1                             // 1 command buffer
+
+#define VERSION        ""
+
+// 1.01: Resizable window.    
+// 1.02: Autoupdates each second.
+// 1.03: Recognition of Firewire cameras.
+// 1.04: Recognition of slave measurement card.
+
+#define NNODE          63              // Max number of allowed nodes
+
+#define DX             700             // Visible width of plot
+#define DY             350             // Visible height of plot
+#define DXVIRT         2000            // Virtual width of plot
+
+#define NODEDX         115             // Width of node, including space
+
+typedef struct t_node
+  int            id                    // IEEE1394 node ID
+  int            dip                   // Dip switches or node type
+  int            level
+  int            nconnect              // Number of possible connections
+  int            nshow                 // Number of connectors to show
+  int            connect[6]            // Real connections
+  int            toindex[6]            // Connected to
+  int            toport[6]             // Connected to port
+  int            x[6],y                // Screen coordinates of connector
+ends
+
+typedef struct t_level
+  int            nnode                 // Number of nodes on level
+  char           node[NNODE]           // Indexes of nodes on level
+ends
+
+struct t_node    node[NNODE]
+int              nnode
+struct t_level   floor[NNODE]
+int              maxlevel
+
+handle           hmain                 // Main window
+handle           hchild                // Window that displays Firewire tree
+
+// Recursive function, scans tree of connections starting from local root index
+// with given level. Returns index of next unprocessed node.
+function int Scantree(int index,int level,int previndex,int prevport)
+  int i,k,next
+  node[index].level=level
+  maxlevel=Max(maxlevel,level)
+  floor[level].node[floor[level].nnode]=index
+  floor[level].nnode=floor[level].nnode+1
+  next=index-1
+  for i=node[index].nconnect-1, i>=0, i-- do
+    if i>=node[index].nshow then
+      k=node[index].nshow-1                
+    else
+      k=i
+    endif
+    if node[index].connect[i]==2 then    
+      node[index].toindex[k]=previndex // Connection to parent
+      node[index].toport[k]=prevport
+      if (previndex>=0 && prevport>=0) node[previndex].toport[prevport]=k
+    else if node[index].connect[i]==3 then
+      node[index].toindex[k]=next      // Connection to child
+      node[index].toport[k]=-1
+      next=Scantree(next,level+1,index,i)
+    endif
+  enddo
+  return next
+end
+
+// Returns 0 if Firewire tree is not changed, 1 if tree was updated, 2 if there
+// was no answer from Crate, 3 if answer was invalid (for example, command is
+// not supported) and 4 if root node is not the last in the list.
+function int Gettree()
+  char buf[256]
+  int i,j,n,t,type,ident,selfid,newnnode
+  struct t_node newnode[NNODE]
+  buf[0]=S_DUMP                        // Dump
+  buf[1]=255                           // Request to crate controller
+  buf[2]=0x20                          // Get IEEE1394 tree data
+  $uint2(buf+3)=0                      // Number of items
+  $uint2(buf+5)=0                      // Start item
+  ident=SYS.Sendimm(0,7,buf)
+  t=Time()
+  while $A[0].length==0 do
+    if (Time()-t)>1000 break           // Timeout 1 second
+    wait
+  enddo
+  newnnode=0
+  if $A[0].length==0 return 2          // No answer
+  if $A[0].answer!=S_DUMP return 3     // Invalid answer
+  n=($A[0].length-5)/8
+  for i=0, i<n && newnnode<NNODE, i++ do
+    selfid=$uint4($A[0]+5+8*i)
+    newnode[newnnode].id=(selfid>>24) & 0x3F
+    newnode[newnnode].dip=$uint4($A[0]+9+8*i)
+    newnode[newnnode].level=-1         // As yet, undefined
+    newnode[newnnode].connect[0]=(selfid>>6) & 0x03
+    newnode[newnnode].connect[1]=(selfid>>4) & 0x03
+    newnode[newnnode].connect[2]=(selfid>>2) & 0x03
+    type=(newnode[newnnode].dip & 0x000F0000)>>16
+    if (selfid & 1)!=0 then            // Continuation in the next self-id
+      i++; selfid=$uint4($A[0]+5+8*i)
+      newnode[newnnode].connect[3]=(selfid>>16) & 0x03
+      newnode[newnnode].connect[4]=(selfid>>14) & 0x03
+      newnode[newnnode].connect[5]=(selfid>>12) & 0x03
+      newnode[newnnode].nconnect=6
+      newnode[newnnode].nshow=6
+    else if type==0 then
+      newnode[newnnode].nconnect=3    // SHARC controller
+      newnode[newnnode].nshow=2
+    else if type==1 then
+      newnode[newnnode].nconnect=3    // Crate controller
+      newnode[newnnode].nshow=3
+    else if type==2 then
+      newnode[newnnode].nconnect=1    // Head camera
+      newnode[newnnode].nshow=1
+    else
+      newnode[newnnode].nconnect=3    // Repeater or unknown device
+      newnode[newnnode].nshow=3
+    endif
+    newnnode++
+  enddo
+  if newnnode<1 || newnode[newnnode-1].dip!=0x00010000 then
+    return 4                           // Root node is not the last in the list
+  endif
+  if newnnode==nnode then
+    for i=0,i<nnode,i++ do
+      if node[i].id!=newnode[i].id break
+      if node[i].dip!=newnode[i].dip break
+      if node[i].nconnect!=newnode[i].nconnect break
+      for j=0,j<6,j++ do
+        if node[i].connect[j]!=newnode[i].connect[j] break
+      enddo
+      if j<6 break
+    enddo
+    if i>=nnode return 0               // Tree is not changed
+  endif
+  Memcpy(node,newnode,Sizeof(node))
+  nnode=newnnode
+  Memset(floor,0,Sizeof(floor))
+  maxlevel=0
+  Scantree(nnode-1,0,-1,-1)
+  return 1
+end
+
+function int Redraw()
+  int i,j,k,x,xc,dc,y,x1,y1,index,dip,nodedx,nodedy
+  draw window=hchild color=WHITE bkcolor=WHITE clear
+  if maxlevel<4 then
+    nodedy=80
+  else
+    nodedy=240/maxlevel
+  endif
+  for j=0, j<=maxlevel,j++ do
+    y=j*nodedy+20
+    if j<2 && floor[j].nnode<=3 then
+      nodedx=NODEDX*2
+    else
+      nodedx=NODEDX
+    endif
+    x=(DXVIRT-floor[j].nnode*nodedx+(nodedx-NODEDX))/2
+    for i=floor[j].nnode-1, i>=0, i-- do
+      index=floor[j].node[i]
+      dip=node[index].dip
+      draw color=BLACK
+      if dip==0xFFFFFFFF then
+        draw bkcolor=WHITEBLUE         // Repeater or unknown device
+      else if dip==0x00010000 then
+        draw bkcolor=LIGHTGRAY         // Master
+      else if (dip & 0x000F0000)==0x00020000 then
+        draw bkcolor=YELLOW            // Head camera
+      else if (dip & 0x0F)==0x0F then
+        draw bkcolor=PINK              // Measurement card
+      else if (dip & 0x0F)==0x0E then
+        draw bkcolor=WHITEGREEN        // Video controller
+      else
+        draw bkcolor=LIGHTYELLOW       // Ordinary head
+      endif
+      draw at x+10,y fillrect x+NODEDX-15,y+29
+      node[index].y=y+14
+      if dip==0xFFFFFFFF then
+        xc=x+22; dc=(NODEDX-10)/8
+      else if dip==0x00010000 then
+        xc=x+20; dc=(NODEDX-10)/7
+      else
+        xc=x+20; dc=(NODEDX-10)/7
+      endif
+      draw bkcolor=GRAY
+      for k=0, k<node[index].nshow, k++ do
+        node[index].x[k]=xc  
+        draw at xc-4,y+6 fillrect xc+5,y+23
+        xc=xc+dc
+      enddo
+      draw color=BLACK font=TERMINALFONT
+      if dip==0x00010000 then
+        draw at xc-5,y+14 text=format("Nod %i",node[index].id)
+        draw at xc-5,y+24 text="Master"
+      else if (dip & 0x000F0000)==0x00020000 then
+        draw at xc-5,y+14 text=format("Node %i",node[index].id)
+        draw at xc-5,y+24 text=format("Firecam %i",dip & 0x3F)
+      else if (dip & 0x00010000)==0 then
+        draw at xc-4,y+14 text=format("Node %i",node[index].id)
+        draw at xc-4,y+24
+        if (dip & 0x0F)==0x0E then
+          draw text=format("V%s",dip & 0x10?"Bot":"Top")
+        else if (dip & 0x1F)==0x1F then
+          draw text="Meas"
+        else if (dip & 0x1F)==0x0F then
+          draw text="Mslave"
+        else
+          draw text=format("%s %i%c",                                          \
+          dip & 0x10?"Bot":"Top",(dip>>1) & 0x07,dip & 0x01?'R':'L')
+        endif;
+      endif
+      x=x+nodedx
+    enddo
+  enddo
+  draw color=LIGHTRED bkcolor=LIGHTRED
+  for i=0, i<nnode, i++ do
+    for j=0, j<node[i].nconnect, j++ do
+      if node[i].connect[j]!=3 continue
+      x=node[i].x[j]
+      y=node[i].y
+      index=node[i].toindex[j]
+      if node[i].toport[j]<0 continue //////////////////////////////////////////
+      x1=node[index].x[node[i].toport[j]]
+      y1=node[index].y
+      draw at x,y+5 to x1,y1-5
+      draw at x,y+5 fillellipse 5,5
+      draw at x1,y1-5 fillellipse 5,5
+    enddo
+  enddo
+  draw show
+end
+
+function int main()
+  int t
+  handle hquit
+  hmain=control WINDOW
+    window=NULL
+    position=20,20,DX+10,DY+35
+    minsize=DX/2+10,DY+35
+    name=format("1394总线树图%s",VERSION)
+    help=" "
+    bkcolor=GRAY
+    mode=M_SIZE|M_NOMINIMIZE
+  endc
+  hchild=control CHILD
+    window=hmain
+    position=5,5,DX,DY
+    help="H5 1394总线树图"
+    limits=DXVIRT,(maxlevel+1)*80
+    offset=(DXVIRT-DX)/2,0
+    mode=M_HSCROLL|M_VSCROLL|M_AUTOHEIGHT|M_AUTOWIDTH
+    bkcolor=WHITE
+    size=8192
+  endc
+  hquit=control BUTTON
+    window=hmain
+    position=DX-70,DY+10,76,21
+    name="退出"
+    help="关闭总线树图"
+    mode=M_AUTORIGHT|M_AUTOBOTTOM
+  endc
+  Gettree()
+  Redraw()
+  setfocus hchild
+  t=Time()
+  while 1 do
+    if Pressed(hquit) return
+    if Time()-t>1000 then
+      if Gettree()!=0 Redraw()
+      t=Time()
+    endif
+    wait
+  enddo
+end
+

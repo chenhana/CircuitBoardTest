@@ -1,0 +1,1211 @@
+#include "ls.icl"
+#include "or.icl"
+#cmdbuff 5
+
+#define VERSION        "1.04"
+#define DESCRIPTION    "Needle replacement helper"
+
+// 1.01: Automatical update of layout.
+// 1.02: Functional if tester is not loaded.
+// 1.03: Support for soft Kelvin needles.
+// 1.04: Defaults for the first run.
+
+#define MAINX          600
+#define MAINY          400
+#define SPLIT          330
+#define SERVY          25
+#define LEFTX          320             // (SPLIT-10)
+#define LEFTY          365             // (MAINY-SERVY-10)
+#define RIGHTX         265             // (MAINX-SPLIT-5)
+#define RIGHTY         335             // (MAINY-SERVY-SERVY-15)
+#define USERY          250
+
+#define NSET           3               // Number of needle sets
+
+#define LC_AUTOPROBE   0x10000000      // Autodetect probes (Kelvin or standard)
+
+#define HCZ_VALID      0x80000000      // Z axis type in layout valid
+#define HCZ_TYPEMAJOR  0x0F000000      // Major part of type (algorithms)
+#define   HCZ_TMAJORA  0x00000000      // Parallelogramm with magnetoresistor
+#define   HCZ_TMAJORC  0x01000000      // Ceramic stepper with Hall sensors
+#define HCZ_TYPEMINOR  0x00F00000      // Minor part of type (parameters)
+#define HCZ_TYPEMASK   0x0FF00000      // Mask to extract type of finger
+#define   HCZ_TYPEA2G  0x00000000      // A2 gray parallelogramm
+#define   HCZ_TYPEA2W  0x00100000      // A2 white parallelogramm
+#define   HCZ_TYPEA3   0x00200000      // A3 gray parallelogramm
+#define   HCZ_TYPECER  0x01000000      // Ceramic stepper with air bearings
+#define   HCZ_TYPENO   0x0FF00000      // Z axis completely absent
+#define HCZ_PWRMASK    0x000C0000      // Mask to extract Z motor power
+#define   HCZ_PWRSTD   0x00000000      // Standard motor
+#define HCZ_SUBCMASK   0x00030000      // Mask to extract needle subtype
+#define   HCZ_SPLK4    0x00010000      // HCZ_CONTSPL is very soft K4 needle
+#define HCZ_CONTMASK   0x0000FF00      // Mask to extract type of needle
+#define   HCZ_CONTDEF  0x00000000      // Default needle, no contact sensor
+#define   HCZ_CONTSPL  0x00000100      // Soft splinogramm with opto sensor
+#define   HCZ_CONTHSPL 0x00000200      // Hard splinogramm with opto sensor
+#define   HCZ_CONTEMU  0x00000400      // Standard needle on soft touch adapter
+#define   HCZ_CONTSTD  0x00000800      // Standard needle, developed by IBM
+#define   HCZ_CONTSKP  0x00001000      // Soft Kelvin with two parallelogramms
+#define HCZ_STRMASK    0x000000F0      // Mask to extract Z stroke type
+#define   HCZ_STRNORM  0x00000000      // Normal stroke
+#define   HCZ_STRSOFT  0x00000010      // Soft stroke
+#define   HCZ_STRHARD  0x00000020      // Hard stroke
+#define   HCZ_LEARNZ   0x00000030      // Learned Z coordinate
+#define   HCZ_HIPRESS  0x00000040      // High pressure with splinogramms
+#define HCZ_DMSMASK    0x0000000C      // Mask for type of pressure sensor
+#define   HCZ_DMSSTD   0x00000000      // Standard or no pressure sensor
+#define   HCZ_DMSREV   0x00000004      // Pressure sensor with reverse signal
+#define   HCZ_DMSAUTO  0x0000000C      // Autodetect type of pressure sensor
+#define HCZ_OPTMASK    0x00000003      // Mask to extract Z options
+#define   HCZ_NOOPT    0x00000002      // Do not optimize Z height
+#define   HCZ_PARKZ    0x00000001      // Park top Z axes in home position
+
+#define HCZ_REPLACE    (HCZ_VALID|HCZ_CONTMASK|HCZ_STRMASK)
+
+handle           hmain                 // Main window
+handle           hleft,hright          // Left and right subwindows
+handle           hserv                 // Placeholder for status/progress
+handle           hinfo                 // Status/progress
+handle           hexit                 // Close button
+
+int              replaced[32]          // List of replaced needles
+int              recalibrate           // Tester to be recalibrated
+int              currentset            // Currently installed set of needles
+int              newset                // New set of needles
+char             setname[NSET][256]    // Names of existing sets
+int              strokes[NSET][32]     // Strokes for selected set
+int              probetype[NSET]       // Standard or Kelvin
+float            rzero[NSET]           // Zero resistance
+int              zheadtype[NSET]       // Type of the probe, HCZ_xxx
+int              campos=2              // Camera position
+int              loadchanged           // Loading state is changed
+
+// Necessary here to receive the broadcast messages
+function int Answerproc(char *answer,int info)
+  if answer[4]==0xF0 then              // Broadcast message came
+    if Stricmp(answer+5,"CHG LOAD")==0 then
+      loadchanged=1
+    endif
+  endif
+end
+
+// Reads number of strokes for specified head. Returns number of strokes on
+// success and -1 if it is not readable.
+function int Getstrokes(int head)
+  int count
+  char key[32]
+  handle hdll
+  hdll=LoadDLL("kernel32.dll")
+  if hdll==NULL return -1
+  sprintf(key,"Finger%i",head)
+  count=CallDLL(hdll,"GetPrivateProfileIntA","Strokes",key,                    \
+    0,"c:\\hardware\\strokes.cnt")
+  UnloadDLL(hdll)
+  return count
+end
+
+// Sets number of strokes for specified head. Returns 0 on success and -1 on
+// any error.
+function int Setstrokes(int head,int newcount)
+  int result
+  char key[32],value[32]
+  handle hdll
+  hdll=LoadDLL("kernel32.dll")
+  if hdll==NULL return -1
+  sprintf(key,"Finger%i",head)
+  sprintf(value,"%i",newcount)
+  result=CallDLL(hdll,"WritePrivateProfileStringA","Strokes",key,              \
+    value,"c:\\hardware\\strokes.cnt")
+  UnloadDLL(hdll)
+  return result
+end
+
+// Selects action. Returns 0 if user selected to replace single needle, 1 to 3
+// if user decided to install set 1..3, 11..13 if user wants to edit set 1..3,
+// 999 to make hard reset and -1 to quit the script.
+function int Selectaction()
+  int i,y,type
+  handle hreset,hsingle,hset[NSET],hreload,hfinish,hdescr[NSET],hedit[NSET]
+  change hinfo limits=0,0
+  change hinfo text="Select your action"
+  clear hright
+  draw window=hright font=TIMESFONT
+  draw at 6,30 wrap=RIGHTX-5 color=BLACK
+  draw text="Please choose what you are going to do:"
+  draw show
+  y=45
+  hreset=control BUTTON
+    window=hright
+    position=20,y,RIGHTX-40,28
+    name="硬复位"
+    help="按下可执行硬件复位"
+  endc
+  if $GLOBAL.headloaded!=1 disable hreset
+  y=y+45
+  hsingle=control BUTTON
+    window=hright
+    position=20,y,RIGHTX-40,28
+    name="替换单针"
+    help="按下可更换当前设置的一个或多个针"
+  endc
+  y=y+45
+  for i=0,i<NSET,i++ do
+    hset[i]=control BUTTON
+      window=hright
+      position=20,y,RIGHTX-40,28
+      name=format("重新安装设置 %i",i+1)
+      help=format(                                                             \
+        "Press to remove existing needles and replace them with set %i",i+1)
+      font=MAINFONT
+    endc
+    if i+1==currentset || (zheadtype[i] & HCZ_VALID)==0 then
+      disable hset[i]
+    endif
+    y=y+35
+  enddo
+  y=y+10
+  hreload=control BUTTON
+    window=hright
+    position=20,y,RIGHTX-40,28
+    name="重载加载测试机"
+    help="按下启用加载器"
+  endc
+  if $GLOBAL.headloaded==1 disable hreload
+  y=y+35
+  hfinish=control BUTTON
+    window=hright
+    position=20,y,RIGHTX-40,28
+    name="完成"
+    help="按下可关闭脚本"
+  endc
+  clear hleft
+  draw window=hleft mode=M_CENTERED font=MEDIUMFONT color=DARKGRAY
+  draw at LEFTX/2,35 text="Needle replacement"
+  draw show
+  y=50
+  for i=0,i<NSET,i++ do
+    hdescr[i]=control CHILD
+      window=hleft
+      position=15,y,LEFTX-30,85
+      help=format("设置%i的说明",i+1)
+      color=BLACK
+      bkcolor=LIGHTYELLOW
+      size=1024
+    endc
+    draw window=hdescr[i]
+    if i+1==currentset then
+      draw color=BLACK at 0,0 rect LEFTX-30,85
+    endif
+    hedit[i]=control BUTTON
+      window=hdescr[i]
+      position=LEFTX-90,60,55,21
+      text="Edit"
+      help=format("按下可编辑设置%i",i+1)
+      color=STRANGE
+      bkcolor=LIGHTYELLOW
+    endc
+    draw color=DARKGRAY font=MEDIUMFONT
+    draw at 8,24 text=format("Set %i:",i+1)
+    if (zheadtype[i] & HCZ_VALID)==0 then
+      draw at 90,24 text="Undefined"
+    else
+      draw at 90,24 color=(i+1==currentset?LIGHTRED:BLACK)
+      if setname[i][0]=='\0' then
+        draw text="<Unnamed>"
+      else
+        draw text=setname[i]
+      endif
+      draw color=DARKGRAY at 8,44 text="Contact:"
+      draw at 90,44
+      if probetype[i]==0 then
+        draw text="Single"
+      else if probetype[i]==1 then
+        draw text="Kelvin"
+      else
+        draw text="Unknown"
+      endif
+      draw color=DARKGRAY at 8,62 text="Needle:"
+      type=zheadtype[i] & HCZ_CONTMASK
+      draw at 90,62
+      if type==HCZ_CONTDEF then
+        draw text="Default"
+      else if type==HCZ_CONTSPL then
+        draw text="Soft splinogram"
+      else if type==HCZ_CONTHSPL then
+        draw text="Hard splinogram"
+      else if type==HCZ_CONTSKP then
+        draw text="Soft Kelvin"
+      else if type==HCZ_CONTEMU then
+        draw text="Splino adapter"
+      else if type==HCZ_CONTSTD then
+        draw text="Standard"
+      else
+        draw text="Unknown"
+      endif
+      draw color=DARKGRAY at 8,80 text="Stroke:"
+      type=zheadtype[i] & HCZ_STRMASK
+      draw at 90,80
+      if type==HCZ_STRNORM then
+        draw text="Standard"
+      else if type==HCZ_STRSOFT then
+        draw text="Soft Landing"
+      else if type==HCZ_STRHARD then
+        draw text="Hard"
+      else
+        draw text="Unknown"
+      endif
+    endif
+    draw show
+    y=y+100
+  enddo
+  while 1 do
+    if loadchanged then
+      if $GLOBAL.headloaded==1 enable hreset
+      if $GLOBAL.headloaded!=1 disable hreset
+      if $GLOBAL.headloaded==1 disable hreload
+      if $GLOBAL.headloaded!=1 enable hreload
+      loadchanged=0
+    endif
+    if Pressed(hreset) return 999
+    if Pressed(hsingle) return 0
+    for i=0,i<NSET,i++ do
+      if Pressed(hset[i]) return i+1
+      if Pressed(hedit[i]) return i+11
+    enddo
+    if Pressed(hreload) then
+      SYS.Compile("loader.scr",1)
+      SYS.Start("loader",0,"")
+    endif
+    if Pressed(hfinish) return -1
+    if Pressed(hexit) return -1
+    wait
+  enddo
+end
+
+// Edits specified set. Returns 0 on success and -1 to quit the script.
+function int Editset(int set)
+  int i,y
+  char key[32]
+  handle hdone,hcancel,hname,hcontact,hneedle,hstroke,hdelete
+  change hinfo limits=0,0
+  change hinfo text=format("Edit set %i",set+1)
+  clear hright
+  draw window=hright font=TIMESFONT
+  draw at 6,30 wrap=RIGHTX-5 color=BLACK
+  draw text=format("Please change parameters of set %i. Press ",set+1)
+  draw font=MAINFONT text="Done " font=TIMESFONT text="when ready, or "
+  draw font=MAINFONT text="Cancel " font=TIMESFONT text="to discard changes."
+  draw show
+  hdone=control BUTTON
+    window=hright
+    position=20,245,RIGHTX/2-25,28
+    name="完成"
+    help="准备好后按下"
+  endc
+  hcancel=control BUTTON
+    window=hright
+    position=RIGHTX/2+6,245,RIGHTX/2-25,28
+    name="取消"
+    help="按此放弃修改"
+  endc
+  clear hleft
+  draw window=hleft font=MEDIUMFONT color=BLACK mode=M_CENTERED
+  draw at LEFTX/2,50 text=format("Parameters of set %i",set+1)
+  draw color=DARKGRAY mode=M_LEFT
+  y=90
+  draw at 10,y+21 text="Name:"
+  hname=control EDIT
+    window=hleft
+    position=90,y,LEFTX-105,24
+    text=setname[set]
+    help=format("编辑设置%1的名称",set+1)
+    font=MEDIUMFONT
+  endc
+  y=y+40
+  draw at 10,y+23 text="Contact:"
+  hcontact=control COMBOLIST
+    window=hleft
+    position=90,y,LEFTX-105,250
+    help="选择接触类型:标准(单一)或开尔文(分离)"
+    font=MEDIUMFONT
+  endc
+  add hcontact text="Standard"
+  add hcontact text="Kelvin"
+  change hcontact select=probetype[set]
+  y=y+40
+  draw at 10,y+23 text="Needle:"
+  hneedle=control COMBOLIST
+    window=hleft
+    position=90,y,LEFTX-105,250
+    help="选择针头类型"
+    font=MEDIUMFONT
+  endc
+  add hneedle text="Default"
+  add hneedle text="Standard"
+  add hneedle text="Soft splinogram"
+  add hneedle text="Hard splinogram"
+  add hneedle text="Splino adapter"
+  add hneedle text="Soft Kelvin"
+  if (zheadtype[set] & HCZ_CONTMASK)==HCZ_CONTDEF then
+    change hneedle select=0
+  else if (zheadtype[set] & HCZ_CONTMASK)==HCZ_CONTSPL then
+    change hneedle select=2
+  else if (zheadtype[set] & HCZ_CONTMASK)==HCZ_CONTHSPL then
+    change hneedle select=3
+  else if (zheadtype[set] & HCZ_CONTMASK)==HCZ_CONTEMU then
+    change hneedle select=4
+  else if (zheadtype[set] & HCZ_CONTMASK)==HCZ_CONTSKP then
+    change hneedle select=5
+  else
+    change hneedle select=1
+  endif
+  y=y+40
+  draw at 10,y+23 text="Stroke:"
+  hstroke=control COMBOLIST
+    window=hleft
+    position=90,y,LEFTX-105,250
+    help="选择击测硬度"
+    font=MEDIUMFONT
+  endc
+  add hstroke text="Standard"
+  add hstroke text="Soft Landing"
+  add hstroke text="Hard (scratching)"
+  if (zheadtype[set] & HCZ_STRMASK)==HCZ_STRSOFT then
+    change hstroke select=1
+  else if (zheadtype[set] & HCZ_STRMASK)==HCZ_STRHARD then
+    change hstroke select=2
+  else
+    change hstroke select=0
+  endif
+  hdelete=control BUTTON
+    window=hleft
+    position=LEFTX/2-55,275,110,28
+    text="Delete set"
+    help="双击可删除此设置"
+    mode=M_DBLCLICK
+  endc
+  draw show
+  while 1 do
+    if Pressed(hexit) then
+      return -1
+    else if Pressed(hdone) then
+      break
+    else if Pressed(hcancel) then
+      return 0
+    else if Pressed(hdelete) then
+      zheadtype[set]=zheadtype[set] & (~HCZ_VALID)
+      return 0
+    endif
+    wait
+  enddo
+  // Update set.
+  Text(hname,setname[set])
+  probetype[set]=Status(hcontact)
+  zheadtype[set]=(zheadtype[set] & (~(HCZ_CONTMASK|HCZ_STRMASK))) | HCZ_VALID
+  i=Status(hneedle)
+  if i==0 then
+    zheadtype[set]=zheadtype[set] | HCZ_CONTDEF
+  else if i==2 then
+    zheadtype[set]=zheadtype[set] | HCZ_CONTSPL
+  else if i==3 then
+    zheadtype[set]=zheadtype[set] | HCZ_CONTHSPL
+  else if i==4 then
+    zheadtype[set]=zheadtype[set] | HCZ_CONTEMU
+  else if i==5 then
+    zheadtype[set]=zheadtype[set] | HCZ_CONTSKP
+  else
+    zheadtype[set]=zheadtype[set] | HCZ_CONTSTD
+  endif
+  i=Status(hstroke)
+  if i==1 then
+    zheadtype[set]=zheadtype[set] | HCZ_STRSOFT
+  else if i==2 then
+    zheadtype[set]=zheadtype[set] | HCZ_STRHARD
+  else
+    zheadtype[set]=zheadtype[set] | HCZ_STRNORM
+  endif
+  // Save modifications to initialization file.
+  sprintf(key,"Set%i",set+1)
+  Setini("Replace",key,"%s",setname[set])
+  sprintf(key,"Probetype%i",set+1)
+  Setini("Replace",key,"%i",probetype[set])
+  sprintf(key,"Zheadtype%i",set+1)
+  Setini("Replace",key,"%X",zheadtype[set])
+  return 0
+end
+
+// Selects needle to replace.
+function int Selectneedle()
+  int i,j,y,delta
+  handle hhead[16][2],hfinish
+  change hinfo limits=0,0
+  change hinfo text="Select needle"
+  clear hright
+  draw window=hright font=TIMESFONT
+  draw at 6,30 wrap=RIGHTX-5 color=BLACK
+  draw text="Please select which needle you are going to replace. Just press "
+  draw text="the corresponding button to the left. Already replaced needles "
+  draw text="are grayed, but you are still able to access them. Press "
+  draw font=MAINFONT text="Finish " font=TIMESFONT text="to stop replacement."
+  draw show
+  hfinish=control BUTTON
+    window=hright
+    position=20,245,RIGHTX-40,28
+    name="完成"
+    help="按完成更换"
+  endc
+  clear hleft
+  y=50
+  for j=0,j<$LAY.nfing,j++ do
+    if $LAY.side[j]!=0 delta=10
+    for i=0,i<2,i++ do
+      hhead[j,i]=control BUTTON
+        window=hleft
+        position=(LEFTX/2)+(i==0?-80:30),y+delta,50,20
+        text=format("%i%c",j,i==0?'L':'R')
+        help=format("按下可更换测试头%i%c",j,i==0?'L':'R')
+        color=(replaced[j*2+i]?GRAY:BLACK)
+        bkcolor=(replaced[j*2+i]?WHITE:GRAY)
+      endc
+    enddo
+    y=y+25
+  enddo
+  while 1 do
+    if Pressed(hexit) return -1
+    if Pressed(hfinish) return -1
+    for j=0,j<$LAY.nfing,j++ do
+      for i=0,i<2,i++ do
+        if Pressed(hhead[j,i]) return j*2+i
+      enddo
+    enddo
+    wait
+  enddo
+end
+
+// Allows to replace the selected needle. Returns 0 on success, 1 on cancel
+// and -1 if operator has interrupted the process.
+function int Replaceneedle(int head)
+  int i,n,ypos,move,locked,pressure,state,noise,tlastctest
+  float x,y
+  char s[256]
+  handle hback,hmiddle,hfront,hunlock,hdone,hcancel,hreset
+  handle hzslider,hcslider,holdstrokes,hnewstrokes
+  change hinfo limits=0,0
+  change hinfo text=format("Needle %i (%i%c)",head,head/2,head & 1?'R':'L')
+  clear hright
+  draw window=hright font=TIMESFONT
+  draw at 6,30 wrap=RIGHTX-5 color=BLACK
+  if currentset==newset then
+    draw text=format("Please install new needle %i%c.",head/2,head & 1?'R':'L')
+  else
+    draw text=format("Please replace needle %i%c ",head/2,head & 1?'R':'L')
+    draw text=format("by corresponding needle from set %i",newset)
+    if newset>0 && setname[newset-1][0]!=0 then
+      draw text=format(" (%s)",setname[newset-1])
+    endif
+    draw text=". If this needle is new, press " font=MAINFONT
+    draw text="New needle " font=TIMESFONT
+    draw text="to reset stroke count to zero. "
+  endif
+  draw text="Press " font=MAINFONT text="Done " font=TIMESFONT
+  draw text="when needle is installed."
+  ypos=175
+  if $GLOBAL.headloaded==1 then
+    draw font=MAINFONT at 20,120 text="Head position:"
+    hback=control BUTTON
+      window=hright
+      position=20,130,(RIGHTX-50)/3,23
+      text="Back"
+      help="按下可将手臂移到后面位置"
+      color=BLACK
+      bkcolor=(campos==0?YELLOW:GRAY)
+    endc
+    hmiddle=control BUTTON
+      window=hright
+      position=25+(RIGHTX-50)/3,130,(RIGHTX-50)/3+1,23
+      text="Middle"
+      help="按下可将手臂移到中间位置"
+      color=BLACK
+      bkcolor=(campos==1?YELLOW:GRAY)
+    endc
+    hfront=control BUTTON
+      window=hright
+      position=31+2*((RIGHTX-50)/3),130,(RIGHTX-50)/3,23
+      text="Front"
+      help="按下可将手臂移到前面"
+      color=BLACK
+      bkcolor=(campos==2?YELLOW:GRAY)
+    endc
+    hunlock=control BUTTON
+      window=hright
+      position=20,ypos,RIGHTX-40,28
+      name="解锁架板框"
+      help="按下可以解锁架板框"
+    endc
+  endif
+  draw show
+  ypos=ypos+35
+  // User is able to cancel action only if single needles to be replaced, or if
+  // this is the first needle in the set.
+  if currentset==newset then
+    hcancel=control BUTTON
+      window=hright
+      position=20,ypos,RIGHTX-40,28
+      name="取消"
+      help="如果决定不更换针，请按"
+    endc
+    ypos=ypos+35
+  else if newset>0 then
+    hreset=control BUTTON
+      window=hright
+      position=20,ypos,RIGHTX-40,28
+      name="新针，重置针扎"
+      help="按下可将行程重置为零"
+    endc
+    ypos=ypos+35
+    if strokes[newset-1][head]==0 disable hreset
+  endif
+  hdone=control BUTTON
+    window=hright
+    position=20,ypos,RIGHTX-40,28
+    name="完成"
+    help="安装新针时按下"
+  endc
+  ypos=ypos+35
+  if currentset!=newset && head==0 then
+    hcancel=control BUTTON
+      window=hright
+      position=20,ypos+12,RIGHTX-40,28
+      name="取消所有设置"
+      help="如果决定不更换针头请按下"
+      color=RED
+    endc
+    ypos=ypos+47
+  endif
+  clear hleft
+  draw window=hleft color=BLACK font=INFOFONT
+  draw at 10,30 wrap=LEFTX-5
+  draw text="Gently touch the tip of the installed needle. In the case of "
+  draw text="splinogramm you will see Z pressure bar changing its position. "
+  draw text="Electrical noise should increase, indicating good contact with "
+  draw text="the holder. If noise increases when you touch the case, "
+  draw text="probably there is no contact to the shielding."
+  draw font=MEDIUMFONT
+  draw at 20,150 text="Z pressure:"
+  draw show
+  hzslider=control PROGRESS
+    window=hleft
+    position=30,155,LEFTX-40,26
+    help="实际Z压力，ADC位"
+    font=MEDIUMFONT
+    mode=M_PERCENT
+    limits=0,0
+  endc
+  draw at 20,208 text="Electrical noise:"
+  draw show
+  hcslider=control PROGRESS
+    window=hleft
+    position=30,213,LEFTX-40,26
+    help="针头发出的电噪声，a.u.(接近femtofarades)"
+    font=MEDIUMFONT
+    mode=M_PERCENT
+    limits=0,0
+  endc
+  if $GLOBAL.headloaded!=1 then
+    change hcslider color=GRAY
+    change hcslider text="Tester is not loaded"
+  endif
+  holdstrokes=control TEXT
+    window=hleft
+    position=20,270,LEFTX-40,26
+    help=" "
+    font=MEDIUMFONT
+  endc
+  if currentset>0 then
+    if currentset==newset then
+      change holdstrokes                                                       \
+      text=format("Strokes so far:  %i",strokes[currentset-1][head])
+    else
+      change holdstrokes                                                       \
+      text=format("Needle from set %i:  %i strokes",                           \
+      currentset,strokes[currentset-1][head])
+    endif
+  endif
+  hnewstrokes=control TEXT
+    window=hleft
+    position=20,300,LEFTX-40,26
+    help=" "
+    font=MEDIUMFONT
+  endc
+  if currentset==newset then
+    change hnewstrokes text="Stroke count will be set to zero"
+  else if newset>0 then
+    change hnewstrokes                                                         \
+    text=format("Needle from set %i:  %i strokes",                             \
+    newset,strokes[newset-1][head])
+  endif
+  // Move all other heads into the home positions.
+  for i=0,i<$LAY.nfing*2,i++ do
+    if i==head continue
+    sprintf(s,"M %i(Z) NOP",i)
+    SERV.Cmdimm(1,s)
+  enddo
+  move=1; locked=1
+  SYS.Killimm(2); $A[2].length=1
+  SYS.Killimm(3); $A[3].length=1
+  SYS.Killimm(4); $A[4].length=1
+  while 1 do
+    if Pressed(hback) then
+      change hback bkcolor=YELLOW
+      change hmiddle bkcolor=GRAY
+      change hfront bkcolor=GRAY
+      campos=0; move=1
+    else if Pressed(hmiddle) then
+      change hback bkcolor=GRAY
+      change hmiddle bkcolor=YELLOW
+      change hfront bkcolor=GRAY
+      campos=1; move=1
+    else if Pressed(hfront) then
+      change hback bkcolor=GRAY
+      change hmiddle bkcolor=GRAY
+      change hfront bkcolor=YELLOW
+      campos=2; move=1
+    else if Pressed(hunlock) then
+      s[0]=S_LOCKDOOR;
+      s[1]=0;                          // Unlock door
+      SYS.Send(2,s,0)                  // Discard the answer
+    else if Pressed(hdone) then
+      replaced[head]=1
+      recalibrate=1
+      if currentset==newset || newset==0 then
+        n=0                            // New needle, zero strokes count
+      else
+        n=strokes[newset-1][head]
+      endif
+      Setstrokes(head,n)
+      if newset>0 strokes[newset-1][head]=n
+      return 0
+    else if Pressed(hreset) then
+      if newset>0 then
+        strokes[newset-1][head]=0
+        change hnewstrokes                                                     \
+        text=format("Needle from set %i:  %i strokes",                         \
+        newset,strokes[newset-1][head])
+      endif
+      Disable(hreset)
+    else if Pressed(hcancel) then
+      return 1
+    else if Pressed(hexit) then
+      return -1
+    endif
+    // Periodically get readings of the pressure sensor.
+    if $A[2].length>0 then
+      if $A[2].length==9 then
+        pressure=$int4($A[2]+5)
+        change hzslider text=format("%i",pressure)
+        change hzslider limits=Min(20000,65536-pressure),20000
+      endif
+      sprintf(s,"INPORT32 HEAD(%i) 0x10000107",head)
+      SERV.Cmdimm(2,s)
+    endif
+    // Periodically get shuttle state.
+    if $A[3].length>0 then
+      if $A[3].length==9 then
+        state=$int4($A[3]+5) & 0x0F
+        if state!=0x0A then
+          locked=0
+        else if locked==0 then
+          move=1
+          locked=1
+        endif
+      endif
+      SERV.Cmdimm(3,"INPORT32 CRATE 0x000000F0")
+    endif
+    // Periodically make capacity measurements, but not more than 25 per second.
+    if $GLOBAL.headloaded==1 && $A[4].length>0 &&                              \
+      Abs(Time()-tlastctest)>=40                                               \
+    then
+      if $A[4].length==12 && $A[4].answer==S_MOVE &&                           \
+        $A[4].subcmd==M_CONTCAP                                                \
+      then
+        state=$int2($A[4]+6)
+        noise=Max(noise*0.9,$int4($A[4]+8))
+        change hcslider text=format("%i",noise)
+        change hcslider limits=noise,100
+      endif
+      sprintf(s,"M %i(SAME) CONTCAP(%i)",head,head)
+      SERV.Cmdimm(4,s)
+      tlastctest=Time()
+    endif
+    if $GLOBAL.headloaded==1 && move then
+      x=$LAY.xoffset/1000.0
+      if campos==0 then
+        y=$LAY.top[head/2]/1000.0-5.0
+      else if campos==1 then
+        y=$LAY.yoffset[head/2]/1000.0
+      else
+        y=$LAY.bottom[head/2]/1000.0+5.0
+      endif
+      sprintf(s,"M %i(%f,%f) NOP",head,x,y)
+      SERV.Cmdimm(0,s)
+      move=0
+    endif
+    wait
+  enddo
+end
+
+// If layout is not available, reads its copy from the disk. Returns 0 on
+// success and -1 if operator was unable to select correct name.
+function int Preparelayout()
+  int j,firstattempt
+  char s[260]
+  handle f,hlayoutname
+  if $LAY.nfing!=0 return 0            // No action is necessary
+  clear hleft
+  clear hright
+  change hinfo limits=0,0
+  change hinfo text="Please select layout"
+  draw window=hright font=TIMESFONT
+  draw at 6,30 wrap=RIGHTX-5 color=BLACK
+  draw text="Tester layout is currently unavailable. Please select correct "
+  draw text="file or press " font=MAINFONT text="Cancel " font=TIMESFONT
+  draw text="to stop needle replacement."
+  draw show
+  // The easiest way to get currently selected layout name is to create
+  // combo edit titled "Layout file". This one is hidden.
+  hlayoutname=control COMBOEDIT
+    window=hleft
+    position=-1000,-1000,100,120
+    name="布局文件"
+  endc
+  Text(hlayoutname,s)
+  destroy hlayoutname
+  firstattempt=1
+  while 1 do
+    if firstattempt==0 then
+      if SYS.Browse(hmain,s,"Specify layout name",0)==0 return -1
+    else
+      firstattempt=0
+    endif
+    f=Fopen(s,"rb")
+    if f==NULL continue
+    j=Fread($LAY,768,f)
+    j=j+Fread($EXTLAY,768,f)
+    Fclose(f)
+    if j!=1536 continue
+    if $LAY.nfing!=0 break
+  enddo
+  return 0
+end
+
+// Writes layout and layout extention to the disk. Returns 0 on success and -1
+// if layout was not saved.
+function int Writelayout()
+  int j,firstattempt
+  char s[260]
+  handle f,hlayoutname
+  // The easiest way to get currently selected layout name is to create
+  // combo edit titled "Layout file". This one is hidden.
+  hlayoutname=control COMBOEDIT
+    window=hleft
+    position=-1000,-1000,100,120
+    name="布局文件"
+  endc
+  Text(hlayoutname,s)
+  destroy hlayoutname
+  firstattempt=1
+repeat:
+  if firstattempt==0 then
+    if SYS.Browse(hmain,s,"Specify layout name",0)==0 return -1
+  else
+    firstattempt=0
+  endif
+  f=Fopen(s,"wb")
+  if f==NULL goto repeat
+  j=Fwrite($LAY,768,f)
+  j=j+Fwrite($EXTLAY,768,f)
+  Fclose(f)
+  if j!=1536 goto repeat
+  return 0
+end
+
+// Loads layout and layout extention to the tester. Returns 0 on success, -1
+// if operator interrupted the script and 1 on any error. Note that A5 does
+// not require to precede layout with load crate.
+function int Loadlayout()
+  int i,t,len
+  char buf[1024]
+  if $LAY.nfing==0 return 1            // Layout unavailable
+  // Make soft reset.
+  SYS.Killimm(0)
+  SYS.Killimm(1)
+  SYS.Killimm(2)
+  SYS.Softimm(2)
+  t=Time()
+  while $A[2].length==0 do
+    if Pressed(hexit) return -1        // Button "Exit" works as an interrupt
+    if Time()-t>10000 return 1         // Timeout
+    wait
+  enddo
+  len=768
+  for i=0,i<768,i++
+    if $char($EXTLAY+i)!=0 break       // Is layout extention present?
+  enddo
+  if i<768 len=1536
+  buf[0]=S_LOADRUN
+  if $GLOBAL.layloaded==1 then
+    buf[1]=2                           // Reload layout
+  else
+    buf[1]=3                           // Load layout
+  endif
+  $int4(buf+2)=0                       // Dummy zero bytes
+  Memcpy(buf+6,$LAY,768)
+  SYS.Sendimm(0,774,buf)
+  $A[1].answer=S_LOADRUN               // Emulate answer if no extention
+  if len==1536 then
+    buf[0]=S_LOADRUN
+    buf[1]=15                          // Load layout extention
+    $int4(buf+2)=0                     // Dummy zero bytes
+    Memcpy(buf+6,$EXTLAY,768)
+    SYS.Sendimm(1,774,buf)
+  endif
+  t=Time(); i=-1
+  while $A[0].length==0 && (len!=1536 || $A[1].length==0) do
+    if Pressed(hexit) return -1        // Button "Exit" works as an interrupt
+    if Time()-t>90000 return 1         // Timeout
+    wait
+  enddo
+  $GLOBAL.crateloaded=1
+  $GLOBAL.layloaded=1
+  for i=0,i<16,i++                     // Same offsets in tester & inner copy
+    $LAYCORR.leftzerox[i]=$LAY.leftzerox[i]
+    $LAYCORR.leftzeroy[i]=$LAY.leftzeroy[i]
+    $LAYCORR.rightzerox[i]=$LAY.rightzerox[i]
+    $LAYCORR.rightzeroy[i]=$LAY.rightzeroy[i]
+  enddo
+end
+
+// Service function, sets debug mode for heads and cameras. Returns 0 on
+// success, 1 on error and -1 if user interrupted the test.
+function int Setdebugmode(int debugmode,int videomode,int disabledrails)
+  int t
+  char buf[32]
+  // Send command.
+  SYS.Killimm(0)
+  buf[0]=S_DEBUG
+  buf[1]=0x01                          // Set debugging mode
+  $uint2(buf+2)=debugmode|$GLOBAL.debugmode
+  $uint2(buf+4)=disabledrails|$GLOBAL.disabledrails
+  $uint2(buf+6)=videomode|$GLOBAL.videomode
+  SYS.Sendimm(0,8,buf)
+  // Wait for answer.
+  t=Time()
+  while $A[0].length==0 do
+    if Time()-t>3000 then              // Timeout!
+      return 1
+    else if Pressed(hexit) then        // User interrupted the test
+      return -1
+    endif
+    wait             
+  enddo
+  if $A[0].answer!=S_DEBUG then        // Error detected
+    return 1
+  endif
+  return 0
+end
+
+// Corrects layout, writes it to disk and simultaneously loads it to the
+// tester. Returns 0 on success and -1 on error.
+function int Updatelayout(int set)
+  int i,changed
+  clear hleft
+  clear hright
+  change hinfo limits=0,0
+  change hinfo text="Updating layout..."
+  changed=0
+  // Update layout.
+  if $LAY.probetype!=probetype[set] then
+    $LAY.probetype=probetype[set]
+    changed=1
+  endif
+  if ($LAY.config & LC_AUTOPROBE)!=0 then
+    $LAY.config=$LAY.config & (~LC_AUTOPROBE)
+    changed=1
+  endif
+  if probetype[set]!=0 rzero[set]=0.0  // Kelvin assumes zero correction
+  if $LAY.rzero!=rzero[set] then
+    $LAY.rzero=rzero[set]
+    changed=1
+  endif
+  if (($EXTLAY.zheadtype^zheadtype[set]) & HCZ_REPLACE)!=0 then
+    $EXTLAY.zheadtype=($EXTLAY.zheadtype & (~HCZ_REPLACE)) |                   \
+      (zheadtype[set] & HCZ_REPLACE)
+    changed=1
+  endif
+  if changed==0 return                 // Layout remains unchanged, do nothing
+  delay 1000                           // Psychological delay
+  // Save layout to disk.
+  change hinfo text="Saving layout to disk..."
+  i=Writelayout()
+  if i<0 return -1                     // Unable to save layout
+  delay 1000                           // Psychological delay
+  // Reload layout.
+  change hinfo text="Loading layout to tester..."
+  i=Loadlayout()
+  SYS.Broadcast(8,"CHG LAY")           // Inform others that layout is changed
+end
+
+// Service function, returns 1 if set is compatible to layout and 0 otherwise.
+function int Iscompatibleset(int set)
+  if (zheadtype[set] & HCZ_VALID)==0 return 0
+  if (($EXTLAY.zheadtype^zheadtype[set]) & HCZ_REPLACE)!=0 return 0
+  //if $LAY.probetype!=probetype[set] return 0
+  return 1
+end
+
+function int Warnincompatibleset()
+
+  /////////////////////////////////////////////////////////////////////////////////////////
+
+end
+
+// Makes hard reset and loads layout in order to enable flash-controlled port
+// I/O. Returns 0 on success, 1 if hard reset failed and -1 if operator
+// interrupted script. Note that for A5 it is not necessary to load crate.
+function int Resettester()
+  int i,t,tlast
+  change hinfo limits=0,0
+  change hinfo text="Hard reset"
+  clear hright
+  draw window=hright font=TIMESFONT
+  draw at 6,30 wrap=RIGHTX-5 color=BLACK
+  draw text="Script will now reset the tester and then load layout, in order "
+  draw text="to enable basic port i/o operations. Please wait..."
+  draw show
+  SYS.Killimm(0)
+  SYS.Broadcast(11,"HARD RESET")       // Inform others to stop activity
+  SYS.Hardimm(0)
+  t=Time(); tlast=t
+  while $A[0].length==0 do
+    if Pressed(hexit) return -1
+    if Time()-tlast>1000 then
+      change hinfo limits=(Time()-t)/1000,25
+      tlast=tlast+1000
+    endif
+    if Time()-t>25000 break
+    wait
+  enddo
+  if $A[0].length==0 then
+    change hinfo limits=0,0
+    change hinfo text="Hard reset failed"
+    delay 2000
+    return 1
+  endif
+  $GLOBAL.crateloaded=-1               // Software not loaded
+  $GLOBAL.layloaded=-1
+  $GLOBAL.headloaded=-1
+  $GLOBAL.corrloaded=-1
+  delay 500                            // Crate performs self-test
+  SYS.Broadcast(9,"CHG LOAD")          // Inform on state change
+  change hinfo limits=0,0
+  change hinfo text="Reloading layout..."
+  i=Setdebugmode(0,0,0)
+  if i<0 return -1
+  i=Loadlayout()
+  if i==1 then
+    change hinfo text="Unable to load layout"
+    delay 2000
+  endif
+  return i
+end
+
+// Main program.
+function int main()
+  int i,j,n,action,head,updateini
+  char key[32]
+  hmain=control WINDOW
+    window=NULL
+    position=10,10,MAINX,MAINY
+    name=format("针头替换 v%s",VERSION)
+    help=" "
+    bkcolor=LIGHTGRAY
+    size=128
+  endc
+  hleft=control CHILD
+    window=hmain
+    position=5,5,LEFTX,LEFTY
+    help=" "
+    color=DARKGRAY
+    size=16384
+  endc
+  hserv=control CHILD
+    window=hmain
+    position=SPLIT,5,RIGHTX,SERVY
+    help="实际状态"
+    color=DARKGRAY
+  endc
+  hright=control CHILD
+    window=hmain
+    position=SPLIT,10+SERVY,RIGHTX,RIGHTY
+    help=" "
+    color=DARKGRAY
+    size=1024
+  endc
+  hinfo=control PROGRESS
+    window=hserv
+    position=-1,-1,RIGHTX+2,SERVY+2
+    text="Welcome!"
+    help="实际状态"
+    mode=M_PERCENT
+    font=MEDIUMFONT
+    limits=0,0
+  endc
+  hexit=control BUTTON
+    window=hmain
+    position=MAINX-84,MAINY-SERVY,80,SERVY-3
+    name="关闭"
+    help="双击以完成此脚本-可能会损坏数据！"
+    mode=M_DBLCLICK
+  endc
+  // Set defaults for the first script run. Doe not apply to hard touch or S1.
+  if ($EXTLAY.zheadtype & HCZ_VALID)!=0 &&                                     \
+    ($EXTLAY.zheadtype & HCZ_TYPEMAJOR)==HCZ_TMAJORA &&                        \
+    ($EXTLAY.zheadtype & HCZ_TYPEMASK)!=HCZ_TYPECER &&                         \
+    ($EXTLAY.zheadtype & HCZ_CONTMASK)!=HCZ_CONTDEF &&                         \
+    ($EXTLAY.zheadtype & HCZ_CONTMASK)!=HCZ_CONTSTD                            \
+  then
+    Strcpy(setname[0],"Soft touch")    // Splinogramm
+    probetype[0]=0
+    rzero[0]=$LAY.rzero
+    zheadtype[0]=HCZ_VALID|HCZ_CONTSPL|HCZ_STRNORM
+    Strcpy(setname[1],"Kelvin")        // Kelvin
+    probetype[1]=1
+    rzero[1]=0.0
+    zheadtype[1]=HCZ_VALID|HCZ_CONTSKP|HCZ_STRNORM;
+    Strcpy(setname[2],"Hard touch")    // Adapter
+    probetype[2]=0
+    rzero[2]=$LAY.rzero
+    zheadtype[2]=HCZ_VALID|HCZ_CONTEMU|HCZ_STRNORM;
+  endif
+  // Get settings.
+  currentset=0; Getini("Replace","CurrentSet","%i",&currentset)
+  if (currentset<1 || currentset>NSET) then
+    currentset=1
+  endif
+  for i=0,i<NSET,i++ do
+    sprintf(key,"Set%i",i+1)
+    Getini("Replace",key,"%s",setname[i])
+    sprintf(key,"Probetype%i",i+1)
+    Getini("Replace",key,"%i",probetype+i)
+    probetype[i]=(probetype[i]!=0)
+    sprintf(key,"Rzero%i",i+1)
+    Getini("Replace",key,"%f",rzero+i)
+    sprintf(key,"Zheadtype%i",i+1)
+    Getini("Replace",key,"%X",zheadtype+i)
+    sprintf(key,"Strokes%i",i+1)
+    Getini("Replace",key,"%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i",    \
+      strokes[i]+0,strokes[i]+1,strokes[i]+2,strokes[i]+3,                     \
+      strokes[i]+4,strokes[i]+5,strokes[i]+6,strokes[i]+7,                     \
+      strokes[i]+8,strokes[i]+9,strokes[i]+10,strokes[i]+11,                   \
+      strokes[i]+12,strokes[i]+13,strokes[i]+14,strokes[i]+15)
+    if i==currentset-1 then
+      for j=0,j<16,j++ do
+        n=Getstrokes(j)
+        if n>=0 strokes[i][j]=n
+      enddo
+    endif
+  enddo
+  // Assure that layout is available.
+  i=Preparelayout()
+  if i!=0 goto finish
+  // If settings differ from current set, select first available that matches.
+  // If this is not possible, create new. If this is not possible, cry as a
+  // hell.
+  if Iscompatibleset(currentset-1)==0 then
+    for i=0,i<NSET,i++ do
+      if Iscompatibleset(i) then
+        currentset=i+1
+        break
+      endif
+    enddo
+    if i>=NSET then
+      for i=0,i<NSET,i++ do
+        if (zheadtype[i] & HCZ_VALID)==0 break
+      enddo
+      if i<NSET then
+        Strcpy(setname[i],"<unnamed>")
+        zheadtype[i]=$EXTLAY.zheadtype & HCZ_REPLACE
+        probetype[i]=$LAY.probetype
+        for j=0,j<16,j++ do strokes[i,j]=0; enddo
+        currentset=i+1
+      else
+        Warnincompatibleset()
+      endif
+    endif
+  endif
+  rzero[currentset-1]=$LAY.rzero
+  // Main loop.
+  updateini=0
+  recalibrate=0
+  while 1 do
+    action=Selectaction()
+    if action<0 then
+      // Finish script.
+      break
+    else if action==0 then
+      // Replace one or several needles in the existing set.
+      newset=currentset
+      while 1 do
+        head=Selectneedle()
+        if head<0 break
+        i=Replaceneedle(head)
+        if i<0 goto finish
+        updateini=1
+      enddo
+    else if action>=1 && action<NSET+1 then
+      // Replace set and update layout.
+      newset=action
+      i=0
+      for head=0,head<$LAY.nfing*2,head++ do
+        i=Replaceneedle(head)
+        if i<0 goto finish
+        if i>0 break
+      enddo
+      if i==0 then
+        currentset=newset
+        Updatelayout(newset-1)
+        updateini=1
+      endif
+    else if action>=11 && action<NSET+11 then
+      // Edit set.
+      i=Editset(action-11)
+      if i<0 break
+    else if action==999 then
+      i=Resettester()
+      if i<0 break
+    endif
+    if updateini then
+      Setini("Replace","CurrentSet","%i",currentset)
+      for i=0,i<NSET,i++ do
+        sprintf(key,"Rzero%i",i+1)
+        Setini("Replace",key,"%f",rzero[i])
+        sprintf(key,"Strokes%i",i+1)
+        Setini("Replace",key,                                                  \
+        "%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i",                     \
+        strokes[i][0],strokes[i][1],strokes[i][2],strokes[i][3],               \
+        strokes[i][4],strokes[i][5],strokes[i][6],strokes[i][7],               \
+        strokes[i][8],strokes[i][9],strokes[i][10],strokes[i][11],             \
+        strokes[i][12],strokes[i][13],strokes[i][14],strokes[i][15])
+      enddo
+      updateini=0
+    endif
+  enddo
+finish:
+  clear hleft
+  clear hright
+  if recalibrate then
+    SYS.Compile("calibr.scr",1);
+    SYS.Start("CALIBR",0,"");
+  endif
+end
+

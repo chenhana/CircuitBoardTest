@@ -1,0 +1,3985 @@
+#include "ls.icl"                  // System definitions and functions
+#include "or.icl"                // Command & error mnemonics
+#include "pa.icl"                  // Rich Text Format extentions
+#cmdbuff 8                             // 8 command buffers
+#zeroid                                // Intercept tester answers with zero ID
+
+#define VERSION        "1.09"
+#define DESCRIPTION    "Kelvin probe test"
+
+// 1.01: PINRMAX increased from 2.5 Ohm to 4.0 Ohm.
+// 1.02: Test of single pin probes.
+// 1.03: Changed parameters and set 5 um accuracy.
+// 1.04: Major rewrite (parameters, needle selection).
+// 1.05: Configuration parameters added to protocol.
+// 1.06: Support for hard touch needles with pressure sensor.
+// 1.07: Bug with interpretation of bad Kelvin measurements on base FR4.
+// 1.08: Limits for micro needles adjusted.
+// 1.09: Special limits for LATEST needles.
+
+// This script assumes that there is a special board under the middle of the
+// rail 1. Top half of the board is coated with metal and connected to antenna
+// and bottom half consists of bare FR4.
+
+// Used resources.
+#bitmap "logo"<"guoke.bmp"               // All bitmaps are compressed
+#bitmap "bkground"<"aluminum.bmp"      // Alternative: "pcb1.bmp"
+
+// Dimensions of test window.
+#define MAINX          600
+#define MAINY          400
+#define SPLIT          330
+#define SERVY          25
+#define LEFTX          320             // (SPLIT-10)
+#define LEFTY          365             // (MAINY-SERVY-10)
+#define RIGHTX         265             // (MAINX-SPLIT-5)
+#define RIGHTY         335             // (MAINY-SERVY-SERVY-15)
+#define USERY          295
+
+// Bits in t_extlay.zheadtype and t_config.ztype.
+#define HCZ_VALID      0x80000000      // Z axis type in layout valid
+#define HCZ_TYPEMAJOR  0x0F000000      // Major part of type (algorithms)
+#define   HCZ_TMAJORA  0x00000000      // Parallelogramm with magnetoresistor
+#define   HCZ_TMAJORC  0x01000000      // Ceramic stepper with Hall sensors
+#define   HCZ_TMAJORL  0x02000000      // Linear motor with encoder
+#define HCZ_TYPEMINOR  0x00F00000      // Minor part of type (parameters)
+#define HCZ_TYPEMASK   0x0FF00000      // Mask to extract type of finger
+#define   HCZ_TYPEA2G  0x00000000      // A2 gray parallelogramm
+#define   HCZ_TYPEA2W  0x00100000      // A2 white parallelogramm
+#define   HCZ_TYPEA3   0x00200000      // A3 gray parallelogramm
+#define   HCZ_TYPECER  0x01000000      // S1 ceramic stepper with air bearings
+#define   HCZ_TYPELIN  0x02000000      // A8 linear motor
+#define   HCZ_TYPENO   0x0FF00000      // Z axis completely absent
+#define HCZ_PWRMASK    0x000C0000      // Mask to extract Z motor power
+#define   HCZ_PWRSTD   0x00000000      // Standard motor
+#define HCZ_SUBCMASK   0x00030000      // Mask to extract needle subtype
+#define   HCZ_SPLK4    0x00010000      // HCZ_CONTSPL is very soft K4 needle
+#define HCZ_CONTMASK   0x0000FF00      // Mask to extract type of needle
+#define   HCZ_CONTDEF  0x00000000      // Default needle, no contact sensor
+#define   HCZ_CONTSPL  0x00000100      // Soft splinogramm with opto sensor
+#define   HCZ_CONTHSPL 0x00000200      // Hard splinogramm with opto sensor
+#define   HCZ_CONTEMU  0x00000400      // Standard needle on soft touch adapter
+#define   HCZ_CONTHPS  0x00000500      // Hard touch needle with opto sensor
+#define   HCZ_CONTSTD  0x00000800      // Standard needle, developed by IBM
+#define   HCZ_CONTSKP  0x00001000      // Soft Kelvin with two parallelogramms
+#define HCZ_STRMASK    0x000000F0      // Mask to extract Z stroke type
+#define   HCZ_STRNORM  0x00000000      // Normal stroke
+#define   HCZ_STRSOFT  0x00000010      // Soft stroke
+#define   HCZ_STRHARD  0x00000020      // Hard stroke
+#define   HCZ_LEARNZ   0x00000030      // Learned Z coordinate
+#define   HCZ_HIPRESS  0x00000040      // High pressure with splinogramms
+#define HCZ_DMSMASK    0x0000000C      // Mask for type of pressure sensor
+#define   HCZ_DMSSTD   0x00000000      // Standard or no pressure sensor
+#define   HCZ_DMSREV   0x00000004      // Pressure sensor with reverse signal
+#define   HCZ_DMSAUTO  0x0000000C      // Autodetect type of pressure sensor
+#define HCZ_OPTMASK    0x00000003      // Mask to extract Z options
+#define   HCZ_NOOPT    0x00000002      // Do not optimize Z height
+#define   HCZ_PARKZ    0x00000001      // Park top Z axes in home position
+
+// Measurement options in extended layout.
+#define HCM_HV1MA      0x00000001      // Force 1 mA during HV measurements
+#define HCM_STRICT     0x00000002      // 20% stricter self-test
+#define HCM_NOCTCHK    0x00000004      // Don't check contacts (except ExactR)
+#define HCM_PARCONT    0x00000008      // Check influence of parallel contacting
+#define HCM_NOACCEL    0x00000010      // Do not accelerate reed relays
+#define HCM_TMEASOFF   0x00000020      // Turn off temperature measurements
+#define HCM_CTOEXT     0x00000040      // Calibrate capacity to shuttle (extant)
+#define HCM_ISOEANT    0x00000080      // External antennas isolated
+#define HCM_FILTMASK   0x00000F00      // Mask to extract signal filtering
+#define   HCM_FNONE    0x00000000      // No signal filtering
+#define   HCM_F500K    0x00000100      // 500 kHz filter
+#define   HCM_F100K    0x00000200      // 100 kHz filter
+#define HCM_FILTERC    0x00001000      // Filter C measurements over 300 pF
+
+// Definition of global error bits.
+#define GE_BOOT        0x0001          // Tester must be rebooted
+#define GE_HARDWARE    0x0002          // Pneumatics/shuttle out of order
+#define GE_IOERROR     0x0004          // I/O error detected
+#define GE_COMMAND     0x0008          // Command sending error
+#define GE_MEAS        0x0010          // Resistance measurements impossible
+
+// Layout configuration bits in $LAY.config.
+#define LC_SMASK2      0x20000000      // Extention of LC_SMASK
+#define LC_AUTOPROBE   0x10000000      // Autodetect probes (Kelvin or standard)
+#define LC_TYPEMASK    0x0B000000      // General type of machine
+#define   LC_STD       0x00000000      // LC_TYPEMASK: standard A5/A6 tester
+#define   LC_NEWA1     0x01000000      // LC_TYPEMASK: new A1 (slow A5) tester
+#define   LC_S1        0x02000000      // LC_TYPEMASK: S1/S2
+#define   LC_A8        0x03000000      // LC_TYPEMASK: A7/A8
+#define LC_VACUUMBOX   0x04000000      // Disable movements on bottom side
+#define LC_MOREMASK    0x00C00000      // Mask for more space bits
+#define   LC_MOREBOT   0x00800000      // Give more space on bottom
+#define   LC_MORETOP   0x00400000      // Give more space on the top
+#define LC_DEADLOCKS   0x00200000      // Autoresolve deadlocks
+#define LC_ILLUM       0x00100000      // Auto switch video illumination on/off
+#define LC_HARDZ       0x00040000      // Hard Z contacting (A2/A4/A5 only)
+#define LC_QUAKE       0x00020000      // Earthquake protection on (M2 only)
+#define LC_SMASK1      0x0001C000      // Mask for type of loading system
+#define LC_RELAYS      0x00002000      // Slow (LATEST-compatible) relays
+#define LC_OHTYPE      0x00001C00      // Mask to extract on-head type
+#define   LC_NOFIELD   0x00001000      // On-heads without field amplifier
+#define   LC_PHADJ     0x00000C00      // On-heads with adjustable field phase
+#define   LC_ACTIVE    0x00000400      // Active on-heads (with Dallas/R1-R4)
+#define   LC_PASSIVE   0x00000000      // Passive on-heads (manual C adjust)
+#define LC_TRAFFICS    0x00000200      // Hitachi-style traffic lights
+#define LC_ZSENSORS    0x00000100      // A series: Z pressure sensors active
+#define LC_LOWBAUD     0x00000100      // M2: low AFMCU I/O baud rate
+#define LC_ISM2        0x00000080      // M2 tester
+#define LC_A2LOADER    0x00000040      // A2-style loader, enables LC_SMASK
+#define LC_ENCODERS    0x00000020      // Tester with encoders
+#define LC_COVER       0x00000010      // I have forgotten what it means
+#define LC_HIGHZ       0x00000008      // Z always moves with full hub (B1)
+#define LC_LDELAY      0x00000004      // Wait after light off (obsolete)
+#define LC_AMASK       0x00000003      // Mask for type of antennae
+#define   LC_EXTANT    0x00000000      // LC_AMASK: external (A1) antennae
+#define   LC_INTANT    0x00000001      // LC_AMASK: internal antennae (void)
+#define   LC_FINGANT   0x00000002      // LC_AMASK: finger antennae
+// Alternative (old) interpretation of LC_OHTYPE bits.
+#define LC_PHASEADJ    0x00000800      // On-heads with adjustable field phase
+#define LC_ACTIVEONHD  0x00000400      // Active on-heads (with Dallas/R1-R4)
+// Tester types in LC_SMASK=(LC_SMASK2|LC_SMASK1).
+#define LC_LMMAN       0x0001C000      // L&M manual tester
+#define LC_LMS2        0x00018000      // L&M for S2a
+#define LC_EPCOS       0x00014000      // L&M for EPCOS tester
+#define LC_LM          0x00010000      // L&M for A5a
+#define LC_A5WIDE      0x0000C000      // A5 wide shuttle
+#define LC_AUTOMATE    0x00008000      // Automatical shuttle
+#define LC_A2XSHUT     0x00004000      // A2X shuttle
+#define LC_A2SHUT      0x00000000      // A2 standard shuttle
+// Useful shortcuts and substitutions.
+#define LC_SMASK       (LC_SMASK2|LC_SMASK1)
+#define LC_LDMASK      (LC_SMASK2|LC_SMASK1|LC_A2LOADER)
+#define LC_LMAUTO      (LC_LM|LC_A2LOADER)
+#define LC_LMS2AUTO    (LC_LMS2|LC_A2LOADER)
+#define LC_EPCOSAUTO   (LC_EPCOS|LC_A2LOADER)
+
+// Needle types.
+#define NT_UNKNOWN     0               // Unspecified needle type
+#define NT_HARD        1               // Solid hard touch
+#define NT_HARDADAPT   2               // Hard touch adapter
+#define NT_SPLINO      3               // Splinogramm
+#define NT_MICROMIRR   4               // Microprobe with mirror
+#define NT_MICRO       5               // Microprobe with transmissive sensor
+#define NT_KELVMIRR    6               // Kelvin microprobe with mirror
+#define NT_KELVIN      7               // Kelvin with transmissive sensor
+#define NT_LATEST      8               // Kelvin with mirror and blades
+#define NT_K4SPLINO    9               // K4 splinogramm
+#define NT_MICROSHLD   10              // Shielded microprobe, transmissive
+#define NT_HARDPS      11              // Hard touch needle with pressure sensor
+
+// Acceptance limits for pin resistance test.
+#define PINRMIN        0.0             // Minimal pin resistance, Ohm
+#define PINRMAX        4.0             // Maximal pin resistance, Ohm
+#define PINLAMAX       1.5             // Maximal LATEST pin resistance, Ohm
+// Parameters of pressure sensor test.
+#define DELTA          2.5             // Random deviation, millimeters
+#define NZPOINT        150             // Number of sampling points, N*6
+#define NZSTATH        80              // Meas/point, even for HCZ_CONTHPS
+#define NZSTATS        20              // Meas/point, even for other types
+
+// Acceptance limits for pressure sensor test, LATEST needles.
+#define PINDISTLMIN    (-25.0)         // Minimal allowed pin distance, um
+#define PINDISTLMAX    25.0            // Maximal allowed pin distance, um
+// Acceptance limits for pressure sensor test, all other Kelvin probes.
+#define PINDISTKMIN    25.0            // Minimal allowed pin distance, um
+#define PINDISTKMAX    100.0           // Maximal allowed pin distance, um
+
+// Parameters of contacting test.
+#define NSTROKE        3               // Number of strokes to test
+#define NHIST          131             // Number of bars in histogram
+#define ROFFSETK       0.0020          // Expected resistance, Ohm (Kelvin)
+#define HISTSTEPK      0.0001          // Histogram step, Ohm (Kelvin)
+#define HISTSTEPR      0.0050          // Histogram step, Ohm (Single)
+#define HISTSTEP       (iskelvin?HISTSTEPK:HISTSTEPR)
+#define RSIGMAK        0.0005          // Allowed dispersion of R (Kelvin)
+#define RSIGMAR        0.0500          // Allowed dispersion of R (Single)
+#define RSIGMA         (iskelvin?RSIGMAK:RSIGMAR)
+// Acceptance limits for contacting test.
+#define BESTLIM        90              // Limit for very good quality
+#define GOODLIM        60              // Limit for good quality
+#define POORLIM        40              // Limit for poor quality
+// Acceptance limits for resistance test.
+#define KABSERR        0.002           // Kelvin R error 0.002 Ohm + 1%
+#define KRELERR        0.01
+#define EABSERR        0.100           // Exact R error 0.100 Ohm + 2%
+#define ERELERR        0.02
+
+#define NNEEDLE        9               // Number of different needle types
+#define NEEDLEX        280             // Width of needle image, pixels
+#define NEEDLEY        280             // Height of needle image, pixels
+#define NEEDLEB        12              // Border between needles
+
+// Needle data:
+// FFFFFFFF III P K N T X X PPP             AAA..., where:
+// +00 FFF - name of the bitmap file
+// +09 III - index, unique number describing type of the needle, NT_xxx
+// +13 P   - type of pressure sensor (N-none, D-direct, M-mirror, I-inverted)
+// +15 K   - S for single-pin needles and K for Kelvin
+// +17 N   - B for blades and P for pins
+// +19 T   - basic type (H-hardtouch, A-adapter, S-splinogram, M-micro,
+//           P-hard with pressure sensor)
+// +25 PPP - atg part number
+// +41 AAA - name of the needle type
+char   ndat[NNEEDLE,80] = {                                                    \
+  "ndhard   001 N S P H     A3A101803       Hard touch",                       \
+  "ndhadapt 002 N S P A     A3A101818K2     Hard adapter",                     \
+  "ndsplino 003 D S P S     A3A101816K2/K4  Soft touch",                       \
+  "ndmicmir 004 M S P M     A3S104010K      Micro probe",                      \
+  "ndmicro  005 I S P M     A3S104010KS     Micro probe",                      \
+  "ndkelmir 006 M K P M     A3A101821K      Kelvin",                           \
+  "ndkelvin 007 I K P M     A3A101821KS     Kelvin",                           \
+  "ndkblmir 008 M K B M     A3A101823K      LATEST" ,                          \
+  "ndhardps 011 D S P P     A3A101855       Hard with sensor" }
+
+// Test strokes.
+int vlist[NSTROKE] = {               \ // Strokes
+  40, 50, 60 }
+int plist[NSTROKE] = {               \ // Pressures
+  30, 50, 80 }
+float  strokez=6.0                     // Height, millimeters
+
+// Controls.
+handle hmain                           // Main window
+handle hserv,hleft,hright              // Left and right subwindows
+handle hinfo                           // Current status of test
+handle hexit                           // Button "Close"
+handle hsel[2][2]                      // Data selection buttons
+handle hstroke[NSTROKE]                // Stroke selection buttons
+handle hstat                           // Statistics selection button
+handle hreport                         // RTF report window
+
+// Asynchronous events.
+int    layoutchanged                   // Layout is changed
+int    loadchanged                     // Loader is closed
+int    globalerr                       // Global asynchronous error recognized
+int    oversurface[32]                 // No. of contacts over surface per head
+
+// Configuration parameters.
+float  rwire[2][2]                     // Resistance of wire [head][wire], Ohm
+float  zfactor[2]                      // Z correction factors
+float  distx                           // X distance from center, millimeters
+float  disty                           // Y distance from center, millimeters
+float  spacer                          // Thickness of Z calibration spacer, mm
+
+// Test parameters.
+int    present[2]                      // Presence of left/right needles
+int    needleindex                     // Needle type index (internal)
+int    ntindex                         // Needle type index (NT_xxx)
+char   needletype[NNEEDLE][80]         // List of needle types in text form
+char   serial[2][80]                   // Serial numbers
+char   offset[2][80]                   // Offsets
+char   gap[2][80]                      // Gaps
+char   protpath[260]                   // Path to the last saved protocol
+char   confpath[260]                   // Path to the last protocolled config
+int    iskelvin                        // Whether Kelvin needles
+float  pinrmin                         // Minimal pin resistance, Ohm
+float  pinrmax                         // Maximal pin resistance, Ohm
+float  zstep                           // Z step for sensor test, micrometers
+float  senslomin                       // Minimal low sensitivity, bits/um
+float  senslomax                       // Maximal low sensitivity, bits/um
+float  senshimin                       // Minimal high sensitivity, bits/um
+float  senshimax                       // Maximal high sensitivity, bits/um
+float  pressmin                        // Minimal signal without contact
+float  rangemin                        // Minimal sensor range, bits
+float  pindistmin                      // Minimal allowed pin distance, um
+float  pindistmax                      // Maximal allowed pin distance, um
+
+// Results of pin resistance test.
+float  pinr[2][2]                      // Pin resistance [head][pin] or -1e10
+float  roffset[2]                      // Base resistance (single pin probes)
+
+// Results of Z pressure sensor test.
+int    zn[2]                           // Number of sampled points
+float  zref[2]                         // Surface Z coordinate
+int    zz[2][NZPOINT]                  // Z coordinates
+float  zp[2][NZPOINT]                  // Z pressures
+float  zc[2][NZPOINT]                  // Contact capacities
+float  zk[2][NZPOINT]                  // Kelvin contacts
+float  zdist[2]                        // Distance between pins, um
+float  zfactlo[2]                      // Sensitivity factor at contact, bit/um
+float  zfacthi[2]                      // Sensitivity factor at high P, bit/um
+float  zpmax[2]                        // Signal from the overpressured sensor
+
+// Results of contacting quality test.
+int    fhist[NSTROKE][2][NHIST]        // Histograms for heads
+float  fstat[NSTROKE][2][5]            // Head resistance statistics
+int    fbadcu[NSTROKE][2]              // Number of bad measurements on Cu
+int    fopencu[NSTROKE][2]             // Number of opens on Cu
+int    fnoctcu[NSTROKE][2]             // Number of nocontacts on Cu
+int    fbadfr[NSTROKE][2]              // Number of bad measurements on FR4
+int    fcontfr[NSTROKE][2]             // Number of contacts on FR4
+int    fshortfr[NSTROKE][2]            // Number of shorts on FR4
+int    fquality[NSTROKE][2]            // Quality of needle
+
+// Displayed information.
+int    zselected                       // Needle selected for data display
+int    zdatatype                       // 0: pressure, 1: resistance, 2: stat
+int    zdatastroke                     // Stroke selected for data display
+int    addpictures                     // Add graphics to RTF protocol
+
+// Interrupt handler, receives and processes asynchronous messages and errors.
+function int Answerproc(char *answer,int info)
+  int i
+  if answer[4]==0xF0 then              // Internal OLLYTEST message
+    if Stricmp(answer+5,"CHG LAY")==0 layoutchanged=1
+    if Stricmp(answer+5,"CHG LOAD")==0 loadchanged=1
+    return
+  else if answer[4]==S_ERROR then      // Error messages, also with zero ID
+    switch answer[5]
+    case E_NOCRATDATA,E_NOFINGDATA:
+      globalerr=globalerr|GE_BOOT
+    case E_ZMOVEMENT:
+      if answer[9]==2 && answer[7]!=0xFF then
+        i=answer[7]*2+((answer[8] & 0x4C)==0?1:0)
+        oversurface[i]++               // Count number of contacts over PCB
+      endif
+    case E_COMMUTATOR:
+      i=$uint2(answer+10)
+      if (i & 0x0300)!=0 globalerr=globalerr|GE_MEAS
+    case E_TMEAS:
+      if answer[9]>=2 globalerr=globalerr|GE_MEAS
+    case E_IOERROR:
+      globalerr=globalerr|GE_IOERROR
+    case E_WRONGCOORD,E_BADCOMMAND,E_BADCMDSIZE,E_TABLEOVERF,E_BADDATA:
+      globalerr=globalerr|GE_COMMAND
+    case E_SYNC,E_DIVBYZERO:
+      globalerr=globalerr|GE_COMMAND
+    case E_CONTACT,E_HISHIFT,E_SHORTCUT:
+      globalerr=globalerr|GE_MEAS
+    case E_INITMEAS:
+      i=$uint2(answer+10)
+      if (i & 0x7D)!=0 globalerr=globalerr|GE_MEAS
+    case E_BOXSENS,E_PNEUMOSENS,E_PNEUMOSYS:
+      globalerr=globalerr|GE_HARDWARE
+    endsw
+  endif
+end
+
+// Initializes statistics.
+function int Initsigma(float disp[])
+  disp[0]=0.0
+  disp[1]=0.0
+  disp[2]=0.0
+  disp[3]=0.0
+  disp[4]=0.0
+end
+
+// Function adds next measured value to array disp[5] which accumulates data
+// necessary to calculate normal dispersion, mean, minimal and maximal.
+function int Addsigma(float disp[],float value)
+  if disp[0]<=0.0 then
+    disp[0]=1.0                        // First point, data is still undefined
+    disp[1]=value
+    disp[2]=value*value
+    disp[3]=value
+    disp[4]=value
+  else
+    disp[0]=disp[0]+1.0
+    disp[1]=disp[1]+value
+    disp[2]=disp[2]+value*value
+    disp[3]=Min(disp[3],value)
+    disp[4]=Max(disp[4],value)
+  endif
+end
+
+// Function returns number of data items gathered by Addsigma().
+function int Getcount(float disp[])
+  return disp[0]
+end
+
+// Function calculates mean value based on data gathered by Addsigma().
+function float Getmean(float disp[])
+  if disp[0]<1.0 then
+    return 0.0
+  else
+    return disp[1]/disp[0]
+  endif
+end
+
+// Function calculates minimal value based on data gathered by Addsigma().
+function float Getmin(float disp[])
+  return disp[3]
+end
+
+// Function calculates minimal value based on data gathered by Addsigma().
+function float Getmax(float disp[])
+  return disp[4]
+end
+
+// Function calculates normal dispersion based on data gathered by Addsigma().
+function float Getsigma(float disp[])
+  float r
+  if disp[0]<2.0 then
+    return 0.0
+  else
+    r=(disp[0]*disp[2]-disp[1]*disp[1])/disp[0]/(disp[0]-1.0)
+    if r<=0 then
+      return 0.0
+    else
+      return Sqrt(r)
+    endif
+  endif
+end
+
+// Display modal "dialog box" with error message.
+function int Error(char *s1,char *s2)
+  handle herr,hdummy,hok
+  herr=control WINDOW
+    window=hmain
+    position=0,0,250,135
+    name="错误"
+    mode=M_MODAL
+    bkcolor=YELLOW
+  endc
+  hok=control BUTTON
+    window=herr
+    position=85,100,80,24
+    name="确定"
+    help="按下可以确认错误消息"
+  endc
+  hdummy=control ICON
+    window=herr
+    position=5,30,36,36
+    name="EXCLAM"
+    bkcolor=YELLOW
+  endc
+  hdummy=control TEXT
+    window=herr
+    position=41,20,200,24
+    name=s1
+    bkcolor=YELLOW
+    mode=M_CENTERED
+  endc
+  hdummy=control TEXT
+    window=herr
+    position=41,45,200,54
+    name=s2
+    bkcolor=YELLOW
+    mode=M_CENTERED
+  endc
+  while Pressed(hok)==0 do; enddo
+  destroy herr
+end
+
+// Clears contact-over-surface counters.
+function int Clearoversurface()
+  int i
+  for i=0,i<32,i++
+    oversurface[i]=0
+  enddo
+end
+
+// Reads actual layout from the tester and verifies relevant settings.
+function int Getlayout()
+  int i,j,n,t,ident,err
+  char buf[16],s[2048]
+  handle hok
+  clear hright
+  change hinfo limits=0,0
+  change hinfo text="获取布局"
+  draw window=hright font=TIMESFONT
+  draw at 6,30 wrap=RIGHTX-5 color=BLACK
+  draw text="Script will get currently loaded layout and verify settings."
+  draw show
+  delay 100
+  buf[0]=S_LAYOUT
+  buf[1]=0x03                          // Read layout
+  ident=SYS.Sendimm(0,2,buf)
+  t=Time(); i=0; err=0
+  // Get layout.
+  while $A[0].length==0 do
+    if Pressed(hexit) return -1        // Button "Exit" works as an interrupt
+    j=(Time()-t)/1000
+    if i!=j then
+      change hinfo text=format("等待布局 - %i s",j)
+      i=j
+    endif
+    if j>15 break
+    wait
+  enddo
+  if $A[0].answer==S_LAYOUT && $A[0].length==774 then
+    Memcpy($LAY,$A[0]+6,768)
+    SYS.Broadcast(8,"CHG LAY")         // Inform others that layout changed
+    Memset($EXTLAY,0,768)
+    if $LAY.extlay!=0 then
+      $LAY.extlay=0
+      buf[0]=S_LAYOUT
+      buf[1]=0x0F                      // Read layout extention
+      i=-1
+      ident=SYS.Sendimm(0,2,buf)
+      while $A[0].length==0 do
+        if Pressed(hexit) return -1
+        j=(Time()-t)/1000
+        if i!=j then
+          change hinfo text=format("等待布局 - %i s",j+1)
+          i=j
+        endif
+        if j>=15 break
+        wait
+      enddo
+      if $A[0].answer==S_LAYOUT && $A[0].length==774 then
+        Memcpy($EXTLAY,$A[0]+6,768)
+      else if $A[0].length!=0 then
+        err=1
+      else
+        err=2
+      endif
+    endif
+  else if $A[0].length!=0 then
+    err=1
+  else
+    err=2
+  endif
+  // Verify layout settings.
+  if err==0 then
+    iskelvin=($LAY.probetype & 1)
+    if $LAY.rzero!=0 && ($LAY.config & LC_AUTOPROBE)==0 then
+      err=4                            // Nonzero resistance correction
+    else if ($LAY.excludedrails & 0x0001)!=0 then
+      err=5                            // Rail is excluded from test
+    else if ($EXTLAY.extant & 0x00000003)==0 then
+      err=6                            // No external antennas
+    else if ($EXTLAY.zheadtype & HCZ_VALID)==0 then
+      err=7                            // Not a micro probe/hard sensor
+    else if ($EXTLAY.zheadtype & HCZ_CONTMASK)!=HCZ_CONTSKP &&                 \
+      ($EXTLAY.zheadtype & HCZ_CONTMASK)!=HCZ_CONTHPS then
+      err=7                            // Not a micro probe/hard sensor
+    else if (present[0]!=0 && $EXTLAY.psensfact[0]!=0 &&                       \
+      $EXTLAY.psensfact[0]!=50) then
+      err=8                            // Invalid pressure factor
+    else if (present[1]!=0 && $EXTLAY.psensfact[1]!=0 &&                       \
+      $EXTLAY.psensfact[1]!=50) then
+      err=8                            // Invalid pressure factor
+    endif
+  endif
+  if err!=0 then
+    // Report error.
+    clear hright
+    change hinfo limits=0,0
+    change hinfo text="Invalid layout!"
+    draw window=hright font=TIMESFONT
+    draw at 6,30 wrap=RIGHTX-5 color=LIGHTRED
+    if err==1 then
+      draw text="The script was unable to get layout from the tester. "
+    else if err==2 then
+      draw text="No answer from the tester. "
+    else if err==4 then
+      draw text="Non-zero resistance correction is specified in the layout. "
+    else if err==5 then
+      draw text="Rail 0 is excluded from the test in layout. "
+    else if err==6 then
+      draw text="No external antennas. " color=BLACK text="Script expects that "
+      draw text="test surface is connected to the external antenna. "
+    else if err==7 then
+      draw text="Not a micro probe. " color=BLACK text="This script can test "
+      draw text="only micro probes or hard touch needles with pressure sensor, "
+      draw text="but needles have different type in layout. "
+    else if err==8 then
+      draw text="Invalid pressure factor. " color=BLACK text="Script expects "
+      draw text="that pressure correction factors in layout are set to 1.0 "
+      draw text="(or 0.0, which means default value). "
+    else
+      draw text="Unknown internal error. "
+    endif
+    draw color=BLACK
+    if err>0 && err<=2 then
+      draw text="Please reload it."
+    else if err<=6 then
+      draw text="Please edit layout, save it to the disk and reload tester."
+    endif
+    draw show
+    hok=control BUTTON
+      window=hright
+      position=RIGHTX/2-60,USERY,120,24
+      name="确定"
+      help="按下返回针头选择窗口"
+    endc
+    while 1 do
+      if Pressed(hok) return 1
+      if Pressed(hexit) return -1
+      wait
+    enddo
+  endif
+  // Check whether needle type is compatible with the layout. This part is
+  // independent from the above check (future security, so to say).
+  n=0
+  if ($EXTLAY.zheadtype & HCZ_DMSMASK)==HCZ_DMSSTD &&                          \
+    ndat[needleindex][13]=='I' n=n+sprintf(s+n,                                \
+    " - Layout specifies direct or no sensor, but inverse sensor is selected\n")
+  if ($EXTLAY.zheadtype & HCZ_DMSMASK)==HCZ_DMSREV &&                          \
+    (ndat[needleindex][13]=='N' || ndat[needleindex][13]=='D' ||               \
+     ndat[needleindex][13]=='M') n=n+sprintf(s+n,                              \
+    " - Layout specifies inverse sensor, but direct or no sensor is selected\n")
+  if iskelvin==0 && ndat[needleindex][15]!='S' n=n+sprintf(s+n,                \
+    " - Layout specifies single pin needle, but Kelvin needle is selected\n")
+  if iskelvin!=0 && ndat[needleindex][15]!='K' n=n+sprintf(s+n,                \
+    " - Layout specifies Kelvin needle, but single pin needle is selected\n")
+  if (($EXTLAY.zheadtype & HCZ_CONTMASK)==HCZ_CONTDEF ||                       \
+    ($EXTLAY.zheadtype & HCZ_CONTMASK)==HCZ_CONTSTD) &&                        \
+    ndat[needleindex][19]!='H' n=n+sprintf(s+n,                                \
+    " - Layout specifies hard touch needle, but selected type is different\n")
+  if (($EXTLAY.zheadtype & HCZ_CONTMASK)==HCZ_CONTSPL ||                       \
+    ($EXTLAY.zheadtype & HCZ_CONTMASK)==HCZ_CONTHSPL) &&                       \
+    ndat[needleindex][19]!='S' n=n+sprintf(s+n,                                \
+    " - Layout specifies soft touch needle, but selected type is different\n")
+  if ($EXTLAY.zheadtype & HCZ_CONTMASK)==HCZ_CONTEMU &&                        \
+    ndat[needleindex][19]!='A' n=n+sprintf(s+n,                                \
+    " - Layout specifies hard touch adapter, but selected type is different\n")
+  if ($EXTLAY.zheadtype & HCZ_CONTMASK)==HCZ_CONTSKP &&                        \
+    ndat[needleindex][19]!='M' n=n+sprintf(s+n,                                \
+    " - Layout specifies micro probe, but selected type is different\n")
+  if n>0 then
+    // Report incompatible needle type.
+    clear hright
+    change hinfo limits=0,0
+    change hinfo text="Invalid needle type!"
+    draw window=hright font=TIMESFONT
+    draw at 6,30 wrap=RIGHTX-5 color=LIGHTRED
+    draw text="Selected type of the needle is not compatible with the loaded "
+    draw text="layout:\n\n"color=BLACK text=s
+    draw text="\nPlease correct layout and reload tester, or select different "
+    draw text="needle type."
+    draw show
+    hok=control BUTTON
+      window=hright
+      position=RIGHTX/2-60,USERY,120,24
+      name="确定"
+      help="按下返回针头选择窗口"
+    endc
+    while 1 do
+      if Pressed(hok) return 1
+      if Pressed(hexit) return -1
+      wait
+    enddo
+  endif
+  // Layout is good. Set test parameters and good/bad limits.
+  ntindex=(ndat[needleindex][9]-'0')*100+(ndat[needleindex][10]-'0')*10+       \
+    (ndat[needleindex][11]-'0')
+  if ntindex==NT_LATEST then
+    zstep=8.0                          // Z step, micrometers
+    senslomin=40.0                     // Minimal low sensitivity, bits/um
+    senslomax=80.0                     // Maximal low sensitivity, bits/um
+    senshimin=40.0                     // Minimal high sensitivity, bits/um
+    senshimax=80.0                     // Maximal high sensitivity, bits/um
+  else if ndat[needleindex][19]=='P' then
+    zstep=8.0
+    senslomin=30.0
+    senslomax=50.0
+    senshimin=35.0
+    senshimax=70.0                     
+  else if ndat[needleindex][13]=='D' || ndat[needleindex][13]=='M' then
+    zstep=8.0
+    senslomin=50.0
+    senslomax=100.0
+    senshimin=60.0
+    senshimax=110.0
+  else
+    zstep=4.0
+    senslomin=65.0
+    senslomax=200.0
+    senshimin=110.0
+    senshimax=240.0
+  endif
+  if ndat[needleindex][19]=='P' then
+    pressmin=35000.0                   // Minimal signal without contact
+  else
+    pressmin=45000.0
+  endif
+  if ndat[needleindex][19]=='S' then
+    rangemin=42000.0                   // Minimal sensor range, bits
+  else if ndat[needleindex][19]=='P' then
+    rangemin=22500.0
+  else if ndat[needleindex][13]=='M' then
+    rangemin=22500.0
+  else
+    rangemin=42000.0
+  endif
+  pindistmin=(ntindex==NT_LATEST?PINDISTLMIN:PINDISTKMIN)
+  pindistmax=(ntindex==NT_LATEST?PINDISTLMAX:PINDISTKMAX)
+  pinrmin=PINRMIN
+  if ntindex==NT_LATEST then
+    pinrmax=PINLAMAX                   // LATEST needle
+  else
+    pinrmax=PINRMAX                    // Any other needle
+  endif
+  return 0
+end
+
+// Clears test data and prepares internal structures for test.
+function int Cleartestdata()
+  int i,j
+  for i=0,i<2,i++ do
+    // Pin resistance.
+    for j=0,j<2,j++ do
+      pinr[i][j]=-1.0e10
+    enddo
+    // Pressure sensor.
+    zn[i]=0
+    zdist[i]=0.0
+    zfactlo[i]=0.0
+    zfacthi[i]=0.0
+    zpmax[i]=0.0
+    // Quality of contacting.
+    Memset(fhist,0,Sizeof(fhist))
+    for j=0,j<NSTROKE,j++ do
+      Initsigma(fstat[j,i])
+    enddo
+    Memset(fbadcu,0,Sizeof(fbadcu))
+    Memset(fopencu,0,Sizeof(fopencu))
+    Memset(fnoctcu,0,Sizeof(fnoctcu))
+    Memset(fbadfr,0,Sizeof(fbadfr))
+    Memset(fcontfr,0,Sizeof(fcontfr))
+    Memset(fshortfr,0,Sizeof(fshortfr))
+    Memset(fquality,0,Sizeof(fquality))
+  enddo
+end
+
+// Creates or destroys stroke buttons. Call each time when hleft is cleared of
+// its controls (clear hleft).
+function int Showstrokebuttons(int show)
+  int i,width,xpos
+  for i=0,i<NSTROKE,i++ do
+    if show!=0 && hstroke[i]==NULL then
+      xpos=5
+      width=(LEFTX-32)/5
+      hstroke[i]=control BUTTON
+        window=hleft
+        position=5+i*(width+5),LEFTY-52,width,22
+        text=format("V%i P%g",vlist[i],plist[i]/10.0)
+        help=format("按以显示V=%i mm/s和P=%g 克 的数据",          \
+          vlist[i],plist[i]/10.0)
+        font=INFOFONT
+      endc
+    else if show==0 && hstroke[i]!=NULL then
+      destroy hstroke[i]
+      hstroke[i]=NULL
+    endif
+  enddo
+end
+
+// Creates data selection buttons.
+function int Createselectionbuttons()
+  int i,xpos,width
+  char s[32]
+  Showstrokebuttons(0)
+  xpos=5
+  width=(LEFTX-32)/5
+  for i=0,i<2,i++ do
+    Strcpy(s,i==0?"left":"right")
+    hsel[i][0]=control BUTTON
+      window=hleft
+      position=xpos,LEFTY-26,width,22
+      text=format("P %s",s)
+      help=format("按下可显示%s针头的Z压力测试数据",s)
+      font=INFOFONT
+    endc
+    if present[i]==0 disable hsel[i][0]
+    xpos=xpos+width+5
+    hsel[i][1]=control BUTTON
+      window=hleft
+      position=xpos,LEFTY-26,width,22
+      text=format("R %s",s)
+      help=format("按下可显示%s针的电阻测试数据",s)
+      font=INFOFONT
+    endc
+    if present[i]==0 disable hsel[i][1]
+    xpos=xpos+width+8
+  enddo
+  hstat=control BUTTON
+    window=hleft
+    position=xpos,LEFTY-26,width,22
+    text="Stat"
+    help="按下可显示测试统计信息"
+    font=INFOFONT
+  endc
+end
+
+// Measures Z factors (ratio of real needle displacement to specified by the
+// software). Returns -1 if user cancelled script and 0 in any other case.
+function int Measurezfactors()
+  int i,t,head,enabled,err
+  float x,y,h,f,zdown[5],zup[5]
+  char s[256]
+  handle htestleft,htestright,hspacer,hwarning,hcontinue,hcancel
+  Showstrokebuttons(0)
+  clear hleft
+  head=0
+repeat:
+  err=0
+  // Step 1: start measurements.
+  draw window=hleft
+  draw at 65,40 bitmap=0,0,0,"logo"
+  draw show
+  change hinfo limits=0,0
+  change hinfo text="Z factors"
+  clear hright
+  draw window=hright font=TIMESFONT
+  draw at 6,30 wrap=RIGHTX-5 color=BLACK
+  draw text="Select which factor you are going to measure. Remove any objects "
+  draw text="from the board and press " font=MAINFONT text="继续"
+  draw font=TIMESFONT text="."
+  draw show
+  htestleft=control RADIO
+    window=hright
+    position=25,90,120,18
+    text="Left head"
+    help="测量左边测试头的Z系数"
+    mode=(head==0?M_CHECKED:0)
+  endc
+  htestright=control RADIO
+    window=hright
+    position=25,112,120,18
+    text="Right head"
+    help="测量右边测试头的Z系数"
+    mode=(head==1?M_CHECKED:0)
+  endc
+  hcontinue=control BUTTON
+    window=hright
+    position=RIGHTX/2-124,USERY,120,24
+    name="继续"
+    help="按下开始测量"
+  endc
+  hcancel=control BUTTON
+    window=hright
+    position=RIGHTX/2+5,USERY,120,24
+    name="取消"
+    help="按下取消测量"
+  endc
+  while 1 do
+    if Pressed(htestleft) then
+      head=0
+    else if Pressed(htestright) then
+      head=1
+    else if Pressed(hcontinue) then
+      break
+    else if Pressed(hcancel) then
+      return 0
+    else if Pressed(hexit) then
+      return -1
+    endif
+    wait
+  enddo
+  // Step 2: measure Z coordinate without spacer.
+  clear hright
+  draw window=hright font=TIMESFONT
+  draw at 6,30 wrap=RIGHTX-5 color=BLACK
+  draw text="Measuring Z coordinate, please wait..."
+  draw show
+  hcancel=control BUTTON
+    window=hright
+    position=RIGHTX/2-60,USERY,120,24
+    name="取消"
+    help="按下取消测量"
+  endc
+  for i=0,i<5,i++ do
+    x=$LAY.xoffset/1000.0
+    y=$LAY.yoffset[0]/1000.0-distx+i*DELTA/10.0
+    sprintf(s,"M %i(%f,%fA15H50V30P7) %i(Z) Z(%i)",head,x,y,1-head,head)
+    SYS.Killimm(i)
+    SERV.Cmdimm(i,s)
+  enddo
+  sprintf(s,"M %i(%f,%fA15H50V30P7) %i(Z) NOP",head,x,y-DELTA/5.0,1-head)
+  SERV.Cmdimm(7,s)
+  t=Time()
+  while err==0 do
+    for i=0,i<5,i++ do
+      if $A[i].length==0 break
+    enddo
+    if i>=5 break                      // All answers are here
+    if Time()-t>10000 err=1            // Timeout
+    if Pressed(hcancel) return 0
+    if Pressed(hexit) return -1
+    wait
+  enddo
+  Initsigma(zdown)
+  for i=0,i<5 && err==0,i++ do
+    if $A[i].answer!=S_INPORT err=2    // Invalid answer
+    Addsigma(zdown,$A[i].inport)
+  enddo
+  if err==0 && oversurface[head]>0 then
+    err=5                              // Contact over surface
+  endif
+  if err!=0 goto reporterr
+  // Step 3: ask to place the spacer.
+  clear hright
+  draw window=hright font=TIMESFONT
+  draw at 6,30 wrap=RIGHTX-5 color=BLACK
+  draw text="Type in the thickness of the spacer (in millimeters) into the "
+  draw text="window below, place spacer directly under the needle and press"
+  draw font=MAINFONT text="继续" font=TIMESFONT text="."
+  draw font=INFOFONT at 5,130 text="Thickness"
+  draw at 175,130 text="mm"
+  draw show
+  hspacer=control EDIT
+    window=hright
+    position=80,111,80,24
+    text=format("%.3f",spacer)
+    help="垫片厚度(允许范围3 .. 12毫米)"
+    mode=M_BORDER
+    font=MEDIUMFONT
+  endc
+  hwarning=control TEXT
+    window=hright
+    position=5,USERY-60,RIGHTX-10,50
+    help=" "
+    font=INFOFONT
+    color=LIGHTRED
+  endc
+  hcontinue=control BUTTON
+    window=hright
+    position=RIGHTX/2-124,USERY,120,24
+    name="继续"
+    help="按下开始测量"
+  endc
+  hcancel=control BUTTON
+    window=hright
+    position=RIGHTX/2+5,USERY,120,24
+    name="取消"
+    help="按下取消测量"
+  endc
+  h=spacer; enabled=1
+  Clearoversurface()
+  while 1 do
+    Text(hspacer,s); sscanf(s,"%f",&h)
+    if h<3.0 || h>12.0 then
+      if enabled!=0 then
+        disable hcontinue
+        change hwarning text="Height of spacer is out of 3 .. 12 mm range"
+        enabled=0
+      endif
+    else
+      if enabled!=0 then
+        enable hcontinue
+        clear hwarning
+        enabled=1
+      endif
+    endif
+    if Pressed(hcontinue) then
+      break
+    else if Pressed(hcancel) then
+      return 0
+    else if Pressed(hexit) then
+      return -1
+    endif
+    wait
+  enddo
+  spacer=h
+  // Step 4: measure Z coordinate with spacer.
+  clear hright
+  draw window=hright font=TIMESFONT
+  draw at 6,30 wrap=RIGHTX-5 color=BLACK
+  draw text="Measuring Z coordinate, please wait..."
+  draw show
+  hcancel=control BUTTON
+    window=hright
+    position=RIGHTX/2-60,USERY,120,24
+    name="取消"
+    help="按下取消测量"
+  endc
+  for i=0,i<5,i++ do
+    x=$LAY.xoffset/1000.0
+    y=$LAY.yoffset[0]/1000.0-distx+i*DELTA/10.0
+    sprintf(s,"M %i(%f,%fA15H50V30P7) %i(Z) Z(%i)",head,x,y,1-head,head)
+    SYS.Killimm(i)
+    SERV.Cmdimm(i,s)
+  enddo
+  sprintf(s,"M %i(Z) %i(Z) NOP",head,1-head)
+  SERV.Cmdimm(7,s)
+  t=Time()
+  while err==0 do
+    for i=0,i<5,i++ do
+      if $A[i].length==0 break
+    enddo
+    if i>=5 break                      // All answers are here
+    if Time()-t>10000 err=1            // Timeout
+    if Pressed(hcancel) return 0
+    if Pressed(hexit) return -1
+    wait
+  enddo
+  Initsigma(zup)
+  for i=0,i<5 && err==0,i++ do
+    if $A[i].answer!=S_INPORT err=2    // Invalid answer
+    Addsigma(zup,$A[i].inport)
+  enddo
+  if err==0 && oversurface[head]>0 then
+    err=5                              // Contact over surface
+  endif
+  if err!=0 goto reporterr
+  // Step 5: process measurements.
+  h=(Getmean(zdown)-Getmean(zup))/1000.0
+  if h<2.0 then
+    err=3                              // Too low height difference
+    goto reporterr
+  endif
+  f=h/spacer
+  if f<0.5 || f>2.0 then
+    err=4                              // Invalid factor
+    goto reporterr
+  endif
+  zfactor[head]=f
+  clear hright
+  draw window=hright font=TIMESFONT
+  draw at 6,30 wrap=RIGHTX-5 color=BLACK
+  draw text=format("Z factor for the %s head ",head==0?"left":"right")
+  draw text=format("was successfully measured. It is equal to %.3f. ",f)
+  draw text="Remove spacer, then press " font=MAINFONT text="Next "
+  draw font=TIMESFONT text="to make another measurement, or " font=MAINFONT
+  draw text="Finish " font=TIMESFONT text="to return back to the Options "
+  draw text="screen."
+  draw show
+  hcontinue=control BUTTON
+    window=hright
+    position=RIGHTX/2-124,USERY,120,24
+    name="下一个"
+    help="按下可进行另一次测量"
+  endc
+  hcancel=control BUTTON
+    window=hright
+    position=RIGHTX/2+5,USERY,120,24
+    name="完成"
+    help="按下完成Z校准"
+  endc
+  while 1 do
+    if Pressed(hcontinue) goto repeat
+    if Pressed(hcancel) return 0
+    if Pressed(hexit) return -1
+    wait
+  enddo
+  // Report error.
+reporterr:
+  clear hright
+  draw window=hright font=TIMESFONT
+  draw at 6,30 wrap=RIGHTX-5 color=LIGHTRED
+  if err==1 then
+    draw text="Communication timeout. "
+  else if err==2 then
+    draw text="Invalid answer from the tester. " color=BLACK
+    draw text="Assure that tester is loaded and embedded software supports "
+    draw text="needle test. "
+  else if err==3 then
+    draw text="No spacer. " color=BLACK text="Measured spacer thickness is "
+    draw text=format("only %.2f mm, most probably because the spacer ",h)
+    draw text="was placed on the wrong position. "
+  else if err==4 then
+    draw text="Invalid factor. " color=BLACK text="Measured factor "
+    draw text=format("(%.3f) is out of the allowed limits 0.5 .. 2.0. ",f)
+  else if err==5 then
+    draw text="Contacts over the surface. " color=BLACK text="This means that "
+    draw text="the measured thickness of the spacer is wrong. "
+  else
+    draw text="Error detected. "
+  endif
+  draw color=BLACK text="Remove spacer, then press " font=MAINFONT
+  draw text="Repeat " font=TIMESFONT text="to repeat measurement, or "
+  draw font=MAINFONT text="Finish " font=TIMESFONT text="to return back to the "
+  draw text="Options screen."
+  draw show
+  hcontinue=control BUTTON
+    window=hright
+    position=RIGHTX/2-124,USERY,120,24
+    name="重复"
+    help="按下可进行另一次测量"
+  endc
+  hcancel=control BUTTON
+    window=hright
+    position=RIGHTX/2+5,USERY,120,24
+    name="完成"
+    help="按下完成Z校准"
+  endc
+  while 1 do
+    if Pressed(hcontinue) goto repeat
+    if Pressed(hcancel) return 0
+    if Pressed(hexit) return -1
+    wait
+  enddo
+end
+
+// Sets or determines test options. Returns -1 if user cancelled script and
+// 0 in any other case.
+function int Setoptions()
+  int i,j,x[2],y,x0,y0,x1,y1,t,badrange,oldrange
+  char s[256],buf[256]
+  float r[2][2],zf[2],dx,dy,tmp,rloop,rhalf,headx,heady
+  handle f,hrwire[2][2],hzfactor[2],hdistx,hdisty
+  handle hloop,hadapter,hzfactors,hprotocol,hwarning,hok,hcancel
+restart:
+  Showstrokebuttons(0)
+  clear hleft
+  x[0]=LEFTX/2-90
+  x[1]=LEFTX/2+20
+  y=35
+  draw window=hleft bkcolor=LIGHTYELLOW clear
+  draw color=BLACK font=MEDIUMFONT mode=M_CENTERED
+  draw at x[0]+45,y text="Left head"
+  draw at x[1]+45,y text="Right head"
+  y=y+30
+  draw font=MAINFONT mode=M_CENTERED
+  draw at LEFTX/2+10,y text="Resistance of wires"
+  y=y+12
+  for j=0,j<2,j++ do                   // Pin
+    draw font=MAINFONT mode=M_LEFT
+    draw at 10,y+19 text=format("Wire %i",j+1)
+    draw at LEFTX-40,y+19 text="Ohm"
+    for i=0,i<2,i++ do                 // Left or right
+      hrwire[i][j]=control EDIT
+        window=hleft
+        position=x[i],y,90,24
+        text=format("%.3f",rwire[i][j])
+        help=format("测试头%s上导线%i的电阻",j+1,i==0?"左":"右")
+        font=MEDIUMFONT
+        mode=M_BORDER
+      endc
+    enddo
+    y=y+35
+  enddo
+  y=y+15
+  draw font=MAINFONT mode=M_CENTERED
+  draw at LEFTX/2+10,y text="Z coordinate factors"
+  y=y+12
+  for i=0,i<2,i++ do                   // Left or right
+    hzfactor[i]=control EDIT
+      window=hleft
+      position=x[i],y,90,24
+      text=format("%.3f",zfactor[i])
+      help=format("%s测试头Z坐标修正系数",               \
+        i==0?"left":"right")
+      font=MEDIUMFONT
+      mode=M_BORDER
+    endc
+  enddo
+  y=y+50
+  draw color=BLACK font=MAINFONT mode=M_CENTERED
+  draw at LEFTX/2+10,y text="Location of contacts"
+  y=y+20
+  draw color=DARKGRAY bkcolor=DARKGRAY
+  x0=LEFTX/2+10-100; y0=y
+  x1=LEFTX/2+10+100; y1=y0+90
+  draw at (x0+x1)/2,y0 to (x0+x1)/2,y1
+  draw at x0,(y0+y1)/2 to x1,(y0+y1)/2
+  draw at x0,y0 fillrect x0+10,y0+10
+  draw at x1-10,y0 fillrect x1,y0+10
+  draw at x0,y1-10 fillrect x0+10,y1
+  draw at x1-10,y1-10 fillrect x1,y1
+  draw color=BLACK at x0+15,y0+5 to x1-16,y0+5
+  draw at x0+15,y0+5 to x0+24,y0+1
+  draw at x0+15,y0+5 to x0+24,y0+9
+  draw at x1-16,y0+5 to x1-25,y0+1
+  draw at x1-16,y0+5 to x1-25,y0+9
+  draw at x1-6,y0+15 to x1-6,y1-16
+  draw at x1-6,y0+15 to x1-2,y0+24
+  draw at x1-6,y0+15 to x1-10,y0+24
+  draw at x1-6,y1-16 to x1-2,y1-25
+  draw at x1-6,y1-16 to x1-10,y1-25
+  draw color=BLACK font=MAINFONT mode=M_LEFT
+  draw at 10,y0+12 text="Copper"
+  draw at 10,y1+2 text="FR4"
+  draw at LEFTX-35,(y0+y1)/2+5 text="mm"
+  hdistx=control EDIT
+    window=hleft
+    position=(x0+x1)/2-45,y0-4,90,24
+    text=format("%.3f",distx*2.0)
+    help="接触点之间的水平距离，毫米"
+    font=MEDIUMFONT
+    mode=M_BORDER
+  endc
+  hdisty=control EDIT
+    window=hleft
+    position=x1-80,(y0+y1)/2-12,90,24
+    text=format("%.3f",disty*2.0)
+    help="接触点之间的垂直距离，毫米"
+    font=MEDIUMFONT
+    mode=M_BORDER
+  endc
+  draw show
+  clear hright
+  change hinfo limits=0,0
+  change hinfo text="Configuration"
+  draw window=hright font=TIMESFONT
+  draw at 6,30 wrap=RIGHTX-5 color=BLACK
+  draw text="Install single-pin (non-Kelvin) needles and press "
+  draw text="button to measure loop resistance:"
+  hloop=control BUTTON
+    window=hright
+    position=RIGHTX/2-60,52,120,24
+    text="Loop resistance"
+  endc
+  draw at 6,100 wrap=RIGHTX-5 color=BLACK
+  draw text="Unpower X-Y, install special adapter and press to measure "
+  draw text="accurate wire resistance:"
+  hadapter=control BUTTON
+    window=hright
+    position=RIGHTX/2-60,122,120,24
+    text="Adapter"
+  endc
+  draw at 6,170 wrap=RIGHTX-5 color=BLACK
+  draw text="Prepare flat object 7..10 mm thick and press to measure Z "
+  draw text="coordinate factors:"
+  hzfactors=control BUTTON
+    window=hright
+    position=RIGHTX/2-60,192,120,24
+    text="Z factors"
+  endc
+  draw show
+  hwarning=control TEXT
+    window=hright
+    position=5,USERY-60,RIGHTX-10,50
+    help=" "
+    font=INFOFONT
+    color=LIGHTRED
+  endc
+  hprotocol=control BUTTON
+    window=hright
+    position=5,USERY,(RIGHTX-20)/3,24
+    name="协议"
+    help="按下协议配置设置到文件"
+  endc
+  hok=control BUTTON
+    window=hright
+    position=(RIGHTX-20)/3+10,USERY,(RIGHTX-20)/3,24
+    name="确定"
+    help="按确认新设置"
+  endc
+  hcancel=control BUTTON
+    window=hright
+    position=(RIGHTX-20)/3*2+15,USERY,(RIGHTX-20)/3,24
+    name="取消"
+    help="按下可放弃更改"
+  endc
+  Memcpy(r,rwire,Sizeof(r))            // Make backup copy
+  Memcpy(zf,zfactor,Sizeof(zf))
+  dx=distx; dy=disty
+  badrange=0; oldrange=0
+  while 1 do
+    // Verify data.
+    for i=0,i<2,i++ do
+      for j=0,j<2,j++ do
+        Text(hrwire[i][j],s); sscanf(s,"%f",rwire[i]+j)
+        if rwire[i][j]<0.0 || rwire[i][j]>10.0 then
+          badrange=badrange|(1<<(2*i+j))
+        else
+          badrange=badrange & (~(1<<(2*i+j)))
+        endif
+      enddo
+      Text(hzfactor[i],s); sscanf(s,"%f",zfactor+i)
+      if zfactor[i]<0.5 || zfactor[i]>2.0 then
+        badrange=badrange|(1<<(i+4))
+      else
+        badrange=badrange & (~(1<<(i+4)))
+      endif
+    enddo
+    Text(hdistx,s); sscanf(s,"%f",&tmp); distx=tmp/2.0
+    if distx<25.0 || distx>100.0 then
+      badrange=badrange | 0x40
+    else
+      badrange=badrange & (~0x40)
+    endif
+    Text(hdisty,s); sscanf(s,"%f",&tmp); disty=tmp/2.0
+    if disty<10.0 || disty>60.0 then
+      badrange=badrange | 0x80
+    else
+      badrange=badrange & (~0x80)
+    endif
+    if oldrange!=badrange then
+      clear hwarning
+      if badrange & 0x0F                                                       \
+        add hwarning text="Resistance out of range 0 .. 10 Ohm\n"
+      if badrange & 0x30                                                       \
+        add hwarning text="Z factor out of range 0.5 .. 2.0\n"
+      if badrange & 0x40                                                       \
+        add hwarning text="X distance out of range 50 .. 200 mm\n"
+      if badrange & 0x80                                                       \
+        add hwarning text="Y distance out of range 20 .. 120 mm\n"
+      if badrange==0 then
+        enable hprotocol
+        enable hok
+      else
+        disable hprotocol
+        disable hok
+      endif
+      oldrange=badrange
+    endif
+    // Process buttons.
+    if Pressed(hloop) then
+      change hwarning text="Measuring loop resistance..."
+      SYS.Killimm(0)
+      SYS.Softimm(0)
+      t=Time()
+      while $A[0].length==0 do
+        if Time()-t>10000 break
+        wait
+      enddo
+      if $A[0].length==0 then
+        change hwarning text="Timeout!"
+        continue
+      endif
+      for i=0,i<2,i++ do
+        buf[0]=S_DUMP
+        buf[1]=0                       // Request to rail
+        buf[2]=0x0E | i                // Self-test data
+        $uint2(buf+3)=0                // Zero (default) length
+        $uint2(buf+5)=0                // Master measurement card
+        SYS.Sendimm(i,7,buf)
+      enddo
+      t=Time()
+      while $A[0].length==0 || $A[1].length==0 do
+        if Time()-t>5000 break
+        wait
+      enddo
+      if $A[0].length==0 || $A[1].length==0 then
+        change hwarning text="Timeout!"
+        continue
+      endif
+      for i=0,i<2,i++ do
+        if $A[i].answer!=S_DUMP continue
+        rloop=$float4($A[i]+11*4+5)    // Head parameter 11 is loop resistance
+        if rloop<=0.0 || rloop>20.0 continue
+        rwire[i][0]=rloop/2.0
+        change hrwire[i][0] text=format("%.3f",rloop/2.0)
+        rwire[i][1]=rloop/2.0
+        change hrwire[i][1] text=format("%.3f",rloop/2.0)
+      enddo
+      oldrange=-1
+    else if Pressed(hadapter) then
+      change hwarning text="Measuring pin resistances..."
+      for i=0,i<4,i++ do
+        SYS.Killimm(i)
+        headx=$LAY.xoffset/1000.0
+        heady=$LAY.yoffset[0]/1000.0
+        sprintf(s,"M 0(%f,%f) 1(%f,%f) D(0x3B,%i,%i,%i,0,0,0,0,0)",            \
+          headx-50.0,heady,headx+50.0,heady,i/2,(i/2)^1,i & 1)
+        SERV.Cmdimm(i,s)
+      enddo
+      t=Time()
+      while $A[0].length==0 || $A[1].length==0 ||                              \
+        $A[2].length==0 || $A[3].length==0 do
+        if Time()-t>5000 break
+        wait
+      enddo
+      if $A[0].length==0 || $A[1].length==0 ||                                 \
+        $A[2].length==0 || $A[3].length==0 then
+        change hwarning text="Timeout!"
+        continue
+      endif
+      for i=0,i<4,i++ do
+        if $A[i].answer!=S_DEBUG continue
+        if $uint2($A[i]+5) & 0x8E00 continue
+        rhalf=$float4($A[i]+7)
+        if $uint2($A[i]+5) & 0x0100 rhalf=rhalf/1.0e6
+        if rhalf<0.0 || rhalf>10.0 continue
+        rwire[i/2][i & 1]=rhalf
+        change hrwire[i/2][i & 1] text=format("%.3f",rhalf)
+      enddo
+      oldrange=-1
+    else if Pressed(hzfactors) then
+      i=Measurezfactors()
+      if i<0 return -1
+      goto restart
+    else if Pressed(hprotocol) then
+      if SYS.Browse(hmain,confpath,"Print configuration",0)==0 continue
+      f=Fopen(confpath,"wt")
+      if f==NULL then
+        Error("Unable to open file",confpath)
+        continue
+      endif
+      fprintf(f,"KPTEST CONFIGURATION\n\n")
+      Strtime(s,"%d-%b-%Y %H:%M",0,0)
+      fprintf(f,"Protocolled on             %s\n\n",s)
+      for i=0,i<2,i++ do
+        if i==0 then
+          fprintf(f,"Left head\n")
+        else
+          fprintf(f,"Right head\n")
+        endif
+        fprintf(f,"  Resistance of wire 1     %.4f Ohm\n",rwire[i][0])
+        fprintf(f,"  Resistance of wire 2     %.4f Ohm\n",rwire[i][1])
+        fprintf(f,"  Z coordinate factor      %.3f\n\n",zfactor[i])
+      enddo
+      fprintf(f,"X contact distance         %.0f mm\n",distx*2.0)
+      fprintf(f,"Y contact distance         %.0f mm\n",disty*2.0)
+      Fclose(f)
+    else if Pressed(hok) then
+      setini("Kptest","Wire resistance","%f,%f,%f,%f",                         \
+        rwire[0][0],rwire[0][1],rwire[1][0],rwire[1][1])
+      setini("Kptest","Z factor","%f,%f,%f",                                   \
+        zfactor[0],zfactor[1],spacer)
+      return 0
+    else if Pressed(hcancel) then
+      Memcpy(rwire,r,Sizeof(r))        // Restore old values
+      Memcpy(zfactor,zf,Sizeof(zf))
+      distx=dx; disty=dy
+      return 0
+    else if Pressed(hexit) then
+      return -1
+    endif
+    wait
+  enddo
+end
+
+#define NRTEST         3               // Number of low resistance tests
+
+// Verifies low resistance measurements. Returns -1 if user cancelled script
+// and 0 in any other case.
+function int Testr()
+  char rtest[NRTEST][16] = {         \ // Low resistance tests
+    "58.65   0.110",                 \ // 110 mOhm
+    "39.10   1.110",                 \ // 1.11 Ohm
+    "19.55   11.11" }                  // 11.1 Ohm
+  int i,k,t,x,y,n,nn,d,move[2],moving[2],nocont[2],nbad,nhighr,err
+  float headx[2],heady[2],headxinit[2],headyinit[2],step,deltax
+  float x0,y0,x1,y1,r,sigma,maxerr,rexp[NRTEST],rmeas[NRTEST][5]
+  char s[256]
+  handle hx[2],hy[2],hu[2],hd[2],hl[2],hr[2],htouch[2],hok,hcancel
+  Showstrokebuttons(0)
+repeat:
+  clear hleft
+  draw window=hleft at 102,50 bitmap=0,0,0,"rcboard"
+  draw color=LIGHTRED
+  for i=0,i<2,i++ do
+    x=152+i*61
+    y=77
+    draw at x-5,y-5 rect=x+6,y+6
+    draw at x-6,y-6 rect=x+7,y+7
+  enddo
+  draw show
+  // Step 1: select contacting pads.
+  clear hright
+  change hinfo limits=0,0
+  change hinfo text="Resistance test"
+  draw window=hright font=TIMESFONT
+  draw at 6,30 wrap=RIGHTX-5 color=BLACK
+  draw text="Place combined R-C test board (BEL376-2) approximately in the "
+  draw text="middle so that the row of contacts is parallel to the rail. Find "
+  draw text="positions of two outlined pads. Press " font=MAINFONT
+  draw text="Continue " font=TIMESFONT text="when ready."
+  draw show
+  d=33; y=135
+  for i=0,i<2,i++ do
+    x=16+135*i
+    hx[i]=control TEXT
+      window=hright
+      position=x,y-25,d+d/2-5,18
+      help=" "
+      font=FIXEDSYS
+      mode=M_RIGHT
+    endc
+    draw at x+d+d/2-3,y-11 color=GRAY font=FIXEDSYS text=":"
+    hy[i]=control TEXT
+      window=hright
+      position=x+d+d/2+7,y-25,d+d/2-5,18
+      help=" "
+      font=FIXEDSYS
+      mode=M_LEFT
+    endc
+    Strcpy(s,i==0?"left":"right")
+    hu[i]=control BUTTON
+      window=hright
+      position=x+d,y,d,d
+      help=format("向上移动%s手臂",s)
+      mode=M_REPEAT
+    endc
+    hl[i]=control BUTTON
+      window=hright
+      position=x,y+d,d,d
+      help=format("向左移动%s手臂",s)
+      mode=M_REPEAT
+    endc
+    hr[i]=control BUTTON
+      window=hright
+      position=x+2*d,y+d,d,d
+      help=format("向右移动%s手臂",s)
+      mode=M_REPEAT
+    endc
+    hd[i]=control BUTTON
+      window=hright
+      position=x+d,y+2*d,d,d
+      help=format("向下移动%s手臂",s)
+      mode=M_REPEAT
+    endc
+    htouch[i]=control BUTTON
+      window=hright
+      position=x+d-20,y+3*d+10,d+40,22
+      name=format("接触 %s",i==0?"L":"R")
+      help="触摸板"
+    endc
+  enddo
+  hok=control BUTTON
+    window=hright
+    position=RIGHTX/2-124,USERY,120,24
+    name="继续"
+    help="按下开始电阻测量"
+  endc
+  hcancel=control BUTTON
+    window=hright
+    position=RIGHTX/2+5,USERY,120,24
+    name="取消"
+    help="按下返回主屏幕"
+  endc
+  headx[0]=$LAY.xoffset/1000.0-50.0
+  heady[0]=$LAY.yoffset[0]/1000.0-disty
+  headx[1]=$LAY.xoffset/1000.0+50.0
+  heady[1]=$LAY.yoffset[0]/1000.0-disty
+  headxinit[0]=headx[0]
+  headyinit[0]=heady[0]
+  headxinit[1]=headx[1]
+  headyinit[1]=heady[1]
+  getini("Kptest","Resistance test","%f,%f,%f,%f",                             \
+    headx+0,heady+0,headx+1,heady+1)
+  move[0]=1                            // 1: move, 2: touch
+  move[1]=1
+  moving[0]=0
+  moving[1]=0
+  step=0.5
+  while 1 do
+    for i=0,i<2,i++ do
+      nn=0
+      n=Pressed(hu[i]); heady[i]=heady[i]+n*step; nn=nn+n
+      n=Pressed(hl[i]); headx[i]=headx[i]-n*step; nn=nn+n
+      n=Pressed(hr[i]); headx[i]=headx[i]+n*step; nn=nn+n
+      n=Pressed(hd[i]); heady[i]=heady[i]-n*step; nn=nn+n
+      headx[i]=Min(Max(headxinit[i]-40.0,headx[i]),headxinit[i]+40.0)
+      heady[i]=Min(Max(headyinit[i]-25.0,heady[i]),headyinit[i]+25.0)
+      if nn!=0 move[i]=1
+      if Pressed(htouch[i]) move[i]=2
+      if move[i]!=0 && moving[i]==0 then
+        change hx[i] text=format("%.1f",headx[i])
+        change hy[i] text=format("%.1f",heady[i])
+        n=sprintf(s,"M %i(%f,%fA250H50V50P50) ",i,headx[i],heady[i])
+        if move[i]==1 then
+          sprintf(s+n,"NOP")
+        else
+          sprintf(s+n,"Z(%i)",i)
+        endif
+        SERV.Cmdimm(i,s)
+        move[i]=0
+        moving[i]=1
+      endif
+      if moving[i]!=0 && $A[i].length!=0 then
+        moving[i]=0
+      endif
+    enddo
+    if Pressed(hok) then
+      break
+    else if Pressed(hcancel) then
+      goto finish
+    else if Pressed(hexit) then
+      return -1
+    endif
+    wait
+  enddo
+  setini("Kptest","Resistance test","%f,%f,%f,%f",                             \
+    headx[0],heady[0],headx[1],heady[1])
+  // Step 2: make measurements.
+  clear hright
+  draw window=hright font=TIMESFONT
+  draw at 6,30 wrap=RIGHTX-5 color=BLACK
+  draw text="Making measurements, please wait..."
+  draw show
+  hcancel=control BUTTON
+    window=hright
+    position=RIGHTX/2-60,USERY,120,24
+    name="取消"
+    help="按下返回主屏幕"
+  endc
+  SYS.Killimm(0)
+  SYS.Killimm(1)
+  err=0
+  nocont[0]=0; nocont[1]=0; nbad=0; nhighr=0
+  for i=0,i<NRTEST,i++ do              // For all components
+    rtest[i][5]='\0'
+    sscanf(rtest[i],"%f",&deltax)
+    sscanf(rtest[i]+8,"%f",rexp+i)
+    Initsigma(rmeas[i])
+    for k=0,k<32 && err==0,k++ do      // Statistics
+      change hinfo limits=i*32+k,NRTEST*32
+      // Send two commands.
+      x0=headx[0]+Random(DELTA/2.0)-DELTA/4.0
+      y0=heady[0]+Random(DELTA/2.0)-DELTA/4.0
+      x1=headx[1]+Random(DELTA/2.0)-DELTA/4.0-deltax
+      y1=heady[1]+Random(DELTA/2.0)-DELTA/4.0
+      sprintf(s,"M 0(%f,%fA15H7V50P80) 1(%f,%fA15H7V50P80) E(0,1)",x0,y0,x1,y1)
+      SERV.Cmdimm(0,s)
+      sprintf(s,"M 0(%f,%fA15H7V50P80) 1(%f,%fA15H7V50P80) E(1,0)",x0,y0,x1,y1)
+      SERV.Cmdimm(1,s)
+      // Wait for answers.
+      t=Time()
+      while err==0 && $A[0].length==0 || $A[1].length==0 do
+        if Time()-t>10000 err=1        // Timeout
+        if Pressed(hexit) return -1
+        if Pressed(hcancel) goto finish
+        wait
+      enddo
+      if err!=0 break
+      // Process answers.
+      if $A[0].answer!=S_MOVE || $A[1].answer!=S_MOVE then
+        err=2; break                   // Unexpected answer
+      endif
+      for n=0,n<2,n++ do
+        if $A[n].status & 0x0200 then
+          nocont[n]++
+        else if $A[n].status & 0x0400 then
+          nocont[1-n]++
+        else if $A[n].status & 0x8800 then
+          nbad++
+        else
+          r=$float4($A[n]+8); if ($A[n].status & 0x0100) r=r*1.0e-6
+          if r>100.0 then
+            nhighr++
+          else
+            Addsigma(rmeas[i],r)
+          endif
+        endif
+      enddo
+    enddo
+    if err!=0 goto reporterr
+  enddo
+  change hinfo limits=0,0
+  // Step 3: display statistics.
+  clear hleft
+  draw window=hleft font=MEDIUMFONT color=BLACK mode=M_CENTERED
+  draw at LEFTX/2,30 text="Test results"
+  x=24; y=60
+  draw color=DARKGRAY
+  draw at x,y to x+270,y
+  for i=0,i<=NRTEST,i++ do
+    draw at x,y+25+23*i to x+270,y+25+23*i
+  enddo
+  draw at x,y to x,y+25+23*NRTEST
+  draw at x+80,y to x+80,y+25+23*NRTEST
+  draw at x+270,y to x+270,y+25+23*NRTEST+1
+  draw font=INFOFONT color=BLACK mode=M_LEFT
+  draw at x+10,y+20 text="R expected"
+  draw at x+90,y+20 text="R measured"
+  draw font=FIXEDSYS
+  for i=0,i<NRTEST,i++ do
+    draw color=BLACK at x+10,y+45+23*i text=format("%.3g",rexp[i])
+    draw at x+90,y+45+23*i
+    if Getcount(rmeas[i])<10 then
+      draw color=LIGHTRED text="(no data)"
+    else
+      r=Getmean(rmeas[i])
+      sigma=Getsigma(rmeas[i])
+      if iskelvin then
+        maxerr=KABSERR+rexp[i]*KRELERR
+      else
+        maxerr=EABSERR+rexp[i]*ERELERR
+      endif
+      if r<rexp[i]-maxerr || r>rexp[i]+maxerr then
+        draw color=LIGHTRED
+      else
+        draw color=BLACK
+      endif
+      draw text=format("%6.3f",r)
+      draw color=BLACK text=" ± "
+      if sigma>maxerr then
+        draw color=LIGHTRED
+      else
+        draw color=BLACK
+      endif
+      draw text=format("%5.3f",sigma)
+      draw color=BLACK text=" Ohm"
+    endif
+  enddo
+  y=y+45+23*NRTEST
+  draw color=DARKGRAY
+  for i=0,i<=4,i++ do
+    draw at x,y+23*i to x+270,y+23*i
+  enddo
+  draw at x,y to x,y+23*4
+  draw at x+190,y to x+190,y+23*4
+  draw at x+270,y to x+270,y+23*4+1
+  draw color=BLACK font=INFOFONT
+  draw at x+10,y+20+23*0 text="Bad measurements"
+  draw at x+10,y+20+23*1 text="High resistance"
+  draw at x+10,y+20+23*2 text="No contact left"
+  draw at x+10,y+20+23*3 text="No contact right"
+  draw font=FIXEDSYS
+  draw at x+200,y+20+23*0 color=(nbad==0?BLACK:LIGHTRED)
+  draw text=format("%i",nbad)
+  draw at x+200,y+20+23*1 color=(nhighr==0?BLACK:LIGHTRED)
+  draw text=format("%i",nhighr)
+  draw at x+200,y+20+23*2 color=(nocont[0]==0?BLACK:LIGHTRED)
+  draw text=format("%i",nocont[0])
+  draw at x+200,y+20+23*3 color=(nocont[1]==0?BLACK:LIGHTRED)
+  draw text=format("%i",nocont[1])
+  draw show
+  clear hright
+  draw window=hright font=TIMESFONT
+  draw at 6,30 wrap=RIGHTX-5 color=BLACK
+  draw text="Test is finished. Please inspect the results and press "
+  draw font=MAINFONT text="Repeat " font=TIMESFONT text="to repeat test or "
+  draw font=MAINFONT text="Finish " font=TIMESFONT text="to return back to "
+  draw text="the main screen."
+  draw show
+  hok=control BUTTON
+    window=hright
+    position=RIGHTX/2-124,USERY,120,24
+    name="重复"
+    help="按下重复电阻测量"
+  endc
+  hcancel=control BUTTON
+    window=hright
+    position=RIGHTX/2+5,USERY,120,24
+    name="完成"
+    help="按下返回主屏幕"
+  endc
+  while 1 do
+    if Pressed(hok) goto repeat
+    if Pressed(hcancel) goto finish
+    if Pressed(hexit) return -1
+    wait
+  enddo
+  // Report error.
+reporterr:
+  clear hright
+  draw window=hright font=TIMESFONT
+  draw at 6,30 wrap=RIGHTX-5 color=LIGHTRED
+  if err==1 then
+    draw text="Communication timeout. "
+  else if err==2 then
+    draw text="Invalid answer from the tester. " color=BLACK
+    draw text="Assure that tester is loaded and embedded software supports "
+    draw text="needle test. "
+  else
+    draw text="Error detected. "
+  endif
+  draw color=BLACK text="Press " font=MAINFONT text="Repeat " font=TIMESFONT
+  draw text="to repeat test, or " font=MAINFONT text="Finish " font=TIMESFONT
+  draw text="to return back to the main screen."
+  draw show
+  hok=control BUTTON
+    window=hright
+    position=RIGHTX/2-124,USERY,120,24
+    name="重复"
+    help="按下重复电阻测量"
+  endc
+  hcancel=control BUTTON
+    window=hright
+    position=RIGHTX/2+5,USERY,120,24
+    name="完成"
+    help="按下返回主屏幕"
+  endc
+  while 1 do
+    if Pressed(hok) goto repeat
+    if Pressed(hcancel) goto finish
+    if Pressed(hexit) return -1
+    wait
+  enddo
+finish:
+  SERV.Cmdimm(0,"M 0(Z) 1(Z) NOP")
+  return 0
+end
+
+// Asks operator to select needle type. Returns 0 on success and -1 if operator
+// decided to interrupt test.
+function int Selectneedle()
+  int i,j,select,redraw,x,y,buttons,prevbuttons
+  int scroll,runscroll
+  char s[512]
+  handle hband,hname,hsens,hpins,hpart,hok,hcancel
+  Showstrokebuttons(0)
+  clear hleft
+  hband=control CHILD
+    window=hleft
+    position=0,0,LEFTX,LEFTY
+    help="选择针头"
+    limits=NEEDLEX+2*NEEDLEB,NNEEDLE*(NEEDLEX+NEEDLEB)+NEEDLEB
+    mode=M_VSCROLL
+    size=1024
+  endc
+  clear hright
+  change hinfo limits=0,0
+  change hinfo text="Select needle type"
+  draw window=hright font=TIMESFONT
+  draw at 6,30 wrap=RIGHTX-5 color=BLACK
+  draw text="Select type of the installed needles and press " font=MAINFONT
+  draw text="确定" font=TIMESFONT text=", or press " font=MAINFONT text="Cancel"
+  draw font=TIMESFONT text=" to leave type unchanged."
+  draw font=INFOFONT
+  draw at 6,130 text="Needle type:"
+  hname=control TEXT
+    window=hright
+    position=30,133,RIGHTX-60,16
+    help="针头类型"
+    font=MAINFONT
+  endc
+  draw at 6,166 text="Sensor:"
+  hsens=control TEXT
+    window=hright
+    position=30,169,RIGHTX-60,16
+    help="传感器"
+    font=MAINFONT
+  endc
+  draw at 6,202 text="Pins:"
+  hpins=control TEXT
+    window=hright
+    position=30,205,RIGHTX-60,16
+    help="针"
+    font=MAINFONT
+  endc
+  draw at 6,238 text="atg part number:"
+  hpart=control TEXT
+    window=hright
+    position=30,241,RIGHTX-60,16
+    help="料号"
+    font=MAINFONT
+  endc
+  hok=control BUTTON
+    window=hright
+    position=RIGHTX/2-124,USERY,120,24
+    name="确定"
+    help="按确认您的选择"
+  endc
+  hcancel=control BUTTON
+    window=hright
+    position=RIGHTX/2+5,USERY,120,24
+    name="取消"
+    help="按下可保持布局不变"
+  endc
+  draw show
+  // Unlike in the calibration, needle type is not associated with the
+  // settings in layout. Caveat operator!
+  select=needleindex
+  redraw=1
+  prevbuttons=0
+  scroll=select*(NEEDLEY+NEEDLEB)-(LEFTY-NEEDLEY)/2+NEEDLEB
+  change hband offset=0,scroll
+  runscroll=1
+  while 1 do
+    if Mousexy(hband,&x,&y,&buttons)==1 then
+      y=y+Limit3(hband)
+      if x>=NEEDLEB && x<NEEDLEX+NEEDLEB then
+        i=(y-NEEDLEB)/(NEEDLEY+NEEDLEB)
+        if y>=i*NEEDLEY+(i+1)*NEEDLEB && y<(i+1)*(NEEDLEY+NEEDLEB) then
+          if (buttons & 1)!=0 && (prevbuttons & 1)==0 && i!=select then
+            select=i
+            scroll=select*(NEEDLEY+NEEDLEB)-(LEFTY-NEEDLEY)/2+NEEDLEB
+            runscroll=1
+            redraw=1
+          endif
+        endif
+      endif
+      prevbuttons=buttons
+    endif
+    if scroll<0 then
+      scroll=0
+    else if scroll>NNEEDLE*(NEEDLEX+NEEDLEB)+NEEDLEB-LEFTY then
+      scroll=NNEEDLE*(NEEDLEX+NEEDLEB)+NEEDLEB-LEFTY
+    endif
+    j=scroll-Limit3(hband)
+    if j==0 then
+      runscroll=0
+    else if runscroll!=0 && (buttons & 1)==0 then
+      j=Max(-10,Min(j,10))
+      change hband offset=0,Limit3(hband)+j
+    endif
+    if redraw then
+      draw window=hband bkcolor=WHITE clear
+      for i=0,i<NNEEDLE,i++ do
+        for j=0,j<8 && ndat[i][j]!=' ',j++ do
+          s[j]=ndat[i][j]
+        enddo
+        s[j]='\0'
+        if i==select then
+          draw color=LIGHTRED bkcolor=LIGHTRED
+          draw at NEEDLEB-6,i*NEEDLEY+(i+1)*NEEDLEB-6
+          draw fillrect=NEEDLEX+NEEDLEB+6,(i+1)*(NEEDLEY+NEEDLEB)+6
+        endif
+        draw at NEEDLEB,i*NEEDLEY+(i+1)*NEEDLEB
+        draw bitmap=0,0,0,s
+        change hname text=ndat[select]+41
+        if ndat[select][13]=='N' then
+          change hsens text="None"
+        else if ndat[select][13]=='D' then
+          change hsens text="Transmissive (direct)"
+        else if ndat[select][13]=='M' then
+          change hsens text="Reflective (mirror)"
+        else if ndat[select][13]=='I' then
+          change hsens text="Transmissive (inverse)"
+        else
+          change hsens text="Unknown"
+        endif
+        if ndat[select][15]=='K' && ndat[select][17]=='B' then
+          change hpins text="Kelvin blades"
+        else if ndat[select][15]=='K' && ndat[select][17]=='P' then
+          change hpins text="Kelvin needles"
+        else if ndat[select][15]=='S' && ndat[select][17]=='B' then
+          change hpins text="Single blade"
+        else if ndat[select][15]=='S' && ndat[select][17]=='P' then
+          change hpins text="Single needle"
+        else
+          change hpins text="Unknown"
+        endif
+        change hpart text=format("%.15s",ndat[select]+25)
+      enddo
+      draw show
+      redraw=0
+    endif
+    if Pressed(hok) then
+      needleindex=select
+      return 0
+    else if Pressed(hcancel) then
+      return 0
+    else if Pressed(hexit) then
+      return -1
+    endif
+    wait
+  enddo
+end
+
+// Allows user to replace the needles.
+function int Replaceneedles()
+  int i,x[2],dx,t,isloaded,update
+  handle htype,hseltype,hpresent[2],hserial[2],hoffset[2],hgap[2]
+  handle hoptions,htestr,hreset,hload,hok
+restart:
+  Showstrokebuttons(0)
+  clear hleft
+  draw window=hleft
+  draw at 65,40 bitmap=0,0,0,"logo"
+  draw color=DARKGRAY font=MEDIUMFONT mode=M_CENTERED
+  draw at LEFTX/2,275 text="Micro probe test"
+  draw at LEFTX/2,295 text=format("Version %s",VERSION)
+  draw show
+  change hleft help="版权(C) 2019 HengCe"
+  clear hright
+  change hinfo limits=0,0
+  change hinfo text="Install or replace neeldes"
+  draw window=hright font=TIMESFONT
+  draw at 6,30 wrap=RIGHTX-5 color=BLACK
+  draw text="Please install 1 or 2 needles. Serial number is simultaneously "
+  draw text="the name of the protocol file. Use buttons " font=MAINFONT
+  draw text="Hard reset " font=TIMESFONT text="and " font=MAINFONT text="Load "
+  draw font=TIMESFONT text="to reload tester. Never replace needles without "
+  draw text="hard reset, or they may be damaged while contacting the table!"
+  draw at 6,143 text="Type:"
+  draw at 6,173 text="Needles:"
+  draw at 6,203 text="Serial:"
+  draw at 6,233 text="Offset:"
+  draw at 6,263 text="Gap:"
+  draw show
+  isloaded=$GLOBAL.headloaded
+  hoptions=control BUTTON
+    window=hleft
+    position=LEFTX/2-105,LEFTY-37,100,22
+    text="Configure"
+    help="双击可以配置微针测试"
+    bkcolor=LIGHTGRAY
+    mode=M_DBLCLICK
+  endc
+  htestr=control BUTTON
+    window=hleft
+    position=LEFTX/2+5,LEFTY-37,100,22
+    text="Test R"
+    help="双击用低阻板验证电阻测量"
+    bkcolor=LIGHTGRAY
+    mode=M_DBLCLICK
+  endc
+  x[0]=65
+  x[1]=x[0]+(RIGHTX-x[0])/2
+  dx=(RIGHTX-x[0])/2-5
+  htype=control COMBOLIST
+    window=hright
+    position=x[0],124,dx+40,300
+    help="针头类型"
+    mode=M_VSCROLL
+  endc
+  for i=0,i<NNEEDLE,i++ do
+    add htype text=needletype[i]
+  enddo
+  change htype select=needleindex
+  hseltype=control BUTTON
+    window=hright
+    position=x[1]+40,124,dx-40,24
+    text="Select"
+    help="根据图像选择针的类型"
+    bkcolor=LIGHTGRAY
+  endc
+  for i=0,i<2,i++ do
+    hpresent[i]=control CHECKBOX
+      window=hright
+      position=x[i],154,70,24
+      text=(i==0?"LEFT":"RIGHT")
+      help=format("检查%s针头是否存在",i==0?"左":"右")
+      mode=(present[i]?M_CHECKED:0)
+    endc
+    hserial[i]=control EDIT
+      window=hright
+      position=x[i],184,dx,22
+      text=serial[i]
+      help=format("%s针头的序列号",i==0?"左":"右")
+      mode=M_BORDER
+    endc
+    hoffset[i]=control EDIT
+      window=hright
+      position=x[i],214,dx,22
+      text=offset[i]
+      help=format("%s针头的补偿",i==0?"左":"右")
+      mode=M_BORDER
+    endc
+    hgap[i]=control EDIT
+      window=hright
+      position=x[i],244,dx,22
+      text=gap[i]
+      help=format("%s针头的间距",i==0?"左":"右")
+      mode=M_BORDER
+    endc
+  enddo
+  hreset=control BUTTON
+    window=hright
+    position=5,USERY,RIGHTX/3-5,24
+    name="硬复位"
+    help="Make hard reset"
+  endc
+  hload=control BUTTON
+    window=hright
+    position=5+RIGHTX/3,USERY,RIGHTX/3-5,24
+    name="加载"
+    help="调用加载器"
+  endc
+  hok=control BUTTON
+    window=hright
+    position=5+2*(RIGHTX/3),USERY,RIGHTX/3-9,24
+    name="确定"
+    help="当针头正确安装后，按下即可开始测试"
+  endc
+  if isloaded!=1 then
+    disable hok
+  endif
+  update=1
+  while 1 do
+    // Check whether loaded status has changed.
+    if loadchanged!=0 && isloaded!=$GLOBAL.headloaded then
+      isloaded=$GLOBAL.headloaded
+      update=1
+    endif
+    // Process buttons.
+    if Pressed(hoptions) then
+      i=Setoptions()
+      if i<0 return -1
+      goto restart
+    else if Pressed(htestr) then
+      i=Testr()
+      if i<0 return -1
+      goto restart
+    else if Pressed(htype) then
+      needleindex=Status(htype)
+    else if Pressed(hseltype) then
+      i=Selectneedle()
+      if i<0 return -1
+      goto restart
+    endif
+    for i=0,i<2,i++ do
+      if Pressed(hpresent[i]) then
+        present[i]=Status(hpresent[i])
+        update=1
+      endif
+    enddo
+    if Pressed(hreset) then
+      SYS.Broadcast(11,"HARD RESET")   // Inform others to stop activity
+      SYS.Hardimm(0)
+      change hinfo name="硬复位..."
+      t=Time()
+      while $A[0].length==0 do
+        if Pressed(hexit) return -1
+        if Time()-t>10000 break
+        wait
+      enddo
+      if $A[0].length==0 then
+        change hinfo name="超时"
+      endif
+      $GLOBAL.crateloaded=-1           // Software not loaded
+      $GLOBAL.layloaded=-1
+      $GLOBAL.headloaded=-1
+      $GLOBAL.corrloaded=-1
+      if $GLOBAL.a5==0 then
+        delay 4000                     // Crate performs self-test
+      else
+        delay 500
+      endif
+      SYS.Broadcast(9,"CHG LOAD")      // Inform others to recheck load status
+      change hinfo text="Install or replace neeldes"
+    else if Pressed(hload) then
+      SYS.Start("LOADER",0,"")
+    else if Pressed(hok) then
+      break
+    else if Pressed(hexit) then
+      return -1
+    endif
+    // Enable and disable controls.
+    if update then
+      if isloaded!=1 || (present[0]==0 && present[1]==0) then
+        disable hok
+      else
+        enable hok
+      endif
+      for i=0,i<2,i++ do
+        if present[i] then
+          enable hserial[i]; change hserial[i] bkcolor=WHITE
+          enable hoffset[i]; change hoffset[i] bkcolor=WHITE
+          enable hgap[i]; change hgap[i] bkcolor=WHITE
+        else
+          disable hserial[i]; change hserial[i] bkcolor=LIGHTGRAY
+          disable hoffset[i]; change hoffset[i] bkcolor=LIGHTGRAY
+          disable hgap[i]; change hgap[i] bkcolor=LIGHTGRAY
+        endif
+      enddo
+      update=0
+    endif
+    wait
+  enddo
+  // Operator has pressed OK, save data.
+  for i=0,i<2,i++ do
+    Text(hserial[i],serial[i])
+    Text(hoffset[i],offset[i])
+    Text(hgap[i],gap[i])
+  enddo
+  destroy hoptions
+  destroy htestr
+  return 0
+end
+
+// Checks presence and contacting of needles.
+function int Checkneedles()
+  int i,n,t,ntest,err[2],nnocont[2],nbad[2],nhigh[2]
+  float x,y,r
+  char s[256]
+  handle hok
+  clear hright
+  change hinfo limits=0,0
+  change hinfo text="Verification"
+  draw window=hright font=TIMESFONT
+  draw at 6,30 wrap=RIGHTX-5 color=BLACK
+  draw text="Script is checking whether the specified needles are installed "
+  draw text="correctly. Please wait..."
+  draw show
+  for i=0,i<2,i++ do
+    err[i]=0
+    nnocont[i]=0
+    nbad[i]=0
+    nhigh[i]=0
+    roffset[i]=(iskelvin?ROFFSETK:1.0e99)
+  enddo
+  ntest=10
+  // On the first step, verify that the signals from the pressure sensors are
+  // not too low or too high, and check that Kelvin pins are not shortcut.
+  for n=0,n<ntest,n++ do               // Statistics
+    for i=0,i<2,i++ do                 // Heads
+      if present[i]==0 || err[i]!=0 continue
+      // Port 0x10000107 contains raw voltage measured by the pressure sensor,
+      // inverted in the case of inverting sensor.
+      sprintf(s,"INPORT32 HEAD(%i),0x10000107",i)
+      SERV.Cmdimm(i,s)
+      if iskelvin then
+        sprintf(s,"M %i(Z) CONTKELV(%i)",i,i)
+        SERV.Cmdimm(i+2,s)
+      endif
+    enddo
+    t=Time()
+    while 1 do
+      if Pressed(hexit) return -1
+      for i=0,i<2,i++ do
+        if present[i]==0 || err[i]!=0 continue
+        if $A[i].length==0 break
+        if iskelvin!=0 && $A[i+2].length==0 break
+        if Time()-t>5000 err[i]=11     // Timeout
+      enddo
+      if i>=2 break
+      wait
+    enddo
+    for i=0,i<2,i++ do
+      if present[i]==0 || err[i]!=0 continue
+      if $A[i].answer!=S_INPORT32 then
+        err[i]=1                       // Invalid answer
+      else if iskelvin!=0 &&                                                   \
+        ($A[i+2].answer!=M_MOVE || $A[i+2].subansw!=M_CONTKELV) then
+        err[i]=1                       // Invalid answer
+      else if $uint4($A[i]+5)<40000 || $uint4($A[i]+5)>64536 then
+        err[i]=2                       // Invalid signal from pressure sensor
+      else if iskelvin!=0 && ($A[i+2].status & 0x8200)!=0x0200 then
+        err[i]=3                       // Shortcut in the air
+      endif
+    enddo
+  enddo
+  // On the second step, check that both pins have electrical contact by
+  // touching the board.
+  for n=0,n<ntest,n++ do               // Statistics
+    for i=0,i<2,i++ do                 // Heads
+      if present[i]==0 || err[i]!=0 continue
+      x=$LAY.xoffset/1000.0+Random(DELTA)+Random(DELTA)-DELTA
+      if i==0 then
+        x=x-distx                      // Left head
+      else
+        x=x+distx                      // Right head
+      endif
+      y=$LAY.yoffset[0]/1000.0+disty+Random(DELTA)+Random(DELTA)-DELTA
+      sprintf(s,"M %i(%g,%gH5V20P50A5) E(%i,32)",i,x,y,i)
+      SERV.Cmdimm(i,s)
+    enddo
+    t=Time()
+    while 1 do
+      if Pressed(hexit) return -1
+      for i=0,i<2,i++ do
+        if present[i]==0 || err[i]!=0 continue
+        if $A[i].length==0 break
+        if Time()-t>5000 err[i]=11     // Timeout
+      enddo
+      if i>=2 break
+      wait
+    enddo
+    for i=0,i<2,i++ do
+      if present[i]==0 || err[i]!=0 continue
+      if $A[i].answer!=S_MOVE || $A[i].subansw!=M_EXACTR then
+        err[i]=1                       // Invalid answer
+      else if ($A[i].status & 0x0200)!=0 then
+        nnocont[i]++                   // No contact
+      else if ($A[i].status & 0x0800)!=0 then
+        nbad[i]++                      // Bad measurement
+      else
+        r=$A[i].r
+        if ($A[i].status & 0x0100) r=r*1.0e-6
+        if r<(-3.0)||r>20.0 nhigh[i]++ // Bad resistance (>20 Ohm or negative)
+        if iskelvin==0 roffset[i]=Min(r,roffset[i])
+      endif
+    enddo
+  enddo
+  for i=0,i<2,i++ do
+    if present[i]==0 || err[i]!=0 continue
+    if nnocont[i]>ntest/2 then
+      err[i]=4
+    else if nbad[i]>ntest/2 then
+      err[i]=5
+    else if nhigh[i]>ntest/2 then
+      err[i]=6
+    endif
+  enddo
+  if err[0]==0 && err[1]==0 return 0
+  // Display errors.
+  clear hright
+  change hinfo limits=0,0
+  change hinfo text="Verification failed"
+  draw window=hright font=TIMESFONT
+  draw at 6,30 wrap=RIGHTX-5 color=BLACK
+  draw text="Script has found some problems with the installed needles.\n\n"
+  draw color=LIGHTRED
+  for i=0,i<2,i++ do
+    if present[i]==0 || err[i]==0 continue
+    draw text=(i==0?"  Left:   ":"  Right: ")
+    if err[i]==1 then
+      draw text="Invalid answer from tester"
+    else if err[i]==2 then
+      draw text="Invalid signal from pressure sensor"
+    else if err[i]==3 then
+      draw text="Shortcut between Kelvin pins"
+    else if err[i]==4 then
+      draw text="No contact with the board"
+    else if err[i]==5 then
+      draw text="Bad measurements"
+    else if err[i]==6 then
+      draw text="Resistance out of range"
+    else if err[i]==11 then
+      draw text="Timeout"
+    else
+      draw text="Unknown error"
+    endif
+    draw text="\n"
+  enddo
+  draw color=BLACK text="\nPlease correct problems and repeat test."
+  draw show
+  hok=control BUTTON
+    window=hright
+    position=RIGHTX/2-60,USERY,120,24
+    name="确定"
+    help="按下返回针头选择窗口"
+  endc
+  while 1 do
+    if Pressed(hok) return 1
+    if Pressed(hexit) return -1
+    wait
+  enddo
+end
+
+// Displays data for the given head and type or, if head is -1, checks whether
+// some data selection button was pressed.
+function int Drawdata(int head,int type,int stroke,int report)
+  int i,j,k,x,xd[2],xu,xl,y,x0,y0,xstep,ystep,ds,hsum,hmax
+  float u,r,f,rx,zbase,zscale,pbase,pscale,cbase,cscale,yscale
+  if type>0 && head<0 then
+    head=(present[0]?0:1)
+  endif
+  // Get head and type.
+  if head<0 || head>=2 then
+    stroke=zdatastroke
+    if Pressed(hstat) then
+      type=2
+    else
+      for head=0,head<2,head++ do
+        for type=0,type<2,type++ do
+          if hsel[head][type]==NULL continue
+          if Pressed(hsel[head][type]) then
+            break
+          endif
+        enddo
+        if type<2 break
+      enddo
+      if head>=2 then
+        for i=0,i<NSTROKE,i++ do
+          if hstroke[i]==NULL continue
+          if Pressed(hstroke[i]) then
+            stroke=i
+            break
+          endif
+        enddo
+        if i>=NSTROKE return
+        head=zselected
+        type=zdatatype
+      endif
+    endif
+  endif
+  if (type<0 || type>=3) type=0        // Correct possible error
+  if report==0 then
+    // Show or hide stroke buttons.
+    Showstrokebuttons(type==1)
+    // Highlight selected button.
+    for i=0,i<2,i++ do
+      for j=0,j<2,j++ do
+        if hsel[i][j]==NULL continue
+        if i==head && j==type then
+          change hsel[i][j] color=LIGHTRED
+          change hsel[i][j] bkcolor=YELLOW
+        else
+          change hsel[i][j] color=BLACK
+          change hsel[i][j] bkcolor=GRAY
+        endif
+      enddo
+    enddo
+    // Highlight stroke buttons.
+    if type==1 then
+      for i=0,i<NSTROKE,i++ do
+        if i==stroke then
+          change hstroke[i] color=LIGHTRED
+          change hstroke[i] bkcolor=YELLOW
+        else
+          change hstroke[i] color=BLACK
+          change hstroke[i] bkcolor=GRAY
+        endif
+      enddo
+    endif
+    if type==2 then
+      change hstat color=LIGHTRED
+      change hstat bkcolor=YELLOW
+    else
+      change hstat color=BLACK
+      change hstat bkcolor=GRAY
+    endif
+    zselected=head
+    zdatatype=type
+    zdatastroke=stroke
+  endif
+  draw window=(report?hreport:hleft)
+  draw bkcolor=WHITE clear
+  if type==0 then
+    // Draw results of Z pressure sensor test. Scales convert physical units
+    // into the display pixels: pixel=base+du*scale.
+    if report==0 change hleft help="Z方向压力测试结果"
+    zscale=(LEFTX-81)/(NZPOINT*zstep); zbase=40.0+zscale*(NZPOINT/2)*zstep
+    pscale=-200.0/16000.0; pbase=260.0+pscale*2000.0
+    cscale=-200.0/6000.0; cbase=260.0
+    // Draw frame.
+    draw color=GRAY at 40,60 rect LEFTX-40,261
+    if report==0 then
+      draw mode=M_CENTERED font=MEDIUMFONT color=DARKGRAY
+      draw at LEFTX/2,34 text=format("%s head",head==0?"Left":"Right")
+    endif
+    // Draw z scale.
+    draw mode=M_CENTERED font=SMALLFONT
+    for u=-(NZPOINT/2)*zstep,u<=(NZPOINT/2)*zstep,u=u+(NZPOINT/6)*zstep do
+      x=zbase+u*zscale
+      draw color=GRAY at x,261 to x,266
+      draw color=BLACK at x,278 text=format("%g",u)
+    enddo
+    draw at LEFTX/2,290 text="Z distance, um"
+    // Draw pressure scale.
+    draw mode=M_RIGHT font=SMALLFONT
+    for u=-2000,u<=14000,u=u+2000 do
+      y=pbase+u*pscale
+      draw color=GRAY at 36,y to 40,y
+      draw color=LIGHTRED at 35,y+7 text=format("%g",u)
+    enddo
+    draw color=LIGHTRED mode=M_LEFT at 6,47 text="Pressure, bits"
+    // Draw capacity/Kelvin scale.
+    draw mode=M_LEFT font=SMALLFONT
+    for u=0,u<=6000,u=u+1000 do
+      y=cbase+u*cscale
+      draw color=GRAY at LEFTX-40,y to LEFTX-35,y
+      draw color=LIGHTBLUE at LEFTX-32,y+7 text=format("%g",u)
+    enddo
+    // Draw Kelvin contact curve.
+    if iskelvin then
+      draw color=GREEN
+      draw mode=M_RIGHT at LEFTX-6,31 text="Kelvin contact"
+      for i=0,i<zn[head],i++ do
+        x=(zz[head][i]-zref[head])*zscale+zbase
+        y=zk[head][i]*cscale+cbase
+        if i==0 then
+          draw at x,y
+        else
+          draw to x,y
+        endif
+      enddo
+    endif
+    // Draw capacity curve.
+    draw color=LIGHTBLUE
+    draw mode=M_RIGHT at LEFTX-6,47 text="Capacity, bits"
+    for i=0,i<zn[head],i++ do
+      x=(zz[head][i]-zref[head])*zscale+zbase
+      y=zc[head][i]*cscale+cbase
+      if i==0 then
+        draw at x,y
+      else
+        draw to x,y
+      endif
+    enddo
+    // Draw pressure curve.
+    draw color=LIGHTRED
+    for i=0,i<zn[head],i++ do
+      x=(zz[head][i]-zref[head])*zscale+zbase
+      y=(zp[head][0]-zp[head][i])*pscale+pbase
+      if i==0 then
+        draw at x,y
+      else
+        draw to x,y
+      endif
+    enddo
+    // Draw factors.
+    if zfactlo[head]!=0.0 && zfacthi[head]!=0.0 then
+      draw color=BLACK mode=M_LEFT font=SMALLFONT
+      draw at 30,305
+      draw text=format("P factor = %.1f .. %.1f bits/um",                      \
+      zfactlo[head],zfacthi[head])
+    endif
+    // Draw pressure limits.
+    if zpmax[head]>0.0 then
+      draw color=BLACK mode=M_LEFT font=SMALLFONT
+      draw at 30,319
+      draw text=format("P limits = %.0f .. %.0f bits (diff = %.0f bits)",      \
+      zp[head][0],zpmax[head],zp[head][0]-zpmax[head])
+    endif
+  else if type==1 then
+    if report==0 change hleft help="接触质量"
+    // Calculate maximum of selected histogram and total number of measurements.
+    hsum=0; hmax=0
+    for i=0,i<NHIST,i++ do
+      hsum=hsum+fhist[stroke][head][i]
+      hmax=Max(hmax,fhist[stroke][head][i])
+    enddo
+    // Calculate parameters of histogram.
+    x0=35
+    y0=LEFTY-145
+    xstep=(LEFTX-x0-5)/NHIST
+    for i=10000,i>0,i=i/10 do
+      k=5; if hmax+10>=3*k*i break
+      k=2; if hmax+10>=3*k*i break
+      k=1; if hmax+10>=3*k*i break
+    enddo
+    ystep=i*k
+    yscale=(y0-42)/(10.0+hmax)         // Pixels per unit
+    draw mode=M_CENTERED font=MEDIUMFONT color=DARKGRAY
+    if report==0 then
+      draw at LEFTX/2,34 text=format("%s head",head==0?"Left":"Right")
+    else
+      draw at LEFTX/2,34 text=format("Stroke %i mm/s, pressure %g g",          \
+      vlist[stroke],plist[stroke]/10.0)
+    endif
+    // Draw X axis.
+    draw color=DARKGRAY at x0,y0 to x0+NHIST*xstep+5,y0
+    draw font=SMALLFONT mode=M_CENTERED
+    for i=0,i<NHIST,i++ do
+      if (i-NHIST/2+100)%20!=0 continue
+      k=(i-NHIST/2)*HISTSTEP*1000
+      rx=k/1000.0+roffset[head]
+      x=x0+i*xstep+xstep/2
+      draw color=DARKGRAY at x,y0 to x,y0+5
+      draw color=BLACK at x,y0+16 text=format("%.3f",rx)
+    enddo
+    x=x0+(NHIST/2)*xstep+xstep/2
+    draw color=GRAY at x,y0-1 to x,37
+    // Draw sigma and 3 sigma lines.
+    f=(Getmean(fstat[stroke][head])-roffset[head])/HISTSTEP+NHIST/2
+    x=x0+f*xstep+xstep/2
+    draw color=LIGHTRED
+    ds=(xstep*RSIGMA)/HISTSTEP
+    draw at x-ds,105 to x-ds,110
+    draw at x+ds,105 to x+ds,110
+    draw at x-ds,107 to x+ds,107
+    ds=(xstep*3.0*RSIGMA)/HISTSTEP
+    draw at x-ds,175 to x-ds,180
+    draw at x+ds,175 to x+ds,180
+    draw at x-ds,177 to x+ds,177
+    // Draw Y axis.
+    draw color=DARKGRAY at x0,y0 to x0,37
+    draw font=SMALLFONT mode=M_RIGHT
+    for i=0,i<100,i++ do
+      y=y0-i*ystep*yscale
+      if y<42 break
+      draw color=DARKGRAY at x0,y to x0-5,y
+      draw color=BLACK at x0-7,y+6 text=format("%i",i*ystep)
+    enddo
+    // Draw data.
+    draw color=BLACK bkcolor=DARKGRAY
+    for i=0,i<NHIST,i++ do
+      x=x0+i*xstep
+      y=y0-fhist[stroke][head][i]*yscale
+      draw at x,y0 fillrect x+xstep+1,y
+    enddo
+    // Show statistics.
+    y=LEFTY-105
+    draw font=TIMESFONT mode=M_LEFT
+    draw at 30,y color=BLACK text="Cu:"
+    draw color=(fbadcu[stroke][head]==0?BLACK:LIGHTRED)
+    draw at 70,y text=format("Bad=%i",fbadcu[stroke][head])
+    draw color=(fopencu[stroke][head]==0?BLACK:LIGHTRED)
+    draw at 130,y text=format("Opens=%i",fopencu[stroke][head])
+    draw color=(fnoctcu[stroke][head]==0?BLACK:LIGHTRED)
+    draw at 210,y text=format("No cont=%i",fnoctcu[stroke][head])
+    y=LEFTY-88
+    if iskelvin then
+      draw font=TIMESFONT mode=M_LEFT
+      draw at 30,y color=BLACK text="FR4:"
+      draw color=(fbadfr[stroke][head]==0?BLACK:LIGHTRED)
+      draw at 70,y text=format("Bad=%i",fbadfr[stroke][head])
+      draw color=(fshortfr[stroke][head]==0?BLACK:LIGHTRED)
+      draw at 130,y text=format("Shorts=%i",fshortfr[stroke][head])
+      draw color=(fcontfr[stroke][head]==0?BLACK:LIGHTRED)
+      draw at 210,y text=format("Contacts=%i",fcontfr[stroke][head])
+    endif
+    if Getcount(fstat[stroke][head])>5 then
+      y=LEFTY-71
+      draw font=TIMESFONT mode=M_LEFT
+      draw at 30,y color=BLACK
+      draw text=format("R = %.5f ± %.5f Ohm",                                  \
+      Getmean(fstat[stroke][head]),Getsigma(fstat[stroke][head]))
+    endif
+    // Show quality of needle.
+    draw font=TIMESFONT mode=M_LEFT color=BLACK
+    if fquality[stroke][head]>0 then
+      draw at 210,y text="Quality:" at 260,y
+    endif
+    if fquality[stroke][head]>=BESTLIM then
+      draw color=BLACK text="BEST"
+    else if fquality[stroke][head]>=GOODLIM then
+      draw color=BLACK text="GOOD"
+    else if fquality[stroke][head]>=POORLIM then
+      draw color=RED text="POOR"
+    else if fquality[stroke][head]>0 then
+      draw color=LIGHTRED text="BAD"
+    endif
+  else if type==2 then
+    if report==0 change hleft help="针头统计"
+    draw mode=M_CENTERED font=MEDIUMFONT color=DARKGRAY
+    draw at LEFTX/2,34 text="Statistics"
+    draw color=BLACK font=SMALLFONT mode=M_LEFT
+    x=10; xd[0]=80; xd[1]=140; xu=200; xl=260; y=70
+    draw at xd[0],y text="Left" at xd[1],y text="Right"
+    draw at xu,y text="Units" at xl,y text="Limits"
+    y=y+30
+    // Pin resistances.
+    if iskelvin then
+      draw color=BLACK font=SMALLFONT at x,y text="R pin 1" at xu,y text="Ohm"
+      draw at xl,y font=TIMESFONT text=format("%.1f .. %.1f",pinrmin,pinrmax)
+      for i=0,i<2,i++ do
+        if present[i]==0 || pinr[i][0]<(-1000.0) continue
+        draw color=(pinr[i][0]<pinrmin || pinr[i][0]>pinrmax?LIGHTRED:BLACK)
+        draw font=TIMESFONT at xd[i],y text=format("%.2f",pinr[i][0])
+      enddo
+      y=y+22
+      draw color=BLACK font=SMALLFONT at x,y text="R pin 2" at xu,y text="Ohm"
+      draw at xl,y font=TIMESFONT text=format("%.1f .. %.1f",pinrmin,pinrmax)
+      for i=0,i<2,i++ do
+        if present[i]==0 || pinr[i][1]<(-1000.0) continue
+        draw color=(pinr[i][1]<pinrmin || pinr[i][1]>pinrmax?LIGHTRED:BLACK)
+        draw font=TIMESFONT at xd[i],y text=format("%.2f",pinr[i][1])
+      enddo
+    else
+      draw color=BLACK font=SMALLFONT at x,y text="R pin" at xu,y text="Ohm"
+      draw at xl,y font=TIMESFONT text=format("%.1f .. %.1f",pinrmin,pinrmax)
+      for i=0,i<2,i++ do
+        r=(pinr[i][0]+pinr[i][1])/2.0
+        if present[i]==0 || r<(-1000.0) continue
+        draw color=(r<pinrmin || r>pinrmax?LIGHTRED:BLACK)
+        draw font=TIMESFONT at xd[i],y
+        draw text=format("%.2f",r)
+      enddo
+    endif
+    y=y+30
+    // Distance between pins.
+    draw color=BLACK font=SMALLFONT at x,y text="Offset" at xu,y text="um"
+    draw at xl,y font=TIMESFONT
+    draw text=format("%.0f .. %.0f",pindistmin,pindistmax)
+    for i=0,i<2,i++ do
+      if present[i]==0 continue
+      if iskelvin then
+        if zdist[i]==0.0 continue
+        draw color=(zdist[i]<pindistmin || zdist[i]>pindistmax?LIGHTRED:BLACK)
+        draw font=TIMESFONT at xd[i],y text=format("%.0f",zdist[i])
+      else
+        draw color=DARKGRAY
+        draw font=TIMESFONT at xd[i],y text="None"
+      endif
+    enddo
+    y=y+22
+    // Sensitivity at the moment of contact.
+    draw color=BLACK font=SMALLFONT at x,y text="Sens LO" at xu,y text="bit/um"
+    draw at xl,y font=TIMESFONT
+    draw text=format("%.0f .. %.0f",senslomin,senslomax)
+    for i=0,i<2,i++ do
+      if present[i]==0 || zfactlo[i]==0.0 continue
+      draw color=(zfactlo[i]<senslomin || zfactlo[i]>senslomax?LIGHTRED:BLACK)
+      draw font=TIMESFONT at xd[i],y text=format("%.1f",zfactlo[i])
+    enddo
+    y=y+22
+    // Sensitivity in the middle of the curve.
+    draw color=BLACK font=SMALLFONT at x,y text="Sens HI" at xu,y text="bit/um"
+    draw at xl,y font=TIMESFONT
+    draw text=format("%.0f .. %.0f",senshimin,senshimax)
+    for i=0,i<2,i++ do
+      if present[i]==0 || zfacthi[i]==0.0 continue
+      draw color=(zfacthi[i]<senshimin || zfacthi[i]>senshimax?LIGHTRED:BLACK)
+      draw font=TIMESFONT at xd[i],y text=format("%.1f",zfacthi[i])
+    enddo
+    y=y+22
+    // Sensor zero.
+    draw color=BLACK font=SMALLFONT at x,y text="P zero" at xu,y text="bits"
+    draw at xl,y font=TIMESFONT text=format(">%.0f",pressmin)
+    for i=0,i<2,i++ do
+      if present[i]==0 || zn[i]<1 continue
+      draw color=(zp[i][0]<pressmin?LIGHTRED:BLACK)
+      draw font=TIMESFONT at xd[i],y text=format("%.0f",zp[i][0])
+    enddo
+    y=y+22
+    // Sensor range.
+    draw color=BLACK font=SMALLFONT at x,y text="P range" at xu,y text="bits"
+    draw at xl,y font=TIMESFONT text=format(">%.0f",rangemin)
+    for i=0,i<2,i++ do
+      if present[i]==0 || zpmax[i]==0.0 continue
+      draw color=(zp[i][0]-zpmax[i]<rangemin?LIGHTRED:BLACK)
+      if ndat[needleindex][19]=='P' && zp[i][0]-zpmax[i]>30000 then
+        draw font=TIMESFONT at xd[i],y text=">30000"
+      else
+        draw font=TIMESFONT at xd[i],y text=format("%.0f",zp[i][0]-zpmax[i])
+      endif
+    enddo
+    y=y+30
+    // Quality of contacting.
+    for k=0,k<NSTROKE,k++ do
+      draw color=BLACK font=SMALLFONT at x,y
+      draw text=format("V=%i P=%g",vlist[k],plist[k]/10.0)
+      if k==0 then
+        draw at xu,y text="Quality"
+      endif
+      for i=0,i<2,i++ do
+        if present[i]==0 || fquality[k][i]==0 continue
+        draw font=TIMESFONT at xd[i],y
+        if fquality[k][i]>=BESTLIM then
+          draw color=BLACK text="BEST"
+        else if fquality[k][i]>=GOODLIM then
+          draw color=BLACK text="GOOD"
+        else if fquality[k][i]>=POORLIM then
+          draw color=RED text="POOR"
+        else if fquality[k][i]>0 then
+          draw color=LIGHTRED text="BAD"
+        endif
+      enddo
+      y=y+22
+    enddo
+    y=y+8
+  endif
+  draw show
+end
+
+// Measures resistance of probe pins. This function is not supported by older
+// embedded software.
+function int Checkpins()
+  // npin and rpin: [head][pin]...
+  int i,j,p,n,t,ntest,npin[2][2],status,err
+  float x,y,r,rpin[2][2][50]
+  char s[256]
+  handle hok,hcancel
+  Showstrokebuttons(0)
+  clear hleft
+  draw window=hleft show
+  clear hright
+  change hinfo limits=0,0
+  change hinfo text="Resistance of pins"
+  draw window=hright font=TIMESFONT
+  draw at 6,30 wrap=RIGHTX-5 color=BLACK
+  draw text="Now script measures the resistance of the "
+  draw text=(iskelvin?"Kelvin pins. ":"pin. ")
+  draw text="Please wait..."
+  draw show
+  hcancel=control BUTTON
+    window=hright
+    position=(RIGHTX-120)/2,USERY,120,24
+    name="取消"
+    help="按下可取消测试并返回主屏幕"
+  endc
+  Createselectionbuttons()
+  Drawdata(present[0]!=0?0:1,2,0,0)
+  Memset(npin,0,Sizeof(npin))
+  Memset(rpin,0,Sizeof(rpin))
+  ntest=20                             // At most 50!
+  err=0
+  // Make test.
+  for n=0,n<ntest && err==0,n++ do     // Statistics
+    change hinfo limits=n+1,ntest
+    // Send measurements.
+    for i=0,i<2 && err==0,i++ do       // Heads
+      if present[i]==0 continue
+      x=$LAY.xoffset/1000.0+Random(DELTA)+Random(DELTA)-DELTA
+      if i==0 then
+        x=x-distx                      // Left head
+      else
+        x=x+distx                      // Right head
+      endif
+      y=$LAY.yoffset[0]/1000.0+disty+Random(DELTA)+Random(DELTA)-DELTA
+      sprintf(s,"M %i(%g,%gV20P5A5) D(0x3B,%i,32,0,0,0,0,0,0)",i,x,y,i)
+      SERV.Cmdimm(i,s)
+      sprintf(s,"M %i(%g,%gV20P5A5) D(0x3B,%i,32,1,0,0,0,0,0)",i,x,y,i)
+      SERV.Cmdimm(i+2,s)
+    enddo
+    // Wait for answers.
+    t=Time()
+    while err==0 do
+      if Pressed(hexit) return -1
+      if Pressed(hcancel) err=1        // Cancel
+      Drawdata(-1,0,0,0)
+      for i=0,i<2 && err==0,i++ do
+        if present[i]==0 continue
+        if $A[i].length==0 || $A[i+2].length==0 break
+        if Time()-t>5000 err=2         // Timeout
+      enddo
+      if i>=2 break
+      wait
+    enddo
+    // Analyse answers. To reduce the influence of contact resistance, I sort
+    // measurements by resistance and take mean value of the lower half.
+    for i=0,i<2 && err==0,i++ do
+      if present[i]==0 continue
+      if $A[i].answer==S_ERROR then
+        err=3; break                   // Unsupported measurements
+      endif
+      for p=0,p<2,p++ do               // For all pins
+        status=$uint2($A[p*2+i]+5)
+        if (status & 0x8A00)!=0 continue
+        r=$float4($A[p*2+i]+7)
+        if (status & 0x0100) r=r*1.0e-6
+        if r>100.0 continue
+        for j=npin[i][p],j>0,j-- do
+          rpin[i][p][j]=rpin[i][p][j-1]
+          if rpin[i][p][j-1]<=r break
+        enddo
+        rpin[i][p][j]=r
+        npin[i][p]++
+      enddo
+    enddo
+  enddo
+  // Analyze data and calculate resistances.
+  for i=0,i<2 && err==0,i++ do
+    if present[i]==0 continue
+    for p=0,p<2,p++ do
+      r=0.0
+      for j=0,j<npin[i][p] && j<ntest/2,j++ do
+        r=r+rpin[i][p][j]
+      enddo
+      if j==0 then
+        r=-1.0e10
+      else
+        r=r/j-rwire[i][p]
+      endif
+      pinr[i][p]=r
+    enddo
+  enddo
+  Drawdata(zselected,zdatatype,zdatastroke,0)
+  if err==0 return 0
+  // Report error.
+  clear hright
+  change hinfo limits=0,0
+  change hinfo text="Error in pin R test"
+  draw window=hright font=TIMESFONT
+  draw at 6,30 wrap=RIGHTX-5 color=LIGHTRED
+  if err==1 then
+    draw text="Test cancelled." color=BLACK text="Press " font=MAINFONT
+    draw text="OK " font=TIMESFONT text="to return back to "
+    draw text="the main screen."
+  else if err==2 then
+    draw text="Timeout while executing command." color=BLACK text="Press"
+    draw font=MAINFONT text="OK " font=TIMESFONT text="to return back to the "
+    draw text="main screen."
+  else
+    draw text="Unsupported measurement. " color=BLACK text="You need to "
+    draw text="update the embedded software to the newest version. Press "
+    draw font=MAINFONT text="OK " font=TIMESFONT text="to continue."
+  endif
+  hok=control BUTTON
+    window=hright
+    position=RIGHTX/2-60,USERY,120,24
+    name="确定"
+    help="按下返回针头选择窗口"
+  endc
+  while 1 do
+    Drawdata(-1,0,0,0)
+    if Pressed(hok) return (err==3?0:1)
+    if Pressed(hexit) return -1
+    wait
+  enddo
+end
+
+// Verifies Z pressure sensors. Returns 0 on success, 1 on error that prevents
+// continuation and -1 if operator decided to interrupt test.
+function int Checkzpressure()
+  int i,j,n,t,limit[2],imin,imax,nzstat,err
+  float x0[2],y0[2],x[2],y[2],z[2],zmax[2],dyin,zpmean
+  float pmean[2],cmean[2],kmean[2],zmean[2]
+  float zm[NZPOINT],pm[NZPOINT],zi[NZPOINT],pi[NZPOINT]
+  float contc[2],contk[2]
+  char s[256]
+  handle hok,hcancel
+  Showstrokebuttons(0)
+  clear hleft
+  draw window=hleft show
+  clear hright
+  change hinfo limits=0,0
+  change hinfo text="Z pressure sensors"
+  draw window=hright font=TIMESFONT wrap=RIGHTX-5 color=BLACK at 6,30
+  draw text="Now testing pressure sensors. Red line is the signal from the "
+  draw text="sensor, blue line - contact detection (measured capacity) in "
+  draw text="arbitrary units"
+  if iskelvin then
+    draw text=", green - Kelvin contact."
+  else
+    draw text="."
+  endif
+  draw show
+  hcancel=control BUTTON
+    window=hright
+    position=(RIGHTX-120)/2,USERY,120,24
+    name="取消"
+    help="按下可取消测试并返回主屏幕"
+  endc
+  if ndat[needleindex][19]=='P' then
+    nzstat=NZSTATH
+  else
+    nzstat=NZSTATS
+  endif
+  Createselectionbuttons()
+  Drawdata(present[0]!=0?0:1,0,0,0)
+  // Select ideal test positions and prepare for test.
+  for i=0,i<2,i++ do
+    x0[i]=$LAY.xoffset/1000.0
+    if i==0 then
+      x0[i]=x0[i]-distx                // Left head
+    else
+      x0[i]=x0[i]+distx                // Right head
+    endif
+    y0[i]=$LAY.yoffset[0]/1000.0+disty
+    limit[i]=0
+    contc[i]=0.0
+    contk[i]=0.0
+  enddo
+  // Measure Z surface coordinates. Single measurement is sufficient.
+  for i=0,i<2,i++ do
+    if present[i]==0 continue
+    SYS.Killimm(i)
+    x[i]=x0[i]+Random(DELTA)+Random(DELTA)-DELTA
+    y[i]=y0[i]+Random(DELTA)+Random(DELTA)-DELTA
+    sprintf(s,"M %i(%g,%gV20P5A5) Z(%i)",i,x[i],y[i],i)
+    SERV.Cmdimm(i,s)
+  enddo
+  t=Time()
+  while err==0 do
+    if Pressed(hexit) return -1        // Interrupt
+    if Pressed(hcancel) err=1          // Cancel
+    Drawdata(-1,0,0,0)
+    for i=0,i<2,i++ do
+      if present[i]==0 continue
+      if $A[i].length==0 break
+    enddo
+    if i>=2 break
+    if Time()-t>5000 err=2             // Timeout
+    wait
+  enddo
+  // Get coordinate and move heads up after test.
+  for i=0,i<2 && err==0,i++ do
+    if present[i]==0 continue
+    zref[i]=$A[i].inport               // Z reference coordinate, um
+    sprintf(s,"M %i(%g,%gV20P5A5) UP(%i) NOP",i,x[i],y[i],i)
+    SERV.Cmdimm(i,s)
+  enddo
+  t=Time()
+  while err==0 do
+    if Pressed(hexit) return -1        // Interrupt
+    if Pressed(hcancel) err=1          // Cancel
+    Drawdata(-1,0,0,0)
+    for i=0,i<2,i++ do
+      if present[i]==0 continue
+      if $A[i].length==0 break
+    enddo
+    if i>=2 break
+    if Time()-t>5000 err=2             // Timeout
+    wait
+  enddo
+  // Test pressure sensors.
+  for n=-50,n<NZPOINT && err==0,n++ do
+    change hinfo limits=n+50,NZPOINT+170
+    // Set Z coordinate.
+    for i=0,i<2 && err==0,i++ do
+      if present[i]==0 || limit[i]!=0 continue
+      if zselected==i && zdatatype==0 Drawdata(i,0,0,0)
+      // Negative n values correspond to fast preliminary movement.
+      if n<0 then
+        z[i]=zref[i]+n*40.0-(NZPOINT/2)*zstep
+      else
+        z[i]=zref[i]+n*zstep-(NZPOINT/2)*zstep
+      endif
+      sprintf(s,"OUTPORT32 HEAD(%i),0x10010018,%i",i,z[i])
+      SERV.Cmdimm(i,s)
+      zmax[i]=z[i]
+    enddo
+    // Wait for answer.
+    t=Time()
+    while err==0 do
+      if Pressed(hexit) return -1      // Interrupt
+      if Pressed(hcancel) err=1        // Cancel
+      Drawdata(-1,0,0,0)
+      for i=0,i<2,i++ do
+        if present[i]==0 || limit[i]!=0 continue
+        if $A[i].length==0 break
+      enddo
+      if i>=2 break
+      if Time()-t>5000 err=2           // Timeout
+      wait
+    enddo
+    // If preliminary movement, delay and skip the rest.
+    if n<0 && err==0 then
+      while Time()-t<75 do
+        Drawdata(-1,0,0,0)
+        wait
+      enddo
+      continue
+    endif
+    if ndat[needleindex][19]=='P' then
+      while Time()-t<50 do
+        wait
+      enddo
+    endif
+    // Make nzstat pressure, capacity and coordinate tests.
+    for i=0,i<2,i++ do
+      pmean[i]=0.0
+      cmean[i]=0.0
+      kmean[i]=0.0
+      zmean[i]=0.0
+    enddo
+    for j=0,j<nzstat && err==0,j++ do
+      for i=0,i<2 && err==0,i++ do
+        if present[i]==0 || limit[i]!=0 continue
+        sprintf(s,"INPORT32 HEAD(%i),0x10000107",i)
+        SERV.Cmdimm(i+0,s)
+        if iskelvin && j<nzstat/2 then
+          sprintf(s,"M %i(%g,%gV20P5A5) CONTKELV(%i)",i,x[i],y[i],i)
+        else
+          sprintf(s,"M %i(%g,%gV20P5A5) CONTCAP(%i,32)",i,x[i],y[i],i)
+        endif
+        SERV.Cmdimm(i+2,s)
+        sprintf(s,"INPORT32 HEAD(%i),0x10000018",i)
+        SERV.Cmdimm(i+4,s)
+      enddo
+      t=Time()
+      while err==0 do
+        if Pressed(hexit) return -1    // Interrupt
+        if Pressed(hcancel) err=1      // Cancel
+        Drawdata(-1,0,0,0)
+        for i=0,i<2,i++ do
+          if present[i]==0 || limit[i]!=0 continue
+          if $A[i+0].length==0 || $A[i+2].length==0 || $A[i+4].length==0 break
+        enddo
+        if i>=2 break
+        if Time()-t>5000 err=2         // Timeout
+        wait
+      enddo
+      for i=0,i<2 && err==0,i++ do
+        if present[i]==0 || limit[i]!=0 continue
+        pmean[i]=pmean[i]+$A[i+0].inport
+        if iskelvin && j<nzstat/2 then
+          if ($A[i+2].status & 0x0200)==0 then
+            kmean[i]=kmean[i]+5000.0
+          endif
+        else
+          if $A[i+2].status & 0x1000 then
+            cmean[i]=cmean[i]+5000.0
+          else
+            cmean[i]=cmean[i]+$int4($A[i+2]+8)
+          endif
+        endif
+        zmean[i]=zmean[i]+$A[i+4].inport
+      enddo
+    enddo
+    for i=0,i<2 && err==0,i++ do
+      if present[i]==0 || limit[i]!=0 continue
+      pmean[i]=pmean[i]/nzstat
+      if iskelvin then
+        cmean[i]=cmean[i]/nzstat*2.0
+        kmean[i]=kmean[i]/nzstat*2.0
+      else
+        cmean[i]=cmean[i]/nzstat
+        kmean[i]=0.0
+      endif
+      zmean[i]=zmean[i]/nzstat
+      if contc[i]==0.0 && cmean[i]>2500.0 contc[i]=zmean[i]
+      if contk[i]==0.0 && kmean[i]>2500.0 contk[i]=zmean[i]
+      if zmean[i]!=0 && n>NZPOINT/10 then
+        if Abs(zmean[i]-z[i])>150.0 then
+          limit[i]=1                   // Coordinate differs from expected
+        else if n>4 then
+          zpmean=(zp[i][0]+zp[i][1]+zp[i][2]+zp[i][3])/4.0
+          if zpmean-pmean[i]>12000 then
+            limit[i]=1                 // Pressure limit reached
+          endif
+        endif
+      endif
+      zz[i][n]=z[i]
+      zp[i][n]=pmean[i]
+      zc[i][n]=cmean[i]
+      zk[i][n]=kmean[i]
+      zn[i]=n                          // Last point is discarded!
+    enddo
+  enddo
+  // Calculate distance between the pins and approximate pressure curves
+  // with splines.
+  for i=0,i<2 && err==0,i++ do
+    if present[i]==0 continue
+    if contc[i]!=0.0 && contk[i]!=0.0 then
+      zdist[i]=(contk[i]-contc[i])/zfactor[i]
+    endif
+    zpmean=(zp[i][0]+zp[i][1]+zp[i][2]+zp[i][3])/4.0
+    for imin=4,imin<zn[i],imin++ do
+      if zpmean-zp[i][imin]>=250 break
+    enddo
+    for imax=zn[i]-1,imax>=0,imax-- do
+      if zpmean-zp[i][imax]>=2500 break
+    enddo
+    imax=imax-1
+    if imax-imin>10 then
+      for j=0,j<imax-imin+1,j++ do
+        zm[j]=j
+        pm[j]=zp[i][j+imin]
+        zi[j]=j
+      enddo
+      dyin=50.0
+      SYS.Splinefit(imax-imin+1,zm,pm,&dyin,imax-imin+1,zi,pi);
+      zfactlo[i]=Abs(pi[3]-pi[0])/3.0/zstep*zfactor[i]
+      zfacthi[i]=Abs(pi[imax-imin]-pi[imax-imin-3])/3.0/zstep*zfactor[i]
+    endif
+  enddo
+  Drawdata(zselected,zdatatype,zdatastroke,0)
+  // Measure maximal pressure that sensor can deliver. I set Z coordinate 1500
+  // micrometers under the measured contact. Attention, careless use of this
+  // overpressure may destroy the needle! (On the other way, human hands may
+  // be much worser!)
+  for i=0,i<2,i++ do
+    limit[i]=0
+  enddo
+  for j=0,j<=30 && err==0,j++ do
+    change hinfo limits=NZPOINT+50+j*4,NZPOINT+170
+    // Set Z coordinate.
+    for i=0,i<2 && err==0,i++ do
+      if present[i]==0 || limit[i]!=0 continue
+      z[i]=Max(zref[i]+j*50.0,zmax[i])
+      sprintf(s,"OUTPORT32 HEAD(%i),0x10010018,%i",i,z[i])
+      SERV.Cmdimm(i,s)
+    enddo
+    // Wait for answer.
+    t=Time()
+    while err==0 do
+      if Pressed(hexit) return -1      // Interrupt
+      if Pressed(hcancel) err=1        // Cancel
+      Drawdata(-1,0,0,0)
+      for i=0,i<2,i++ do
+        if present[i]==0 || limit[i]!=0 continue
+        if $A[i].length==0 break
+      enddo
+      if i>=2 break
+      if Time()-t>5000 err=2           // Timeout
+      wait
+    enddo
+    // Move down slowly!
+    while Time()-t<100 do
+      Drawdata(-1,0,0,0)
+      wait
+    enddo
+    // Check pressure. Single measurement is sufficient.
+    for i=0,i<2,i++ do
+      if present[i]==0 || limit[i]!=0 continue
+      sprintf(s,"INPORT32 HEAD(%i),0x10000107",i)
+      SERV.Cmdimm(i,s)
+    enddo
+    t=Time()
+    while err==0 do
+      if Pressed(hexit) return -1      // Interrupt
+      if Pressed(hcancel) err=1        // Cancel
+      Drawdata(-1,0,0,0)
+      for i=0,i<2,i++ do
+        if present[i]==0 || limit[i]!=0 continue
+        if $A[i].length==0 break
+      enddo
+      if i>=2 break
+      if Time()-t>5000 err=2           // Timeout
+      wait
+    enddo
+    for i=0,i<2 && err==0,i++ do
+      if present[i]==0 || limit[i]!=0 continue
+      if $A[i].inport<3000 limit[i]=1
+      if ndat[needleindex,19]=='P' && zp[i,0]-$A[i].inport>=30000 limit[i]=1
+    enddo
+  enddo
+  if err==0 delay 500
+  for i=0,i<2,i++ do
+    pmean[i]=0.0
+  enddo
+  for j=0,j<nzstat && err==0,j++ do
+    for i=0,i<2 && err==0,i++ do
+      if present[i]==0 continue
+      sprintf(s,"INPORT32 HEAD(%i),0x10000107",i)
+      SERV.Cmdimm(i,s)
+    enddo
+    t=Time()
+    while err==0 do
+      if Pressed(hexit) return -1      // Interrupt
+      if Pressed(hcancel) err=1        // Cancel
+      Drawdata(-1,0,0,0)
+      for i=0,i<2,i++ do
+        if present[i]==0 continue
+        if $A[i].length==0 break
+      enddo
+      if i>=2 break
+      if Time()-t>5000 err=2           // Timeout
+      wait
+    enddo
+    for i=0,i<2 && err==0,i++ do
+      if present[i]==0 continue
+      pmean[i]=pmean[i]+$A[i].inport
+    enddo
+  enddo
+  for i=0,i<2 && err==0,i++ do
+    if present[i]==0 continue
+    zpmax[i]=pmean[i]/nzstat
+  enddo
+  Drawdata(zselected,zdatatype,zdatastroke,0)
+  if err==0 return 0
+  // Report error.
+  clear hright
+  change hinfo limits=0,0
+  change hinfo text="Error in Z pressure test"
+  draw window=hright font=TIMESFONT
+  draw at 6,30 wrap=RIGHTX-5 color=LIGHTRED
+  if err==1 then
+    draw text="Test cancelled."
+  else
+    draw text="Timeout while executing command."
+  endif
+  draw at 6,60 color=BLACK
+  draw text="Press " font=MAINFONT text="OK " font=TIMESFONT text="to return "
+  draw text="back to the main screen."
+  draw show
+  hok=control BUTTON
+    window=hright
+    position=RIGHTX/2-60,USERY,120,24
+    name="确定"
+    help="按下返回针头选择窗口"
+  endc
+  while 1 do
+    Drawdata(-1,0,0,0)
+    if Pressed(hok) return 1
+    if Pressed(hexit) return -1
+    wait
+  enddo
+end
+
+// Estimates needle quality in percent (0 - definitely bad, 100 - definitely
+// good) according to the results of measurements. Here p is the pressure in
+// internal units (1/10 gramm), noctcu is the number of no contacts on the
+// copper, contfr is the number of shorts between the pins on bare FR4, opens
+// is the number of resistances above 100 Ohm, bad is the cumulative number
+// of bad measurements, stat is the statistics of exact R measurements and hist
+// is the histogramm.
+function int Needlequality(int head,int p,int noctcu,int contfr,int opens,     \
+  int bad,float *stat,int *hist)
+  int i,j,nbad,nover
+  float q,n,expcu,expfr
+  n=Getcount(stat)
+  if n<3.0 return 0                     // No statistics as yet?
+  q=100.0
+  if (p<30) p=30
+  // Opens and bad measurements. Every percent of bad measurements reduces
+  // quality by 2.5%.
+  q=q-(bad+opens)/n*250.0
+  // No contacts on FR4. Every percent of no contacts reduces quality only by
+  // 0.5%, because such bad contacts are fully detectable.
+  q=q-noctcu/n*50.0
+  // Pin shorts on bare FR4. Number of allowed shorts depends on pressure.
+  expfr=Max(0.05,(p-15)/75.0)
+  q=q-1.0/expfr*(contfr/n*100.0)
+  // Histogramm. Every percent of measurements outside the 3 sigma range
+  // reduces quality by 10%, obvious high deviations that will be retested
+  // later - by 2%.
+  j=(Getmean(stat)-roffset[head])/HISTSTEP+NHIST/2
+  nbad=0; nover=0
+  for i=0,i<NHIST,i++ do
+    if i==0 || i==NHIST-1 then
+      nbad=nbad+hist[i]
+    else if Abs(i-j)>=(3.0*RSIGMA)/HISTSTEP then
+      nover=nover+hist[i]              // Everything over 3 sigma
+    endif
+  enddo
+  q=q-((2.0*nbad+10.0*nover)/n)*100
+  return Max(1,q)
+end
+
+// Verifies the quality of the Kelvin contacting. Returns 0 on success, 1 on
+// error that prevents continuation and -1 if operator decided to interrupt
+// test.
+function int Checkcontacting()
+  int i,j,n,t,stroke,ntest,err
+  float r,xc[2],yc[2],xn[2],yn[2],x[2],y[2]
+  char s[256]
+  handle hok,hcancel
+  change hinfo limits=0,0
+  change hinfo text="Quality of contacting"
+  Showstrokebuttons(0)
+  clear hleft
+  draw window=hleft show
+  clear hright
+  draw window=hright font=TIMESFONT wrap=RIGHTX-5 color=BLACK at 6,30
+  draw text="Script now verifies the quality of the electric contacting. "
+  draw show
+  hcancel=control BUTTON
+    window=hright
+    position=(RIGHTX-120)/2,USERY,120,24
+    name="取消"
+    help="按下可取消测试并返回主屏幕"
+  endc
+  // Create data selection buttons.
+  Createselectionbuttons()
+  Drawdata(zselected,1,0,0)
+  // Select ideal test positions.
+  for i=0,i<2,i++ do
+    // Contact coordinates.
+    xc[i]=$LAY.xoffset/1000.0
+    if i==0 then
+      xc[i]=xc[i]-distx                // Left head
+    else
+      xc[i]=xc[i]+distx                // Right head
+    endif
+    yc[i]=$LAY.yoffset[0]/1000.0+disty
+    // No contact coordinates.
+    xn[i]=$LAY.xoffset/1000.0
+    if i==0 then
+      xn[i]=xn[i]-distx                // Left head
+    else
+      xn[i]=xn[i]+distx                // Right head
+    endif
+    yn[i]=$LAY.yoffset[0]/1000.0-disty
+  enddo
+  err=0
+  ntest=200
+  // Main test.
+  for stroke=0,stroke<NSTROKE && err==0,stroke++ do
+    if zdatatype==1 Drawdata(zselected,zdatatype,stroke,0)
+    // Make resistance measurements on the copper.
+    for n=0,n<ntest && err==0,n++ do
+      if iskelvin then
+        change hinfo limits=stroke*ntest*2+n+1,NSTROKE*ntest*2
+      else
+        change hinfo limits=stroke*ntest+n+1,NSTROKE*ntest
+      endif
+      // Send measurements.
+      for i=0,i<2 && err==0,i++ do
+        if present[i]==0 continue
+        x[i]=xc[i]+Random(DELTA)+Random(DELTA)-DELTA
+        y[i]=yc[i]+Random(DELTA)+Random(DELTA)-DELTA
+        sprintf(s,"M %i(%f,%fA5V%iP%iH%f) E(%i,32)",                           \
+          i,x[i],y[i],vlist[stroke],plist[stroke],strokez,i)
+        SERV.Cmdimm(i,s)
+      enddo
+      // Wait for answers.
+      t=Time()
+      while err==0 do
+        if Pressed(hexit) return -1    // Interrupt
+        if Pressed(hcancel) err=1      // Cancel
+        Drawdata(-1,0,0,0)
+        for i=0,i<2,i++ do
+          if present[i]==0 continue
+          if $A[i].length==0 break
+        enddo
+        if i>=2 break
+        if Time()-t>5000 err=2         // Timeout
+        wait
+      enddo
+      // Process answers.
+      for i=0,i<2 && err==0,i++ do
+        if present[i]==0 continue
+        if $A[i].answer!=S_MOVE then
+          err=3                        // Invalid answer
+        else if $A[i].status & 0x0200 then
+          fnoctcu[stroke][i]++         // For EXACTR, no contact means also bad
+        else if $A[i].status & 0x8800 then
+          fbadcu[stroke][i]++
+        else
+          r=$A[i].r
+          if ($A[i].status & 0x0100) r=r*1.0e-6
+          if r>100.0 then
+            fopencu[stroke][i]++
+          else
+            Addsigma(fstat[stroke][i],r)
+            j=(r-roffset[i])/HISTSTEP+NHIST/2
+            j=Max(0,Min(j,NHIST-1))
+            fhist[stroke][i][j]++
+          endif
+        endif
+      enddo
+      Drawdata(zselected,zdatatype,zdatastroke,0)
+    enddo
+    // Measurements on the copper finished. Make tests on bare FR4.
+    if iskelvin then
+      for n=0,n<ntest && err==0,n++ do
+        change hinfo limits=stroke*ntest*2+ntest+n+1,NSTROKE*ntest*2
+        // Send measurements. If contact checks in layout are not turned off,
+        // we can use standard resistance measurements, which are much faster
+        // here.
+        for i=0,i<2 && err==0,i++ do
+          if present[i]==0 continue
+          x[i]=xn[i]+Random(DELTA)+Random(DELTA)-DELTA
+          y[i]=yn[i]+Random(DELTA)+Random(DELTA)-DELTA
+          sprintf(s,"M %i(%f,%fA5V%iP%iH%f) %s(%i,32)",                        \
+            i,x[i],y[i],vlist[stroke],plist[stroke],strokez,                   \
+            ($EXTLAY.measopt & HCM_NOCTCHK?"E":"R"),i)
+          SERV.Cmdimm(i,s)
+        enddo
+        // Wait for answers.
+        t=Time()
+        while err==0 do
+          if Pressed(hexit) return -1  // Interrupt
+          if Pressed(hcancel) err=1    // Cancel
+          Drawdata(-1,0,0,0)
+          for i=0,i<2,i++ do
+            if present[i]==0 continue
+            if $A[i].length==0 break
+          enddo
+          if i>=2 break
+          if Time()-t>5000 err=2       // Timeout
+          wait
+        enddo
+        // Process answers.
+        for i=0,i<2 && err==0,i++ do
+          if present[i]==0 continue
+          if $A[i].answer!=S_MOVE then
+            err=3                      // Invalid answer
+          else if ($A[i].status & 0x0200)==0 then
+            fcontfr[stroke][i]++
+          else if $A[i].status & 0x8000 then
+            fbadfr[stroke][i]++
+          else if ($A[i].status & 0x0A00)==0x0800 then
+            fbadfr[stroke][i]++        // No contact meand bad for Exact R
+          else
+            r=$A[i].r
+            if ($A[i].status & 0x0100) r=r*1.0e-6
+            if r<1.99e8 then
+              fshortfr[stroke][i]++
+            endif
+          endif
+        enddo
+        Drawdata(zselected,zdatatype,zdatastroke,0)
+      enddo
+    endif
+    // Calculate quality of contacting.
+    for i=0,i<2 && err==0,i++ do
+      fquality[stroke][i]=Needlequality(i,plist[stroke],fnoctcu[stroke][i],    \
+      fcontfr[stroke][i],fopencu[stroke][i],                                   \
+      fbadcu[stroke][i]+fbadfr[stroke][i],                                     \
+      fstat[stroke][i],fhist[stroke][i])
+    enddo
+  enddo
+  if err==0 return 0
+  // Report error.
+  clear hright
+  change hinfo limits=0,0
+  change hinfo text="Error in contacting test"
+  draw window=hright font=TIMESFONT
+  draw at 6,30 wrap=RIGHTX-5 color=LIGHTRED
+  if err==1 then
+    draw text="Test cancelled."
+  else if err==2 then
+    draw text="Timeout while executing command."
+  else
+    draw text="Invalid answer."
+  endif
+  draw at 6,60 color=BLACK
+  draw text="Press " font=MAINFONT text="OK " font=TIMESFONT text="to return "
+  draw text="back to the main screen."
+  draw show
+  hok=control BUTTON
+    window=hright
+    position=RIGHTX/2-60,USERY,120,24
+    name="确定"
+    help="按下返回针头选择窗口"
+  endc
+  while 1 do
+    Drawdata(-1,0,0,0)
+    if Pressed(hok) return 1
+    if Pressed(hexit) return -1
+    wait
+  enddo
+end
+
+// Service function, used by Saveprotocol().
+function int Stat(float width,int good,format s)
+  RCell(RTF_LEFT|RTF_THINBRD,width)
+  if good>=0 then
+    RFmt(RTF_TIMES,(good?RTF_NORMAL:RTF_BOLD),12)
+    RAddtext(s)
+  endif
+end
+
+// Writes protocol to RTF file.
+function int Saveprotocol(int head,int addpictures)
+  int i,stroke,good
+  float r
+  char drv[260],dir[260],nam[260],ext[260]
+  char timestring[256]
+  if head<0 || head>=2 return -1       // Error in input parameters
+  if present[head]==0 return -1        // No data
+  // Browse for file name.
+  Fnsplit(protpath,drv,dir,nam,ext)
+  if serial[head][0]=='\0' then
+    Strcpy(nam,"protocol")
+  else
+    Strcpy(nam,serial[head])
+  endif
+  if ext[0]=='\0' Strcpy(ext,".rtf")
+  Fnmerge(protpath,drv,dir,nam,ext)
+  if SYS.Browse(hmain,protpath,"Save protocol",0)==0 return -1
+  i=ROpen(protpath)
+  if i!=0 return -1                    // Unable to create .rtf file
+  // Create hidden report window.
+  hreport=control GRAPH
+    window=hmain
+    position=-1000,-1000,LEFTX,LEFTY
+    help=" "
+    color=DARKGRAY
+    bkcolor=WHITE
+  endc
+  // Create page header.
+  Strtime(timestring,"%a %d-%b-%Y %H:%M",0,0)
+  RParagraph(RTF_CENTERED|RTF_HEADER|RTF_FIRST)
+  RFmt(RTF_TIMES,RTF_ITALIC,12)
+  RAddtext(" ")
+  RParagraph(RTF_CENTERED|RTF_HEADER)
+  RFmt(RTF_TIMES,RTF_ITALIC,9)
+  if iskelvin then
+    RAddfmt("Kelvin probe test report %s - page ",timestring)
+  else
+    RAddfmt("Single pin probe test report %s - page ",timestring)
+  endif
+  RAddpagenumber()
+  // Create title.
+  RParagraph(RTF_CENTERED|RTF_SPACE)
+  RFmt(RTF_ARIAL,RTF_BOLD|RTF_UL,18)
+  if iskelvin then
+    RAddtext("Kelvin Probe Test Report")
+  else
+    RAddtext("Single Pin Probe Test Report")
+  endif
+  RFmt(RTF_ARIAL,RTF_BOLD,12)
+  RAddfmt("\nVersion %s, %s",VERSION,timestring)
+  // Add type, serial number and mechanical parameters.
+  RParagraph(RTF_LEFT)
+  RFmt(RTF_ARIAL,RTF_BOLD,14)
+  RTable(RTF_CENTERED|RTF_SPACE|RTF_KEEPNEXT,0.0,7.0)
+  RCell(RTF_LEFT|RTF_SPACE,40.0); RAddtext("Type:")
+  RCell(RTF_LEFT|RTF_SPACE,110.0); RAddtext(needletype[needleindex])
+  RTable(RTF_CENTERED|RTF_SPACE|RTF_KEEPNEXT,0.0,7.0)
+  RCell(RTF_LEFT|RTF_SPACE,40.0); RAddtext("Serial no.:")
+  RCell(RTF_LEFT|RTF_SPACE,110.0); RAddtext(serial[head])
+  RTable(RTF_CENTERED|RTF_SPACE|RTF_KEEPNEXT,0.0,7.0)
+  if iskelvin then
+    RCell(RTF_LEFT|RTF_SPACE,40.0); RAddtext("Offset:")
+    RCell(RTF_LEFT|RTF_SPACE,110.0); RAddtext(offset[head])
+    RTable(RTF_CENTERED|RTF_SPACE|RTF_KEEPNEXT,0.0,7.0)
+    RCell(RTF_LEFT|RTF_SPACE,40.0); RAddtext("Gap:")
+    RCell(RTF_LEFT|RTF_SPACE,110.0); RAddtext(gap[head])
+  endif
+  REndtable()
+  // Add statistics.
+  RParagraph(RTF_LEFT)
+  RFmt(RTF_TIMES,RTF_BOLD,12)
+  RTable(RTF_CENTERED|RTF_SPACE|RTF_KEEPNEXT,0.0,4.5)
+  RCell(RTF_LEFT|RTF_THINBRD|RTF_SPACE,55.0); RAddtext("Parameter")
+  RCell(RTF_LEFT|RTF_THINBRD|RTF_SPACE,29.0); RAddtext("Value")
+  RCell(RTF_LEFT|RTF_THINBRD|RTF_SPACE,18.0); RAddtext("Units")
+  RCell(RTF_LEFT|RTF_THINBRD|RTF_SPACE,30.0); RAddtext("Allowed limits")
+  RCell(RTF_LEFT|RTF_THINBRD|RTF_SPACE,18.0); RAddtext("Passed")
+  if iskelvin then
+    // Resistance of pin 1.
+    RTable(RTF_CENTERED|RTF_SPACE|RTF_KEEPNEXT,0.0,3.5)
+    Stat(55,1,"Resistance of pin 1")
+    if pinr[head][0]<(-1000.0) then
+      good=-1
+    else if pinr[head][0]<pinrmin || pinr[head][0]>pinrmax then
+      good=0
+    else
+      good=1
+    endif
+    Stat(29,good,"%.2f",pinr[head][0])
+    Stat(18,1,"Ohm")
+    Stat(30,1,"%.1f .. %.1f",pinrmin,pinrmax)
+    Stat(18,good,"%s",good==1?"YES":"NO")
+    RTable(RTF_CENTERED|RTF_SPACE|RTF_KEEPNEXT,0.0,3.5)
+    RColour(DARKGRAY)
+    Stat(55,1,"  Wire resistance 1")
+    Stat(29,1,"%.2f",rwire[head][0])
+    Stat(18,1,"Ohm")
+    Stat(30,1,"")
+    Stat(18,1,"")
+    RColour(BLACK)
+    // Resistance of pin 2.
+    RTable(RTF_CENTERED|RTF_SPACE|RTF_KEEPNEXT,0.0,3.5)
+    Stat(55,1,"Resistance of pin 2")
+    if pinr[head][1]<(-1000.0) then
+      good=-1
+    else if pinr[head][1]<pinrmin || pinr[head][1]>pinrmax then
+      good=0
+    else
+      good=1
+    endif
+    Stat(29,good,"%.2f",pinr[head][1])
+    Stat(18,1,"Ohm")
+    Stat(30,1,"%.1f .. %.1f",pinrmin,pinrmax)
+    Stat(18,good,"%s",good==1?"YES":"NO")
+    RTable(RTF_CENTERED|RTF_SPACE|RTF_KEEPNEXT,0.0,3.5)
+    RColour(DARKGRAY)
+    Stat(55,1,"  Wire resistance 2")
+    Stat(29,1,"%.2f",rwire[head][1])
+    Stat(18,1,"Ohm")
+    Stat(30,1,"")
+    Stat(18,1,"")
+    RColour(BLACK)
+  else
+    // Resistance of pin.
+    RTable(RTF_CENTERED|RTF_SPACE|RTF_KEEPNEXT,0.0,3.5)
+    Stat(55,1,"Resistance of pin")
+    r=(pinr[head][0]+pinr[head][1])/2
+    if r<(-1000.0) then
+      good=-1
+    else if r<pinrmin || r>pinrmax then
+      good=0
+    else
+      good=1
+    endif
+    Stat(29,good,"%.2f",r)
+    Stat(18,1,"Ohm")
+    Stat(30,1,"%.1f .. %.1f",pinrmin,pinrmax)
+    Stat(18,good,"%s",good==1?"YES":"NO")
+    RTable(RTF_CENTERED|RTF_SPACE|RTF_KEEPNEXT,0.0,3.5)
+    RColour(DARKGRAY)
+    Stat(55,1,"  Wire resistance")
+    Stat(29,1,"%.2f",(rwire[head][0]+rwire[head][0])/2.0)
+    Stat(18,1,"Ohm")
+    Stat(30,1,"")
+    Stat(18,1,"")
+    RColour(BLACK)
+  endif
+  // Pin distance.
+  if iskelvin then
+    RTable(RTF_CENTERED|RTF_SPACE|RTF_KEEPNEXT,0.0,3.5)
+    Stat(55,1,"Measured offset")
+    if zdist[head]==0.0 then
+      good=-1
+    else if zdist[head]<pindistmin || zdist[head]>pindistmax then
+      good=0
+    else
+      good=1
+    endif
+    Stat(29,good,"%.0f",zdist[head])
+    Stat(18,1,"um")
+    Stat(30,1,"%g .. %g",pindistmin,pindistmax)
+    Stat(18,good==1,"%s",good==1?"YES":"NO")
+  endif
+  // Sensitivity at contact.
+  RTable(RTF_CENTERED|RTF_SPACE|RTF_KEEPNEXT,0.0,3.5)
+  Stat(55,1,"Sensitivity at contact")
+  if zfactlo[head]==0.0 then
+    good=-1
+  else if zfactlo[head]<senslomin || zfactlo[head]>senslomax then
+    good=0
+  else
+    good=1
+  endif
+  Stat(29,good,"%.1f",zfactlo[head])
+  Stat(18,1,"Bits/um")
+  Stat(30,1,"%g .. %g",senslomin,senslomax)
+  Stat(18,good==1,"%s",good==1?"YES":"NO")
+  // Sensitivity at high pressure.
+  RTable(RTF_CENTERED|RTF_SPACE|RTF_KEEPNEXT,0.0,3.5)
+  Stat(55,1,"Sensitivity at high P")
+  if zfacthi[head]==0.0 then
+    good=-1
+  else if zfacthi[head]<senshimin || zfacthi[head]>senshimax then
+    good=0
+  else
+    good=1
+  endif
+  Stat(29,good,"%.1f",zfacthi[head])
+  Stat(18,1,"Bits/um")
+  Stat(30,1,"%g .. %g",senshimin,senshimax)
+  Stat(18,good==1,"%s",good==1?"YES":"NO")
+  RTable(RTF_CENTERED|RTF_SPACE|RTF_KEEPNEXT,0.0,3.5)
+  RColour(DARKGRAY)
+  Stat(55,1,"  Z correction factor")
+  Stat(29,1,"%.2f",zfactor[head])
+  Stat(18,1,"")
+  Stat(30,1,"")
+  Stat(18,1,"")
+  RColour(BLACK)
+  // Pressure without contact.
+  RTable(RTF_CENTERED|RTF_SPACE|RTF_KEEPNEXT,0.0,3.5)
+  Stat(55,1,"Pressure without contact")
+  if zp[head][0]==0.0 then
+    good=-1
+  else if zp[head][0]<pressmin then
+    good=0
+  else
+    good=1
+  endif
+  Stat(29,good,"%.0f",zp[head][0])
+  Stat(18,1,"Bits")
+  Stat(30,1,"> %g",pressmin)
+  Stat(18,good==1,"%s",good==1?"YES":"NO")
+  // Pressure range.
+  RTable(RTF_CENTERED|RTF_SPACE|RTF_KEEPNEXT,0.0,3.5)
+  Stat(55,1,"Pressure range")
+  if zpmax[head]==0.0 then
+    good=-1
+  else if zp[head][0]-zpmax[head]<rangemin then
+    good=0
+  else
+    good=1
+  endif
+  Stat(29,good,"%.0f",zp[head][0]-zpmax[head])
+  Stat(18,1,"Bits")
+  Stat(30,1,"> %g",rangemin)
+  Stat(18,good==1,"%s",good==1?"YES":"NO")
+  REndtable()
+  // Quality of measurements, depending on stroke.
+  for stroke=0,stroke<NSTROKE,stroke++ do
+    RParagraph(RTF_CENTERED)
+    RFmt(RTF_ARIAL,RTF_BOLD,10)
+    RAddfmt("\nQuality of measurements at V=%i mm/s, P=%g g",                  \
+      vlist[stroke],plist[stroke]/10.)
+    // Resistance dispersion on Cu.
+    RTable(RTF_CENTERED|RTF_SPACE|RTF_KEEPNEXT,0.0,3.5)
+    Stat(55,1,"R dispersion")
+    if Getcount(fstat[stroke][head])==0 then
+      good=-1
+    else if Getsigma(fstat[stroke][head])>RSIGMA then
+      good=0
+    else
+      good=1
+    endif
+    Stat(29,good,"%.5f",Getsigma(fstat[stroke][head]))
+    Stat(18,1,"Ohm")
+    Stat(30,1,"< %.5f",RSIGMA)
+    Stat(18,good==1,"%s",good==1?"YES":"NO")
+    // Bad measurements on Cu.
+    RTable(RTF_CENTERED|RTF_SPACE|RTF_KEEPNEXT,0.0,3.5)
+    if iskelvin then
+      Stat(55,1,"Bad measurements (Cu+FR4)")
+    else
+      Stat(55,1,"Bad measurements")
+    endif
+    if Getcount(fstat[stroke][head])==0 then
+      good=-1
+    else if fbadcu[stroke][head]+fbadfr[stroke][head]>0 then
+      good=0
+    else
+      good=1
+    endif
+    Stat(29,good,"%i",fbadcu[stroke][head]+fbadfr[stroke][head])
+    Stat(18,1,"")
+    Stat(30,1,"")
+    Stat(18,1,"")
+    // No contacts on Cu.
+    RTable(RTF_CENTERED|RTF_SPACE|RTF_KEEPNEXT,0.0,3.5)
+    Stat(55,1,"No contacts on Cu")
+    if Getcount(fstat[stroke][head])==0 then
+      good=-1
+    else if fnoctcu[stroke][head]>0 then
+      good=0
+    else
+      good=1
+    endif
+    Stat(29,good,"%i",fnoctcu[stroke][head])
+    Stat(18,1,"")
+    Stat(30,1,"")
+    Stat(18,1,"")
+    // Pin shorts on FR4.
+    if iskelvin then
+      RTable(RTF_CENTERED|RTF_SPACE|RTF_KEEPNEXT,0.0,3.5)
+      Stat(55,1,"Pin shorts on FR4")
+      if Getcount(fstat[stroke][head])==0 then
+        good=-1
+      else if fcontfr[stroke][head]>0 then
+        good=0
+      else
+        good=1
+      endif
+      Stat(29,good,"%i",fcontfr[stroke][head])
+      Stat(18,1,"")
+      Stat(30,1,"")
+      Stat(18,1,"")
+    endif
+    // Quality.
+    RTable(RTF_CENTERED|RTF_SPACE|RTF_KEEPNEXT,0.0,3.5)
+    Stat(55,1,"Quality")
+    if fquality[stroke][head]==0 then
+      good=-1
+    else if fquality[stroke][head]<GOODLIM then
+      good=0
+    else
+      good=1
+    endif
+    if fquality[stroke][head]>=BESTLIM then
+      Stat(29,good,"BEST (%i%%)",fquality[stroke][head])
+    else if fquality[stroke][head]>=GOODLIM then
+      Stat(29,good,"GOOD (%i%%)",fquality[stroke][head])
+    else if fquality[stroke][head]>=POORLIM then
+      Stat(29,good,"POOR (%i%%)",fquality[stroke][head])
+    else if fquality[stroke][head]>0 then
+      Stat(29,good,"BAD (%i%%)",fquality[stroke][head])
+    else
+      Stat(29,good,"%i%%",fquality[stroke][head])
+    endif
+    Stat(18,1,"")
+    Stat(30,1,">% i %%",GOODLIM)
+    Stat(18,good==1,"%s",good==1?"YES":"NO")
+    REndtable()
+  enddo
+  // Add contacting curve and Kelvin verification hystogramms (optional).
+  if addpictures then
+    RNewpage()
+    RParagraph(RTF_CENTERED)
+    Drawdata(head,0,0,1)
+    RAddpiczoom(hreport,0,0,LEFTX,LEFTY,1,0.9)
+    RAddtext(" ")
+    Drawdata(head,1,0,1)
+    RAddpiczoom(hreport,0,0,LEFTX,LEFTY,1,0.9)
+    RParagraph(RTF_CENTERED)
+    RAddtext("\n")
+    Drawdata(head,1,1,1)
+    RAddpiczoom(hreport,0,0,LEFTX,LEFTY,1,0.9)
+    RAddtext(" ")
+    Drawdata(head,1,2,1)
+    RAddpiczoom(hreport,0,0,LEFTX,LEFTY,1,0.9)
+  endif
+  // Clean up.
+  destroy hreport
+  RClose()
+  return 0
+end
+
+// Allows to browse data and write protocols.
+function int Browsedata()
+  int i,unsaved[2]
+  handle haddpic,hsave[2],hok
+  change hinfo limits=0,0
+  change hinfo text="Test finished"
+  Drawdata(zselected,2,zdatastroke,0)
+  clear hright
+  draw window=hright font=TIMESFONT wrap=RIGHTX-5 color=BLACK at 6,30
+  draw text="Test is finished. Please check the results. Out-of-range "
+  draw text="parameters are highlighted in red. Press " font=MAINFONT
+  draw text="Save " font=TIMESFONT text="to save protocols in Rich Text "
+  draw text="Format."
+  draw show
+  for i=0,i<2,i++ do
+    hsave[i]=control BUTTON
+      window=hright
+      position=RIGHTX/2+129*i-124,USERY-105,120,24
+      name=format("保存 %s",i==0?"左":"右")
+      help=format("按下保存%s手臂的协议",i==0?"左":"右")
+    endc
+    if present[i]==0 disable hsave[i]
+    unsaved[i]=present[i]
+  enddo
+  haddpic=control CHECKBOX
+    window=hright
+    position=RIGHTX/2-124,USERY-60,RIGHTX-10,22
+    text="Include graphics into the protocol"
+    help="检查可以在协议中添加压力图形和接触柱状图"
+    font=INFOFONT
+    mode=(addpictures?M_CHECKED:0)
+  endc
+  hok=control BUTTON
+    window=hright
+    position=(RIGHTX-120)/2,USERY,120,24
+    name="废除"
+    help="双击放弃未保存的数据并返回主屏幕"
+    bkcolor=PINK
+    mode=M_DBLCLICK
+  endc
+  while 1 do
+    if Pressed(hexit) return -1
+    if Pressed(hok) return 0
+    if Pressed(haddpic) addpictures=Status(haddpic)
+    for i=0,i<2,i++ do
+      if present[i]==0 continue
+      if Pressed(hsave[i]) then
+        if Saveprotocol(i,addpictures)==0 then
+          unsaved[i]=0
+          disable hsave[i]
+          if unsaved[0]==0 && unsaved[1]==0 then
+            change hok name="确定"
+            change hok mode=0
+            change hok help="按下可返回主屏幕"
+            change hok bkcolor=GRAY
+          endif
+        endif
+      endif
+    enddo
+    Drawdata(-1,0,0,0)
+    wait
+  enddo
+end
+
+// Main routine.
+function int main()
+  int i,j
+  hmain=control WINDOW
+    window=NULL
+    position=10,10,MAINX,MAINY
+    name=format("微针测试 v%s",VERSION)
+    help=" "
+    size=128
+  endc
+  hleft=control GRAPH
+    window=hmain
+    position=5,5,LEFTX,LEFTY
+    help=" "
+    color=DARKGRAY
+    bkcolor=WHITE
+  endc
+  hserv=control CHILD
+    window=hmain
+    position=SPLIT,5,RIGHTX,SERVY
+    help=" "
+    color=DARKGRAY
+  endc
+  hright=control CHILD
+    window=hmain
+    position=SPLIT,10+SERVY,RIGHTX,RIGHTY
+    help=" "
+    color=DARKGRAY
+    size=1024
+  endc
+  hinfo=control PROGRESS
+    window=hserv
+    position=-1,-1,RIGHTX+2,SERVY+2
+    text="欢迎使用!"
+    help="当前测试状态"
+    mode=M_PERCENT
+    font=MEDIUMFONT
+    limits=0,0
+  endc
+  hexit=control BUTTON
+    window=hmain
+    position=MAINX-84,MAINY-SERVY,80,SERVY-3
+    name="关闭"
+    help="双击终止测试并关闭此窗口"
+    mode=M_DBLCLICK
+  endc
+  draw window=hmain bitmap=0,0,1,"bkground" show
+  layoutchanged=0
+  loadchanged=0
+  globalerr=0
+  // If this script is called directly from the Test Player (not that I
+  // seriously expect that this will ever happen!), default parameters may be
+  // yet uninitialized.
+  if $GLOBAL.defstroke==0 then
+    $GLOBAL.defstroke=40
+    $GLOBAL.defpressure=30
+    $GLOBAL.defheight=5000
+    $GLOBAL.defaccuracy=250
+  endif
+  // Extract needle types.
+  for i=0,i<NNEEDLE,i++ do
+    j=0
+    while ndat[i][j+25]!=' ' do
+      needletype[i][j]=ndat[i][j+25]
+      j++
+    enddo
+    needletype[i][j]='\0'
+  enddo
+  // Get initializations.
+  rwire[0][0]=2.5; rwire[0][1]=2.5; zfactor[0]=1.0
+  rwire[1][0]=2.5; rwire[1][1]=2.5; zfactor[1]=1.0
+  spacer=10.0
+  getini("Kptest","Wire resistance","%f,%f,%f,%f",                             \
+    rwire[0]+0,rwire[0]+1,rwire[1]+0,rwire[1]+1)
+  getini("Kptest","Z factor","%f,%f,%f",                                       \
+    zfactor+0,zfactor+1,&spacer)
+  for i=0,i<2,i++ do
+    for j=0,j<2,j++ do
+      if rwire[i][j]<0.0 || rwire[i][j]>10.0 rwire[i][j]=2.5
+    enddo
+    if zfactor[i]<0.5 || zfactor[i]>2.0 zfactor[i]=1.0
+  enddo
+  needleindex=6
+  getini("Kptest","Needle type index","%i",&needleindex)
+  distx=50.0; disty=30.0
+  getini("Kptest","Contact distances","%f,%f",&distx,&disty)
+  Strcpy(protpath,"protocol.rtf")
+  getini("Kptest","Protocol","%s",protpath)
+  Strcpy(confpath,"kptsetup.txt")
+  present[0]=1; present[1]=0
+  getini("Kptest","Parameters","%i,%i,%i",present+0,present+1,&addpictures)
+  delay 5                              // Time to redraw window
+reinstall:
+  Cleartestdata()                      // Clear test data
+  SYS.Softreset(0)
+  i=Replaceneedles()                   // Allow user to replace the needles
+  if i<0 goto quit                     // Operator interrupted the test
+  i=Getlayout()                        // Get layout and set limits
+  if i<0 goto quit                     // Operator interrupted the test
+  if i>0 goto reinstall                // Try to reload tester
+  Clearoversurface()                   // Clear contact-over-surface counters
+  i=Checkneedles()                     // Verify needles
+  if i<0 goto quit                     // Operator interrupted the test
+  if i>0 goto reinstall                // Try to reinstall the needles
+  i=Checkpins()                        // Measure resistance of Kelvin pins
+  if i<0 goto quit                     // Operator interrupted the test
+  if i>0 goto reinstall                // Try to reinstall the needles
+  i=Checkzpressure()                   // Verify Z pressure
+  if i<0 goto quit                     // Operator interrupted the test
+  if i>0 goto reinstall                // Try to reinstall the needles
+  i=Checkcontacting()                  // Verify contacting
+  if i<0 goto quit                     // Operator interrupted the test
+  if i>0 goto reinstall                // Try to reinstall the needles
+  i=Browsedata()                       // Browse data and write protocols
+  if i<0 goto quit                     // Operator interrupted the test
+  goto reinstall
+quit:
+  // Save initializations.
+  setini("Kptest","Needle type index","%i",needleindex)
+  setini("Kptest","Contact distances","%f,%f",distx,disty)
+  setini("Kptest","Protocol","%s",protpath)
+  setini("Kptest","Parameters","%i,%i,%i",present[0],present[1],addpictures)
+  SYS.Softreset(0)
+end
+

@@ -1,0 +1,305 @@
+#include "ls.icl"                  // Standard functions
+#include "or.icl"                // A2 command names
+#include "pa.icl"                  // Support for files in rich text format
+#zeroid                                // Answerproc receives answers with id=0
+
+handle hplot                           // Shows protocol data
+handle hofs2                           // Offset for second (red) curve
+handle hfreeze                         // Don't display if checked
+int    head                            // Protocolled head
+int    clearmode                       // 0:clear, 1:prepare, 2:don't clear
+int    loadchanged                     // 1: load status changed
+int    layoutchanged                   // 1: layout changed
+int    rtfon                           // 1: protocol on
+
+function int Answerproc(char *answer,int info)
+  int i,n,offset
+  if answer[4]==0xF0 then              // Internal OLLYTEST message
+    if Stricmp(answer+5,"CHG LOAD")==0 loadchanged=1
+    if Stricmp(answer+5,"CHG LAY")==0 layoutchanged=1
+  else if (answer[4]==S_TEST && answer[5]==0x01 &&                             \
+    hplot!=NULL && Status(hfreeze)==0) then
+    i=answer[6]*2+answer[7]
+    if i==head then                    // Correct finger, show protocol
+      offset=Status(hofs2)+128
+      draw window=hplot color=WHITE bkcolor=WHITE
+      if clearmode<2 then
+        draw at 0,0 fillrect 256,256
+        for i=8,i<256,i=i+20           // Draw grid of lines
+          draw color=((rtfon!=0 || i==128)?GRAY:LIGHTGRAY)
+          draw at 0,i to 256,i
+        enddo
+        for i=20,i<256,i=i+20
+          draw at i,0 to i,256
+        enddo
+      endif
+      draw color=DARKGRAY font=SMALLFONT at 205,28 text="20 ms"
+      draw at 200,28 to 220,28
+      draw at 200,26 to 200,31
+      draw at 220,26 to 220,31
+      if clearmode==1 clearmode=2
+      n=($uint2(answer)-8)/2
+      draw color=BLACK                 // Draw first curve (X or Z)
+      if n>0 draw at 0,answer[8]
+      for i=1,i<n,i++
+        draw to i,answer[8+2*i]
+      enddo
+      if n>0 draw pixel n-1,answer[8+2*n-2]
+      draw color=LIGHTRED              // Draw second curve (Y, I, P or V)
+      if n>0 draw at 0,(answer[9]+offset) & 0xFF
+      for i=1,i<n,i++
+        draw to i,(answer[9+2*i]+offset) & 0xFF
+      enddo
+      if n>0 draw pixel n-1,(answer[9+2*n-2]+offset) & 0xFF
+      draw show
+    endif
+  endif
+end
+
+function int main()
+  int i,mode,actmode,setmode,settext,prevhead,nrtf,exit
+  char buf[64],s[256]
+  char protname[256]="xyzprot.rtf"
+  handle hmain,hhead,hhscr,hprot,hquit,hcomment
+  handle hxy,hzup,hzdown,hpress,hvelo,hclear
+  loadchanged=0
+  layoutchanged=0
+  hmain=control WINDOW
+    window=NULL
+    position=10,10,385,265
+    name="运动协议"
+    help=" "
+    bkcolor=GRAY
+    size=256
+  endc
+  hplot=control GRAPH
+    window=hmain
+    position=5,5,256,256
+    help="协议数据"
+    bkcolor=WHITE
+  endc
+  hofs2=control VSCROLL
+    window=hmain
+    position=262,4,16,258
+    help="设置红色曲线的偏移量"
+    bkcolor=RED
+    limits=-127,127
+  endc
+  draw window=hmain
+  draw at 284,25 text="Head"
+  hhead=control EDIT
+    window=hmain
+    position=322,5,37,24
+    help="当前选中的测试头"
+    bkcolor=WHITE
+  endc
+  hhscr=control VSCROLL
+    window=hmain
+    position=359,5,20,24
+    help="按下更换测试头"
+    mode=M_NOTAB
+    limits=1,-1
+  endc
+  hxy=control CUSTOMBOX
+    window=hmain
+    position=284,38,94,22
+    name="X-Y"
+    help="显示到测点后的X-Y振动"
+  endc
+  hzup=control CUSTOMBOX
+    window=hmain
+    position=284,60,94,22
+    name="Z 上"
+    help="显示Z向上运动"
+  endc
+  hzdown=control CUSTOMBOX
+    window=hmain
+    position=284,82,94,22
+    name="Z 下"
+    help="显示Z向下运动"
+  endc
+  hpress=control CUSTOMBOX
+    window=hmain
+    position=284,104,94,22
+    name="Z 压力"
+    help="显示Z坐标和压力"
+  endc
+  hvelo=control CUSTOMBOX
+    window=hmain
+    position=284,126,94,22
+    name="Z 速度"
+    help="显示用于检测接触的Z坐标和速度"
+  endc
+  hclear=control CUSTOMBOX
+    window=hmain
+    position=284,152,94,22
+    name="记忆"
+    help="如果选中则不要清除屏幕"
+  endc
+  hfreeze=control CUSTOMBOX
+    window=hmain
+    position=284,174,94,22
+    name="冻结"
+    help="如果选中则停止显示"
+  endc
+  hprot=control BUTTON
+    window=hmain
+    position=285,210,94,24
+    name="To RTF"
+    help="RTF格式的开放协议(与MSWord兼容)"
+  endc
+  hquit=control BUTTON
+    window=hmain
+    position=285,238,94,24
+    name="关闭"
+    help="关闭此窗口"
+  endc
+  draw at 5,287 text="Comment:"
+  hcomment=control EDIT
+    window=hmain
+    position=73,267,306,24
+    help="在屏幕截图中添加评论"
+    bkcolor=WHITE
+    mode=M_NOTAB
+  endc
+  draw show
+  head=0; prevhead=-1
+  mode=0; actmode=0; setmode=1; settext=1; exit=0
+  clearmode=0
+  while 1 do
+    if Pressed(hxy) || Pressed(hzup) || loadchanged then
+      actmode=1; setmode=1; loadchanged=0
+    else if Pressed(hzdown) then
+      if Status(hzdown) then
+        change hpress mode=0
+        change hvelo mode=0
+      endif
+      actmode=1; setmode=1
+    else if Pressed(hpress) then
+      if Status(hpress) then
+        change hzdown mode=0
+        change hvelo mode=0
+      endif
+      actmode=1; setmode=1
+    else if Pressed(hvelo) then
+      if Status(hvelo) then
+        change hpress mode=0
+        change hzdown mode=0
+      endif
+      actmode=1; setmode=1
+    else if Pressed(hclear) then
+      if Status(hclear)==0 then
+        clearmode=0
+      else
+        clearmode=1
+      endif
+    else if Pressed(hhead) || Pressed(hhscr) || layoutchanged then
+      Text(hhead,buf); i=head; sscanf(buf,"%i",&i);
+      i=i+Status(hhscr)
+      change hhscr select=0
+      i=Max(0,Min($LAY.nfing*2+1,i))
+      if (head!=i || layoutchanged) then
+        if layoutchanged==0 setmode=1
+        layoutchanged=0
+        head=i
+        if head<$LAY.nfing*2 then
+          enable hzup
+          enable hzdown
+          enable hpress
+          enable hvelo
+        else
+          disable hzup
+          disable hzdown
+          disable hpress
+          disable hvelo
+        endif
+      endif
+      settext=1
+    else if Pressed(hprot) then
+      if rtfon==0 then                 // As yet, no protocol file
+        i=SYS.Browse(hmain,protname,"Select file for XYZ protocol",0)
+        if i==1 && protname[0]!='\0' then
+          if ROpen(protname)==0 then   // Protocol succesfully opened
+            RParagraph(RTF_HEADER|RTF_CENTERED)
+            RFmt(RTF_TIMES,RTF_ITALIC,8)
+            RAddtext("X-Y-Z protocol from ")
+            Strtime(s,"%a %d-%b-%Y %H:%M",0,0)
+            RAddtext(s)
+            RAddtext(" - page ")
+            RAddpagenumber()
+            RParagraph(RTF_CENTERED|RTF_SPACE)
+            RFmt(RTF_TIMES,RTF_BOLD,15)
+            RAddtext("X-Y-Z protocol file")
+            change hmain position=*,*,*,294
+            change hprot name="让镜头"
+            change hprot help="为协议添加实际图片"
+            change hquit name="关闭 RTF"
+            change hquit help="关闭协议文件"
+            nrtf=0; rtfon=1
+          endif
+        endif
+      else                             // Protocole open, add data
+        RParagraph(RTF_LEFT)
+        RAddpicture(hplot,0,0,256,256,1)
+        RParagraph(RTF_LEFT)
+        RFmt(RTF_TIMES,RTF_NORMAL,10)
+        nrtf++
+        i=sprintf(s,"Shot %i    ",nrtf)
+        Text(hcomment,s+i)
+        if s[i]!='\0' s[i-2]='-'
+        RAddtext(s)
+        RAddtext("\n")
+      endif
+    else if Pressed(hquit) then
+      if rtfon==0 then                 // No protocol, close window
+        mode=0; actmode=0; setmode=1; exit=1
+      else                             // Protocol open, close protocol
+        rtfon=0
+        RClose()
+        change hmain position=*,*,*,265
+        change hprot name="To RTF"
+        change hprot help=                                                     \
+          "Open protocol in Rich Text format (MSWord-compatible)"
+        change hquit name="关闭"
+        change hquit help="关闭此窗口"
+        sprintf(s,"winword %s",protname)
+        SYS.Winexec(s)
+        Pressed(hquit)                 // Protection against "contact noise"
+      endif
+    endif
+    if settext then
+      change hhead text=format("%i",head)
+      settext=0
+    endif
+    if setmode then
+      if actmode!=0 then
+        mode=0
+        if Status(hxy) mode=mode|0x04
+        if Status(hzup) mode=mode|0x01
+        if Status(hzdown) mode=mode|0x02
+        if Status(hpress) mode=mode|0x08
+        if Status(hvelo) mode=mode|0x10
+        actmode=0
+      endif
+      if prevhead>=0 && prevhead!=head then
+        buf[0]=S_TEST
+        buf[1]=0x02                    // Set protocolling mode
+        $uint2(buf+2)=prevhead/2       // Previous rail
+        $uint2(buf+4)=prevhead & 1     // Previous finger
+        buf[6]=0                       // Disable protocolling
+        SYS.Send(7,buf,0)
+      endif
+      buf[0]=S_TEST
+      buf[1]=0x02                      // Set protocolling mode
+      $uint2(buf+2)=head/2             // Current rail
+      $uint2(buf+4)=head & 1           // Current finger
+      buf[6]=mode                      // Set protocolling
+      SYS.Send(7,buf,0)
+      prevhead=head
+      setmode=0
+    endif
+    if exit break
+    wait
+  enddo
+end
+

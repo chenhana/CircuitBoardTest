@@ -1,0 +1,23 @@
+#include "ls.icl"
+#include "or.icl"
+
+#cmdbuff 1
+
+
+
+function int main()
+  int l
+  char buf[1024]
+  buf[0]=S_MARK
+  buf[1]=2
+  $int3(buf+3)=0
+  $int3(buf+6)=0
+  $int2(buf+9)=0
+  $int2(buf+11)=0
+  $int2(buf+15)=0
+  buf[17]=0
+  l=sprintf(buf+18,"Alles f.d.K.")
+  $int2(buf+13)=l
+  SYS.Sendimm(0,18+l,buf)
+end
+

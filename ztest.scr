@@ -1,0 +1,1093 @@
+#include "stddef.inc"                  // System definitions and functions
+#include "commands.inc"                // Command & error mnemonics
+#include "rtfadd.inc"                  // Rich Text Format extentions
+#zeroid                                // Answerproc receives answers with id=0
+#cmdbuff 33
+
+#define VERSION        "1.00"
+#define DESCRIPTION    "Z axis test"
+
+#define MAINX          550             // Width of main window (client area)
+#define MAINY          460             // height of main window (client area)
+#define DX             400             // Width of graph window
+#define DY             400             // Height of graph window
+
+#define NHEAD          16              // Maximal number of heads
+#define NOSCI          4096            // Number of points in oscillogramm
+#define MAXNOISE       20.0            // Maximal active Z noise, um
+#define MAXHYST        4000.0          // Maximal passive hysteresis, um
+#define SHOWBAD        1               // Whether to highlight bad data
+
+typedef struct t_data
+  float          zmin                  // Minimal measured Z, um
+  float          zmax                  // Maximal measured Z, um
+  float          hyst                  // Maximal measured hysteresis, um
+  float          err                   // Maximal error with feedback, um
+  float          noise                 // Maximal registered noise, um
+  float          sens                  // Sensitivity, mm/A
+ends
+
+handle           hmain                 // Main window
+handle           hprogress             // Progress bar
+handle           hgraph                // Graph window
+handle           hhead[NHEAD]          // Head selectors
+handle           hallon                // All on button
+handle           halloff               // All off button
+
+handle           hselect               // Selected head
+handle           hnext                 // Select next head
+handle           hzfeed                // Show Z hub with feedback
+handle           hznofeed              // Show Z hub without feedback
+handle           hosc                  // Show oscillogramm of free step
+handle           hresp                 // Show frequency response
+handle           hdata                 // Show test results
+
+handle           hstart                // Start test button
+handle           hinterrupt            // Interrupt button
+handle           hprotocol             // Protocol button
+handle           hquit                 // Exit button
+
+int              heads                 // List of heads to test
+int              oldheads              // List of tested heads
+int              isa5                  // 0: A6, 1: A1/A5
+int              showhead              // Currently displayed head
+int              showgraph             // Currently displayed graph
+float            zz[256]               // Requested hub
+struct t_data    data[NHEAD]           // Temporary results
+
+
+// Z hub with feedback.
+int              actvalid              // Z hub data with feedback valid
+float            actdn[NHEAD][256]     // Movement down with feedback
+float            actup[NHEAD][256]     // Movement up with feedback
+float            actnoise[NHEAD][256]  // Noise in movement with feedback
+float            actcurr[NHEAD][256]   // Current in movement with feedback
+struct t_data    actdata[NHEAD]        // Data in movement with feedback
+
+// Z hub without feedback.
+int              passvalid             // Z hub data without feedback valid
+float            passdn[NHEAD][256]    // Movement down without feedback
+float            passup[NHEAD][256]    // Movement up without feedback
+float            passnoise[NHEAD][256] // Dummy array
+float            passcurr[NHEAD][256]  // Current in movement without feedback
+struct t_data    passdata[NHEAD]       // Data in movement without feedback
+
+// Z oscillations without feedback.
+int              oscvalid              // Z oscillations data valid
+float            osci[NHEAD][NOSCI]    // Oscillogram (uncompressed)
+int              osccount[NHEAD]       // Oscillogramm gathered
+float            oscvibr[NHEAD][310]   // Passive vibration
+float            osctextr[NHEAD][6]    // Vibration extrema (first is maximum)
+float            oscdt[NHEAD]          // Period of passive vibrations, ms
+float            oscdamp[NHEAD]        // Damping of passive vibrations
+
+
+// Callback that processes answers from the oscilloscope.
+function int Answerproc(char *answer,int info)
+  int j,n,ofs,head
+  // Accept only answers on the channel 0 from the selected heads.
+  if answer[4]==S_TEST && $uint2(answer+2)==0 && answer[5]==0x03 &&            \
+    answer[6]<NHEAD && ((1<<answer[6]) & heads)!=0 && answer[7]==0 then
+    head=answer[6]
+    ofs=$uint2(answer+10)              // Offset of first data point
+    n=$uint2(answer+12)                // Number of data points
+    if ofs+n>NOSCI return              // Invalid data
+    for j=0,j<n,j++ do
+      osci[head][ofs+j]=$float4(answer+14+j*4)
+    enddo
+    if ofs+n>=$uint2(answer+8) osccount[head]=$uint2(answer+8)
+  endif
+end
+
+// Displays Z movement curve and DC motor current with feedback and noise
+// (fbk=1) or without feedback but with hysteresis (fbk=0).
+function int Showhub(int head,float *zz,float *dn,float *up,float *noise,      \
+  float *curr,int fbk)
+  int i,j,k,m,y,x0,y0,h0
+  float xbase,ybase,zscale
+  m=256*head
+  x0=DX/2-128; y0=277                  // Main reference point
+  h0=390                               // Noise/hysteresis reference point
+  draw window=hgraph bkcolor=WHITE clear
+  // Draw frames of main graph and noise/hysteresis windows.
+  draw color=DARKGRAY
+  draw at x0-1,y0-256 rect x0+257,y0+2
+  draw at x0-1,h0-80 rect x0+257,h0+1
+  draw font=INFOFONT color=BLACK mode=M_CENTERED
+  if fbk==0 then
+    draw at DX/2,20 text="Z movement without feedback"
+    draw at DX/2,h0-81 text="Z hysteresis"
+  else
+    draw at DX/2,20 text="Z movement with feedback"
+    draw at DX/2,h0-81 text="Z noise (standard dispersion)"
+  endif
+  j=0
+  // Draw grid with 5000 um or 100 mA step.
+  if fbk==0 then
+    // No feedback, draw current grid.
+    for i=-3000,i<=3000,i=i+100 do
+      for j=j,j<256 && curr[m+j]<i,j++ do; enddo
+      if j<1 continue
+      if j>255 break
+      draw color=GRAY
+      draw at x0+j,y0 to x0+j,y0-256
+      draw at x0+j,h0-1 to x0+j,h0-80
+      if j<235 then
+        draw color=BLACK font=SMALLFONT
+        draw mode=M_CENTERED at x0+j,y0+14 text=format("%.1f",i/1000.0)
+      endif
+    enddo
+  endif
+  j=0
+  for i=0,i<65000,i=i+5000 do
+    for j=j,j<256 && zz[j]<i,j++ do; enddo
+    if j<1 continue
+    if j>255 break
+    draw color=GRAY
+    if fbk!=0 then
+      draw at x0+j,y0 to x0+j,y0-256
+      draw at x0+j,h0-1 to x0+j,h0-80
+    endif
+    draw at x0,y0-j to x0+256,y0-j
+    if j<235 then
+      draw color=BLACK font=SMALLFONT mode=M_RIGHT
+      draw at x0-3,y0-j+7 text=format("%.0f",i/1000.0)
+      if fbk!=0 then
+        draw color=BLACK mode=M_CENTERED
+        draw at x0+j,y0+14 text=format("%.0f",i/1000.0)
+        draw color=LIGHTRED mode=M_LEFT
+        draw at x0+259,y0-j+7 text=format("% .1f",(i/1000.0-20.0)*0.02)
+      endif
+    endif
+  enddo
+  draw color=BLACK font=SMALLFONT
+  draw mode=M_RIGHT at x0-3,y0-256+7 text="Zmeas,mm"
+  draw mode=M_CENTERED at x0+257,y0+14 text=(fbk==0?"I,Amp":"Zexp,mm")
+  if fbk==0 then
+    draw color=BLACK font=SMALLFONT mode=M_CENTERED
+    draw at x0+94,y0-162 text="2 (Back)"
+    draw at x0+162,y0-94 text="1 (Down)"
+  else
+    draw mode=M_LEFT color=LIGHTRED at x0+259,y0-256+7 text="I,Amp"
+//    draw mode=M_CENTERED color=WHITEGREEN at x0,y0 to x0+256,y0-256
+  endif
+  // Draw head number.
+  draw mode=M_LEFT font=MEDIUMFONT color=WHITE bkcolor=WHITE
+  draw at x0+1,y0-253 fillrect x0+24,y0-232
+  draw color=DARKGRAY
+  draw at x0+3,y0-233 text=format("%i%c",head/2,head & 1?'R':'L')
+  // Draw Z movement curves.
+  zscale=(zz[255]-zz[0])/256.0
+  xbase=x0-zz[0]/zscale
+  ybase=y0+zz[0]/zscale
+  draw at x0,y0 clip x0+256,y0-256 color=BLACK
+  draw at zz[0]/zscale+xbase,ybase-dn[m]/zscale
+  for i=1,i<256,i++ do
+    draw to zz[i]/zscale+xbase,ybase-dn[m+i]/zscale
+  enddo
+  draw at zz[0]/zscale+xbase,ybase-up[m]/zscale
+  for i=1,i<256,i++ do
+    draw to zz[i]/zscale+xbase,ybase-up[m+i]/zscale
+  enddo
+  // Draw Z current curve.
+  if fbk then
+    draw color=LIGHTRED
+    draw at zz[0]/zscale+xbase,ybase-(curr[m]/20.0+20.0)*1000.0/zscale
+    for i=1,i<256,i++ do
+      draw to zz[i]/zscale+xbase,ybase-(curr[m+i]/20.0+20.0)*1000.0/zscale
+    enddo
+  endif
+  draw clip=NULL
+  // Draw noise/hysteresis curves. I redraw twice, with different colours, to
+  // emphasize inacceptably high values.
+  if fbk==0 then
+    // No feedback, draw hysteresis.
+    zscale=MAXHYST*2.5/80
+    for i=0,i<3,i++ do
+      draw color=GRAY
+      if i!=0 draw at x0,h0-i*MAXHYST/zscale to x0+256,h0-i*MAXHYST/zscale
+      draw font=SMALLFONT color=BLACK mode=M_RIGHT
+      draw at x0-3,h0-i*MAXHYST/zscale+7 text=format("%.1f",i*MAXHYST/1000.0)
+    enddo
+    draw at x0-3,h0-80+7 color=BLACK text="mm"
+    for k=0,k<2,k++ do
+      if k==0 then
+        draw color=(SHOWBAD?LIGHTRED:BLACK) at x0,h0 clip x0+256,h0-80
+      else
+        draw color=BLACK at x0,h0 clip x0+256,h0-MAXHYST/zscale
+      endif
+      y=Max(h0-Abs(up[m]-dn[m])/zscale,h0-80)
+      draw at x0,y
+      for j=1,j<256,j++ do
+        y=Max(h0-Abs(up[m+j]-dn[m+j])/zscale,h0-80)
+        draw to x0+j,y
+      enddo
+      if SHOWBAD==0 break
+    enddo
+  else
+    // Feedback is on, draw noise.
+    zscale=MAXNOISE*3.0/80
+    for i=0,i<3,i++ do
+      draw color=GRAY
+      if i!=0 draw at x0,h0-i*MAXNOISE/zscale to x0+256,h0-i*MAXNOISE/zscale
+      draw font=SMALLFONT color=BLACK mode=M_RIGHT
+      draw at x0-3,h0-i*MAXNOISE/zscale+7 text=format("%.0f",i*MAXNOISE)
+    enddo
+    draw at x0-3,h0-80+7 color=BLACK text="m"
+    for k=0,k<2,k++ do
+      if k==0 then
+        draw color=(SHOWBAD?LIGHTRED:BLACK) at x0,h0 clip x0+256,h0-80
+      else
+        draw color=BLACK at x0,h0 clip x0+256,h0-MAXNOISE/zscale
+      endif
+      for j=0,j<256,j++ do
+        draw at x0+j,h0 to x0+j,h0-noise[m+j]/zscale
+      enddo
+      if SHOWBAD==0 break
+    enddo
+  endif
+  draw clip=NULL show
+  if fbk then
+    change hzfeed color=LIGHTRED
+    change hznofeed color=BLACK
+  else
+    change hzfeed color=BLACK
+    change hznofeed color=LIGHTRED
+  endif
+  change hosc color=BLACK
+  change hresp color=BLACK
+  change hdata color=BLACK
+  change hselect select=format("%i%c",head/2,head & 1?'R':'L')
+  showhead=head; showgraph=(fbk?1:2)
+end
+
+// Displays curve of parallelogramm's oscillations without feedback.
+function int Showosc(int head,float *vibr,float *dt,float *d,float *textr)
+  int i,x0,y0,i1,i2,y1,y2
+  float xscale,yscale,zstep,z,zmin,zmax
+  x0=50; y0=360                        // Reference point
+  xscale=3.0                           // 3 ms/point
+  draw window=hgraph bkcolor=WHITE clear
+  draw mode=M_CENTERED color=BLACK font=INFOFONT
+  draw at DX/2,20 text="Z oscillations without feedback"
+  // Draw frame of oscillations window.
+  draw color=DARKGRAY
+  draw at x0,y0-340 rect x0+310,y0+1
+  // Draw time grid.
+  draw font=SMALLFONT mode=M_CENTERED
+  for i=100,i<=900,i=i+100 do
+    draw color=GRAY at x0+i/xscale,y0-1 to x0+i/xscale,y0-340
+    if i<900 draw color=BLACK at x0+i/xscale,y0+14 text=format("%.1f",i/1000.0)
+  enddo
+  draw font=SMALLFONT mode=M_CENTERED color=BLACK
+  draw at x0+310,y0+14 text="T,ms"
+  // Draw amplitude grid.
+  zmin=1.0e10; zmax=-1.0e10
+  for i=0,i<310,i++ do
+    zmin=Min(zmin,vibr[head*310+i])
+    zmax=Max(zmax,vibr[head*310+i])
+  enddo
+  if zmax-zmin<200.0 then zstep=10.0;
+  else if zmax-zmin<500.0 then zstep=30.0;
+  else if zmax-zmin<2000.0 then zstep=100.0;
+  else if zmax-zmin<5000.0 then zstep=300.0;
+  else if zmax-zmin<20000.0 then zstep=1000.0;
+  else zstep=3000.0; endif
+  for z=0.0,z<65536,z=z+zstep do
+    if z+zstep>=zmin then
+      zmin=z; break
+    endif
+  enddo
+  for z=zmin+zstep,z<65536,z=z+zstep do
+    if z-zstep>zmax then
+      zmax=z; break
+    endif
+  enddo
+  yscale=(zmax-zmin)/340.0             // Micrometers per pixel
+  draw mode=M_RIGHT font=SMALLFONT
+  for z=zmin,z<zmax,z=z+zstep do
+    draw color=GRAY at x0+1,y0-(z-zmin)/yscale to x0+310,y0-(z-zmin)/yscale
+    draw color=BLACK at x0-3,y0-(z-zmin)/yscale+7 text=format("%g",z/1000.0)
+  enddo
+  draw color=BLACK at x0-3,y0-340 text="Z,mm"
+  // Draw head number.
+  draw mode=M_LEFT font=MEDIUMFONT color=WHITE bkcolor=WHITE
+  draw at x0+1,y0-338 fillrect x0+24,y0-337
+  draw color=DARKGRAY
+  draw at x0+3,y0-318 text=format("%i%c",head/2,head & 1?'R':'L')
+  // Draw period.
+  if textr[head*6+2]!=0.0 then
+    i1=textr[head*6]/xscale
+    y1=Max(y0-310,y0-(vibr[head*310+i1]-zmin)/yscale-5)
+    i2=textr[head*6+2]/xscale
+    y2=Max(y0-310,y0-(vibr[head*310+i2]-zmin)/yscale-5)
+    draw color=LIGHTRED
+    draw at x0+i1,y1 to x0+i1,y0-325 to x0+i2,y0-325 to x0+i2,y2+1
+    draw color=BLACK font=SMALLFONT mode=M_LEFT
+    draw at x0+i2+5,y0-321 text=format("Period %.1f ms",dt[head])
+    draw at x0+i2+5,y0-309 text=format("Damping %.3f",d[head])
+  endif
+  // Draw oscillations.
+  draw color=BLACK
+  draw at x0,y0-(vibr[head*310+0]-zmin)/yscale
+  for i=0,i<310,i++ do
+    draw to x0+i,y0-(vibr[head*310+i]-zmin)/yscale
+  enddo
+  draw show
+  change hzfeed color=BLACK
+  change hznofeed color=BLACK
+  change hosc color=LIGHTRED
+  change hresp color=BLACK
+  change hdata color=BLACK
+  change hselect select=format("%i%c",head/2,head & 1?'R':'L')
+  showhead=head; showgraph=3
+end
+
+// Displays test results in text format.
+function int Showdata(int head)
+  draw window=hgraph bkcolor=WHITE clear
+  draw font=FIXEDSYS mode=M_LEFT at 10,24 wrap=DX-10
+  draw color=BLACK
+  draw text=format("Head %i (%i%c) type=%s\n\n",                               \
+    head,head/2,head & 1?'R':'L',isa5?"A5":"A6")
+  if actvalid then
+    draw color=BLACK text="Z movement with feedback:\n" color=GREEN
+    draw text=format("  Minimal measured Z         %.1f mm\n",                 \
+      actdata[head].zmin/1000.0)
+    draw text=format("  Maximal measured Z         %.1f mm\n",                 \
+      actdata[head].zmax/1000.0)
+    draw text=format("  Maximal positioning error  %.1f um\n",                 \
+      actdata[head].err)
+    draw text=format("  Maximal measured noise     %.1f um\n",                 \
+      actdata[head].noise)
+    draw text=format("  Motor sensitivity          %.1f mm/A\n",               \
+      actdata[head].sens)
+    draw text="\n"
+  endif
+  if passvalid then
+    draw color=BLACK text="Z movement without feedback:\n" color=GREEN
+    draw text=format("  Minimal measured Z         %.1f mm\n",                 \
+      passdata[head].zmin/1000.0)
+    draw text=format("  Maximal measured Z         %.1f mm\n",                 \
+      passdata[head].zmax/1000.0)
+    draw text=format("  Maximal hysteresis         %.1f mm\n",                 \
+      passdata[head].hyst/1000.0)
+    draw text=format("  Motor sensitivity          %.1f mm/A\n",               \
+      passdata[head].sens)
+    draw text="\n"
+  endif
+  if oscvalid then
+    draw color=BLACK text="Z oscillations without feedback:\n" color=GREEN
+    draw text=format("  Period                     %.1f ms\n",oscdt[head])
+    draw text=format("  Damping per period         %.3f\n",oscdamp[head])
+    draw text="\n"
+  endif
+  draw show
+  change hzfeed color=BLACK
+  change hznofeed color=BLACK
+  change hosc color=BLACK
+  change hresp color=BLACK
+  change hdata color=LIGHTRED
+  change hselect select=format("%i%c",head/2,head & 1?'R':'L')
+  showhead=head; showgraph=5
+end
+
+// Displays plot for selected head according to the pressed button.
+function int Show()
+  int i,j,k,c,head
+  char s[32]
+  if Pressed(hnext) then
+    head=(showhead<0?0:showhead)
+    k=1<<head
+    for j=0,j<32,j++ do
+      k=k<<1; head++
+      if (k==0) then
+        k=1; head=0
+      endif
+      if (oldheads & k)!=0 break
+    enddo
+    if j>=32 return
+    i=(showgraph<1?1:showgraph)
+  else if Pressed(hselect) then
+    Text(hselect,s)
+    c=0; sscanf(s,"%i%c",&i,&c)
+    if c=='L' || c=='l' then head=i*2;
+    else if c=='R' || c=='r' then head=i*2+1;
+    else return;
+    endif
+    if head==showhead return
+    i=(showgraph<1?1:showgraph)
+  else
+    head=(showhead<0?0:showhead)
+    i=0
+  endif
+  if Pressed(hzfeed) || i==1 then
+    Showhub(head,zz,actdn,actup,actnoise,actcurr,1)
+  else if Pressed(hznofeed) || i==2 then
+    Showhub(head,zz,passdn,passup,passnoise,passcurr,0)
+  else if Pressed(hosc) || i==3 then
+    Showosc(head,oscvibr,oscdt,oscdamp,osctextr)
+  else if Pressed(hresp) || i==4 then
+//    Showdata(head)
+  else if Pressed(hdata) || i==5 then
+    Showdata(head)
+  endif
+end
+
+// Enables (enablez!=0) or disables (enablez=0) Z movements of all heads.
+function int Setdebug(int enablez)
+  char s[32]
+  s[0]=S_DEBUG
+  s[1]=0x01                            // Set debugging mode
+  if enablez then
+    $uint2(s+2)=$GLOBAL.debugmode & 0xFFFFFFFB
+  else
+    $uint2(s+2)=$GLOBAL.debugmode | 0x00000004
+  endif
+  $uint2(s+4)=$GLOBAL.disabledrails
+  $uint2(s+6)=$GLOBAL.videomode
+  SYS.Send(8,s,0)
+  delay 250                            // Pause for Z axes to come to rest
+end
+
+// Moves selected heads full hub down and up according to the list of supplied
+// coordinates (in micrometers), gathering hysteresis, positioning noise and
+// motor current in 256 height points. Additionally, fills data[]. Returns 0 on
+// success, 1 on interrupt and -1 if user decided to close the script.
+function int Testhub(float *zz,float *dn,float *up,float *noise,float *curr,   \
+  int scroll0,int scroll1)
+  int i,j,k,t,ttotal,dt,index,bad
+  char s[256],buf[32]
+  float prevz,currsum[NHEAD],nsum[NHEAD],sz[NHEAD],szz[NHEAD],nz[NHEAD]
+  float nx,sx,sy,sxx,sxy
+  // Prepare for test.
+  Memset(noise,0,Sizeof(noise))
+  prevz=zz[0]
+  for k=0,k<NHEAD,k++ do
+    data[k].zmin=1.0e99
+    data[k].zmax=-1.0e99
+  enddo
+  // Move Z axis downstairs and then up.
+  for i=0,i<512,i++ do
+    change hprogress limits=scroll0+(i+1)/512.0*(scroll1-scroll0),1000
+    // Set new coordinate (in 2 steps to minimize vibrations) and wait for rest.
+    index=(i<256?i:511-i)
+    for k=0,k<NHEAD,k++ do
+      if (heads & (1<<k))==0 continue
+      sprintf(s,"OUTPORT32 HEAD(%i) 0x10010008 %i",k,(prevz+zz[index])/2.0)
+      SERV.Cmdimm(32,s)
+    enddo
+    t=Time(); dt=10                    // Wait 10 milliseconds
+    while Time()-t<dt do
+      if Pressed(hinterrupt) return 1
+      if Pressed(hquit) return -1
+      Show()
+      wait
+    enddo
+    for k=0,k<NHEAD,k++ do
+      if (heads & (1<<k))==0 continue
+      sprintf(s,"OUTPORT32 HEAD(%i) 0x10010008 %i",k,zz[index])
+      SERV.Cmdimm(32,s)
+    enddo
+    prevz=zz[index]
+    t=Time(); dt=(i==0?800:50)         // Wait 50 ms (800 if first measurement)
+    while Time()-t<dt do
+      if Pressed(hinterrupt) return 1
+      if Pressed(hquit) return -1
+      Show()
+      wait
+    enddo
+    // Measure Z coordinate and calculate mean and noise (sigma). Test makes
+    // at least 20 measurements per head and stops if either number of
+    // measurements reaches 60, or test time exceeds 80 milliseconds. I also
+    // measure the DC motor current, but not as frequently as Z to spare test
+    // time.
+    for k=0,k<NHEAD,k++ do
+      currsum[k]=0.0; nsum[k]=0.0; sz[k]=0.0; szz[k]=0.0; nz[k]=0.0
+    enddo
+    ttotal=Time()
+    for j=0,j<60,j++ do
+      if j>=20 && Time()-ttotal>=80 break
+      for k=0,k<NHEAD,k++ do
+        if (heads & (1<<k))==0 continue
+        $A[k].length=0
+        buf[0]=S_INPORT32
+        buf[1]=k
+        $uint4(buf+2)=0x10000018
+        SYS.Sendimm(k,6,buf)
+        if (j & 0x3)==0 then
+          $A[NHEAD+k].length=0
+          buf[0]=S_INPORT32
+          buf[1]=k
+          $uint4(buf+2)=0x10000019
+          SYS.Sendimm(NHEAD+k,6,buf)
+        endif
+      enddo
+      bad=0
+      // Note: there is no wait at the end of this loop!
+      while 1 do
+        if Pressed(hinterrupt) return 1
+        if Pressed(hquit) return -1
+        for k=0,k<NHEAD,k++ do
+          if (heads & (1<<k))==0 continue
+          if $A[k].length==0 break
+          if $A[k].command!=S_INPORT32 bad=1
+          if (j & 0x3)==0 then
+            if $A[NHEAD+k].length==0 break
+            if $A[NHEAD+k].command!=S_INPORT32 bad=1
+          endif
+        enddo
+        if k>=NHEAD break
+        Show()
+      enddo
+      if bad return 1
+      for k=0,k<NHEAD,k++ do
+        if (heads & (1<<k))==0 continue
+        sz[k]=sz[k]+$int4($A[k]+5)
+        szz[k]=szz[k]+$int4($A[k]+5)*$int4($A[k]+5)
+        nz[k]=nz[k]+1.0
+        data[k].zmin=Min(data[k].zmin,$int4($A[k]+5))
+        data[k].zmax=Max(data[k].zmax,$int4($A[k]+5))
+        currsum[k]=currsum[k]+$int4($A[NHEAD+k]+5)
+        nsum[k]=nsum[k]+1.0
+      enddo
+    enddo
+    for k=0,k<NHEAD,k++ do
+      if (heads & (1<<k))==0 continue
+      noise[k*256+index]=Max(noise[k*256+index],                               \
+        Sqrt(Abs(nz[k]*szz[k]-sz[k]*sz[k])/nz[k]/(nz[k]-1.0)))
+      if i<256 then
+        dn[k*256+index]=sz[k]/nz[k]
+        curr[k*256+index]=currsum[k]/nsum[k]
+      else
+        up[k*256+index]=sz[k]/nz[k]
+        curr[k*256+index]=(curr[k*256+index]+currsum[k]/nsum[k])/2.0
+      endif
+    enddo
+  enddo
+  // Calculate maximal error and noise outside the blocks.
+  for k=0,k<NHEAD,k++ do
+    if (heads & (1<<k))==0 continue
+    data[k].hyst=0.0
+    data[k].err=0.0
+    data[k].noise=0.0
+    nx=0.0; sx=0.0; sy=0.0; sxx=0.0; sxy=0.0
+    for i=0,i<256,i++ do
+      if up[k*256+i]<data[k].zmin+1000.0 continue
+      if up[k*256+i]>data[k].zmax-1000.0 continue
+      if dn[k*256+i]<data[k].zmin+1000.0 continue
+      if dn[k*256+i]>data[k].zmax-1000.0 continue
+      data[k].hyst=Max(data[k].hyst,up[k*256+i]-dn[k*256+i])
+      data[k].err=Max(data[k].err,Abs(zz[i]-up[k*256+i]),Abs(zz[i]-dn[k*256+i]))
+      data[k].noise=Max(data[k].noise,noise[k*256+i])
+      nx=nx+2.0
+      sx=sx+2.0*curr[k*256+i]
+      sy=sy+dn[k*256+i]+up[k*256+i]
+      sxx=sxx+2.0*curr[k*256+i]*curr[k*256+i]
+      sxy=sxy+curr[k*256+i]*(dn[k*256+i]+up[k*256+i])
+    enddo
+    if nx<4.0 then
+      data[k].sens=0.0
+    else
+      data[k].sens=(sx*sy-nx*sxy)/(sx*sx-nx*sxx)
+    endif
+  enddo
+end
+
+// Moves head from z0 to z1 and gathers resulting oscillations with 2 ms
+// resolution to array z (at least 310 items long). Also calculates period and
+// damping per period. Returns 0 on success, 1 on interrupt and -1 if user
+// decided to close the script.
+function int Testosc(float z0,float z1,float *z,float *dt,float *d,            \
+  float *textr,int scroll0,int scroll1)
+  int i,j,k,t,dir,ready;
+  float r,ze,zep,zen,te,dz,zextr[6];
+  char s[256]
+  // Set initial coordinate.
+  for k=0,k<NHEAD,k++ do
+    if (heads & (1<<k))==0 continue
+    sprintf(s,"OUTPORT32 HEAD(%i) 0x10010008 %i",k,z0)
+    SERV.Cmdimm(32,s)
+  enddo
+  t=Time()
+  while Time()-t<1000 do
+    if Pressed(hinterrupt) return 1
+    if Pressed(hquit) return -1
+    Show()
+    wait
+  enddo
+  change hprogress limits=(scroll0*2+scroll1)/3,1000
+  // Set up oscilloscopes.
+  for k=0,k<NHEAD,k++ do
+    if (heads & (1<<k))==0 continue
+    osccount[k]=0
+    s[0]=S_TEST
+    s[1]=0x03                          // Setup A5 oscilloscope
+    s[2]=k                             // Head
+    s[3]=5                             // Trigger on S_OUTPORT:8
+    $uint2(s+4)=3                      // Compression 3 (600 us/point)
+    $uint2(s+6)=2000                   // Maximal length of protocol (1.2 s)
+    s[8]=3                             // Channel 1: Z coordinate
+    s[9]=0                             // Channel 2: off
+    s[10]=0                            // Channel 3: off
+    s[11]=0                            // Channel 4: off
+    SYS.Send(12,s,0)
+  enddo
+  // Set final coordinate, will trigger oscilloscope. I shift commands by 100
+  // milliseconds to avoid excessive bus traffic.
+  for k=0,k<NHEAD,k++ do
+    if (heads & (1<<k))==0 continue
+    sprintf(s,"OUTPORT32 HEAD(%i) 0x10010008 %i",k,z1)
+    SERV.Cmdimm(0,s)
+    t=Time()
+    while Time()-t<100 do
+      wait
+    enddo
+  enddo
+  // Wait for oscillogrammes.
+  t=Time()
+  ready=0
+  while Time()-t<2000 do
+    if Pressed(hinterrupt) return 1
+    if Pressed(hquit) return -1
+    Show()
+    for k=0,k<NHEAD,k++ do
+      if (heads & (1<<k))==0 continue
+      if osccount[k]==0 break
+    enddo
+    if k>=NHEAD then
+      ready=1
+      break
+    endif
+    wait
+  enddo
+  change hprogress limits=(scroll0+scroll1*2)/3,1000
+  // Move fingers up.
+  for r=z1,r>5000,r=r-100 do
+    for k=0,k<NHEAD,k++ do
+      if (heads & (1<<k))==0 continue
+      sprintf(s,"OUTPORT32 HEAD(%i) 0x10010008 %i",k,r)
+      SERV.Cmdimm(0,s)
+      t=Time()
+      while Time()-t<10 do
+        Show()
+        wait
+      enddo
+    enddo
+  enddo
+  if ready==0 return 1
+  change hprogress limits=scroll1,1000
+  for k=0,k<NHEAD,k++ do
+    // Save data to z[] (interval 3 ms, total duration 930 ms).
+    if (heads & (1<<k))==0 continue
+    for i=0,i<310,i++ do
+      j=i*5
+      z[k*310+i]=(osci[k,j]+osci[k,j+1]+osci[k,j+2]+osci[k,j+3]+osci[k,j+4])/5
+    enddo
+    // Get extrema and calculate period and damping.
+    for i=0,i<6,i++ do
+      textr[k*6+i]=0.0
+    enddo
+    dir=1                              // Start upstairs
+    dz=(z1-z0)/10.0
+    ze=osci[k,0]; te=0.0
+    j=1
+    for i=0,i<6,i++ do
+      for j=j,j<osccount[k]-1,j++ do
+        if (dir==1 && osci[k,j]>ze) || (dir!=1 && osci[k,j]<ze) then
+          ze=osci[k,j]; zep=osci[k,j-1]; zen=osci[k,j+1]
+          te=j
+        else if (dir==1 && osci[k,j]<ze-dz) || (dir!=1 && osci[k,j]>ze+dz) then
+          textr[k*6+i]=te*0.600       // 600 us/point
+          zextr[i]=(ze+zep+zen)/3.0
+          dir=-dir
+          dz=dz*0.7
+          break
+        endif
+      enddo
+    enddo
+    if i>=4 && zextr[0]!=zextr[1] then
+      dt[k]=((textr[k*6+2]-textr[k*6])+(textr[k*6+3]-textr[k*6+1]))/2.0
+      d[k]=(zextr[2]-zextr[3])/(zextr[0]-zextr[1])
+    else
+      dt[k]=0.0
+      d[k]=0.0
+    endif
+  enddo
+end
+
+// Deletes all gathered data and clears display.
+function int Prepare()
+  change hzfeed color=BLACK
+  change hznofeed color=BLACK
+  change hosc color=BLACK
+  change hresp color=BLACK
+  change hdata color=BLACK
+  disable hselect
+  disable hnext
+  disable hzfeed
+  disable hznofeed
+  disable hosc
+  disable hresp
+  disable hdata
+  draw window=hgraph bkcolor=WHITE clear show
+  showhead=-1
+  showgraph=-1
+  oldheads=0
+end
+
+// Writes protocol to .rtf file.
+function int Protocol()
+  int i,head
+  char s[512],protocol[260]
+  Strcpy(protocol,"ztest.rtf")
+  getini("Z test","Protocol","%s",protocol)
+  i=SYS.Browse(hmain,protocol,"Select protocol file",0)
+  if i==0 return
+  i=ROpen(protocol)
+  if i!=0 then
+    change hprogress text="Unable to create protocol file"
+    return
+  endif
+  Strtime(s,"%a %d-%b-%Y %H:%M",0,0)
+  RParagraph(RTF_CENTERED|RTF_HEADER|RTF_FIRST)
+  RFmt(RTF_TIMES,RTF_ITALIC,12)
+  RAddtext(" ")
+  RParagraph(RTF_CENTERED|RTF_HEADER|RTF_THINBRD)
+  RFmt(RTF_TIMES,RTF_ITALIC,9)
+  RAddfmt("Z axis test %s - page ",s)
+  RAddpagenumber()
+  RParagraph(RTF_CENTERED|RTF_SPACE)
+  RFmt(RTF_ARIAL,RTF_BOLD,18)
+  RAddfmt("Z axis test v%s - %s",VERSION,s)
+  for head=0,head<NHEAD,head++ do
+    if (oldheads & (1<<head))==0 continue
+    RParagraph(RTF_CENTERED|RTF_SPACE)
+    RFmt(RTF_ARIAL,RTF_BOLD,14)
+    RAddfmt("\nHead %i (%i%c), type=%s",                                       \
+      head,head/2,head & 1?'R':'L',isa5?"A5":"A6")
+    // Log information on Z hub with feedback.
+    if actvalid then
+      RParagraph(RTF_FORMAT)
+      RFmt(RTF_TIMES,RTF_BOLD,12)
+      RAddtext("\t1. Z movement with feedback.")
+      RParagraph(RTF_CENTERED|RTF_SPACE)
+      Showhub(head,zz,actdn,actup,actnoise,actcurr,1)
+      RAddpiczoom(hgraph,0,0,DX,DY,1,0.8)
+      RParagraph(RTF_FORMAT)
+      RFmt(RTF_TIMES,RTF_NORMAL,11)
+      RAddfmt("\t\t\tMinimal measured Z\t\t%.1f mm\n",actdata[head].zmin/1000)
+      RAddfmt("\t\t\tMaximal measured Z\t\t%.1f mm\n",actdata[head].zmax/1000)
+      RAddfmt("\t\t\tMaximal positioning error\t\t%.1f ",actdata[head].err)
+      RFmt(RTF_SYMBOL,RTF_NORMAL,10); RAddtext("m")
+      RFmt(RTF_TIMES,RTF_NORMAL,11); RAddtext("m\n")
+      RAddfmt("\t\t\tMaximal measured noise\t%.1f ",actdata[head].noise)
+      RFmt(RTF_SYMBOL,RTF_NORMAL,10); RAddtext("m")
+      RFmt(RTF_TIMES,RTF_NORMAL,11); RAddtext("m\n")
+      RAddfmt("\t\t\tMotor sensitivity\t\t%.1f mm/A\n",actdata[head].sens)
+    endif
+    // Log information on Z hub without feedback.
+    if passvalid then
+      RParagraph(RTF_FORMAT)
+      RFmt(RTF_TIMES,RTF_BOLD,12)
+      RAddtext("\t2. Z movement without feedback.")
+      RParagraph(RTF_CENTERED|RTF_SPACE)
+      Showhub(head,zz,passdn,passup,passnoise,passcurr,0)
+      RAddpiczoom(hgraph,0,0,DX,DY,1,0.8)
+      RParagraph(RTF_FORMAT)
+      RFmt(RTF_TIMES,RTF_NORMAL,11)
+      RAddfmt("\t\t\tMinimal measured Z\t\t%.1f mm\n",passdata[head].zmin/1000)
+      RAddfmt("\t\t\tMaximal measured Z\t\t%.1f mm\n",passdata[head].zmax/1000)
+      RAddfmt("\t\t\tMaximal hysteresis\t\t%.1f mm\n",passdata[head].hyst/1000)
+      RAddfmt("\t\t\tMotor sensitivity\t\t%.1f mm/A\n",passdata[head].sens)
+    endif
+    // Log information on Z vibrations without feedback.
+    if oscvalid then
+      RParagraph(RTF_FORMAT)
+      RFmt(RTF_TIMES,RTF_BOLD,12)
+      RAddtext("\t3. Z oscillations without feedback.")
+      RParagraph(RTF_CENTERED|RTF_SPACE)
+      Showosc(head,oscvibr,oscdt,oscdamp,osctextr)
+      RAddpiczoom(hgraph,0,0,DX,DY,1,0.8)
+      RParagraph(RTF_FORMAT)
+      RFmt(RTF_TIMES,RTF_NORMAL,11)
+      RAddfmt("\t\t\tPeriod\t\t\t\t%.1f ms\n",oscdt[head])
+      RAddfmt("\t\t\tDamping per period\t\t%.3f\n",oscdamp[head])
+    endif
+  enddo
+  RClose()
+  setini("Z test","Protocol","%s",protocol)
+end
+
+// Main program.
+function int main()
+  int i,j,y,ys,firsthead
+  char s[256]
+  heads=0
+  getini("Z test","Settings","%i",&heads)
+  hmain=control WINDOW
+    window=NULL
+    position=10,10,MAINX,MAINY
+    name=format("Z 轴测试 v%s",VERSION)
+    help=" "
+    color=BLACK
+    bkcolor=GREEN
+    size=512
+  endc
+  hprogress=control PROGRESS
+    window=hmain
+    position=3,3,MAINX-6,20
+    name=format("A5/A6 测试程序 v%s",VERSION)
+    help="显示Z轴测试的进度"
+    color=BLACK
+    bkcolor=WHITE
+    font=MEDIUMFONT
+    mode=M_LEFT|M_PERCENT
+  endc
+  hgraph=control GRAPH
+    window=hmain
+    position=4,27,DX,DY
+    help="在这里您可以看到测试结果"
+    color=BLACK
+    bkcolor=WHITE
+  endc
+  draw window=hgraph color=RED font=MAINFONT
+  draw at 15,50 wrap DX-20
+  draw text="WARNING!\n\nThis script is intended only for production. If you "
+  draw text="are going to test Z axes in the tester, please assure that heads "
+  draw text="on their current positions will not touch PCB, shuttle or heads "
+  draw text="on the opposite side when moving the full Z hub. Failing to do "
+  draw text="so may seriously damage your heads!"
+  draw show
+  draw window=hmain color=BLACK bkcolor=WHITE mode=M_LEFT
+  draw at DX+8,26 fillrect MAINX-3,MAINY-132
+  draw at DX+15,48 font=MAINFONT text="Heads to test:"
+  draw at 3,MAINY-9 text="Show:"
+  draw show
+  // Move heads into the test positions - for the case that anybody will start
+  // this script on the tester.
+  for j=0,j<$LAY.nfing*2,j++ do
+    sprintf(s,"M %i(%f,%f) NOP",j,                                             \
+      $LAY.xoffset/1000.0+((j & 1)==0?-50.0:50.0),                             \
+      $LAY.yoffset[j/2]/1000.0+($LAY.side[j/2]==0?-15.0:15.0))
+    SERV.Cmdimm(32,s)
+  enddo
+  y=54; ys=0
+  for j=0,j<$LAY.nfing,j++ do
+    if $LAY.side[j]!=0 ys=5
+    for i=0,i<2,i++ do
+      hhead[j*2+i]=control CHECKBOX
+        window=hmain
+        position=DX+32+i*57,y+ys,40,18
+        name=format("%i%c",j,(i==0?'L':'R'))
+        help=format("选中测试头 %i%c",j,(i==0?'L':'R'))
+        font=MAINFONT
+        bkcolor=WHITE
+        mode=(heads & (1<<(j*2+i))?M_CHECKED:0)
+      endc
+    enddo
+    y=y+20
+  enddo
+  hallon=control BUTTON
+    window=hmain
+    position=DX+22,y+13,50,18
+    text="全开"
+    help="选择所有测试头"
+    font=SMALLFONT
+  endc
+  halloff=control BUTTON
+    window=hmain
+    position=DX+79,y+13,50,18
+    text="全关"
+    help="取消选择所有测试头"
+    font=SMALLFONT
+  endc
+  hselect=control COMBOLIST
+    window=hmain
+    position=44,MAINY-28,48,240
+    help="选择要显示的测试头"
+  endc
+  disable hselect
+  hnext=control BUTTON
+    window=hmain
+    position=92,MAINY-28,24,24
+    name=">>"
+    help="下一个测试头"
+  endc
+  disable hnext
+  hzfeed=control BUTTON
+    window=hmain
+    position=124,MAINY-28,60,24
+    name="激活"
+    help="显示带反馈的Z运动"
+  endc
+  disable hzfeed
+  hznofeed=control BUTTON
+    window=hmain
+    position=187,MAINY-28,52,24
+    name="释放"
+    help="显示没有反馈的Z运动"
+  endc
+  disable hznofeed
+  hosc=control BUTTON
+    window=hmain
+    position=242,MAINY-28,52,24
+    name="振荡"
+    help="显示无反馈的Z振荡"
+  endc
+  disable hosc
+  hresp=control BUTTON
+    window=hmain
+    position=297,MAINY-28,53,24
+    name="响应"
+    help="显示带反馈的Z频率响应"
+  endc
+  disable hresp
+  hdata=control BUTTON
+    window=hmain
+    position=353,MAINY-28,52,24
+    name="数据"
+    help="以文本格式显示测试结果"
+  endc
+  disable hdata
+  hstart=control BUTTON
+    window=hmain
+    position=DX+8,MAINY-129,MAINX-DX-11,29
+    name="开始"
+    help="开始Z轴测试"
+  endc
+  if heads==0 disable hstart
+  hinterrupt=control BUTTON
+    window=hmain
+    position=DX+8,MAINY-97,MAINX-DX-11,29
+    name="中断"
+    help="按下可以中断Z轴测试"
+  endc
+  disable hinterrupt
+  hprotocol=control BUTTON
+    window=hmain
+    position=DX+8,MAINY-65,MAINX-DX-11,29
+    name="协议"
+    help="将测试结果保存到RTF文件"
+  endc
+  disable hprotocol
+  hquit=control BUTTON
+    window=hmain
+    position=DX+8,MAINY-33,MAINX-DX-11,29
+    name="关闭"
+    help="按下以关闭此脚本"
+  endc
+  // Preset coordinates used for test.
+  if $LAY.top[0]-$LAY.bottom[0]<=155000 then
+    isa5=0
+  else
+    isa5=1
+  endif
+  for i=0,i<256,i++ do
+    if isa5 then
+      zz[i]=i*175+1000                 // A5 tester
+    else
+      zz[i]=i*120+1000                 // A6 tester
+    endif
+  enddo
+  // Main loop.
+  while 1 do
+    for i=0,i<$LAY.nfing*2,i++ do
+      if Pressed(hhead[i]) then
+        if Status(hhead[i])==0 then
+          heads=heads & (~(1<<i))
+          if heads==0 disable hstart
+        else
+          if heads==0 enable hstart
+          heads=heads | (1<<i)
+        endif
+      endif
+    enddo
+    if Pressed(hallon) then
+      for i=0,i<$LAY.nfing*2,i++ do
+        change hhead[i] mode=M_CHECKED
+        heads=heads | (1<<i)
+        enable hstart
+      enddo
+    else if Pressed(halloff) then
+      for i=0,i<$LAY.nfing*2,i++ do
+        change hhead[i] mode=0
+      enddo
+      heads=0
+      disable hstart
+    else if Pressed(hstart) then
+      disable hstart
+      disable hprotocol
+      enable hinterrupt
+      Prepare()
+      clear hselect
+      firsthead=-1
+      for i=0,i<$LAY.nfing*2,i++ do
+        disable hhead[i]
+        if heads & (1<<i) then
+          add hselect text=format("%i%c",i/2,i & 1?'R':'L')
+          if firsthead<0 firsthead=i
+        endif
+      enddo
+      change hselect select=0
+      oldheads=heads
+      actvalid=0; passvalid=0; oscvalid=0
+      disable hallon
+      disable halloff
+      // Test Z hub with feedback.
+      change hprogress text="Z hub test with feedback"
+      Setdebug(1)
+      i=Testhub(zz,actdn,actup,actnoise,actcurr,0,450)
+      if i<0 break
+      if i>0 goto done
+      Memcpy(actdata,data,Sizeof(actdata))
+      actvalid=1
+      enable hselect
+      Showhub(firsthead,zz,actdn,actup,actnoise,actcurr,1)
+      enable hnext
+      enable hzfeed
+      enable hdata
+      enable hprotocol
+      // Test Z hub without feedback.
+      change hprogress text="Z hub test without feedback"
+      Setdebug(0)
+      i=Testhub(zz,passdn,passup,passnoise,passcurr,450,900)
+      if i<0 break
+      if i>0 goto done
+      Memcpy(passdata,data,Sizeof(actdata))
+      passvalid=1
+      Showhub(showhead,zz,passdn,passup,passnoise,passcurr,0)
+      enable hznofeed
+      // Test Z oscillations without feedback.
+      change hprogress text="Z oscillations without feedback"
+      change hprogress limits=0,0
+      i=Testosc(12000,20000,oscvibr,&oscdt,&oscdamp,osctextr,900,1000)
+      if i<0 break
+      if i>0 goto done
+      oscvalid=1
+      Showosc(showhead,oscvibr,oscdt,oscdamp,osctextr)
+      enable hosc
+      delay 1000
+      Showdata(showhead)
+    done:
+      Setdebug(1)
+      disable hinterrupt
+      enable hstart
+      for i=0,i<$LAY.nfing*2,i++ do
+        enable hhead[i]
+      enddo
+      enable hallon
+      enable halloff
+      change hprogress text=""
+      change hprogress limits=0,0
+    else if Pressed(hprotocol) then
+      Protocol()
+    else if Pressed(hquit) then
+      break
+    endif
+    Show()
+    wait
+  enddo
+  setini("Z test","Settings","%i",heads)
+end
+

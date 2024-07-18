@@ -1,0 +1,479 @@
+#include "ls.icl"
+#bitmap "ioexnew"<"ioexnew.bmp"
+#cmdbuff 6
+
+#define S_EXTINIT 0x1A
+#define S_INPORT  0x20
+#define S_OUTPORT 0x21
+
+#define BASE      0xE0
+
+handle hinfo,hioer,hsout,hrely,hwide,hloop,hexit
+int spsin,versin,lain[4]
+int siostat[2],siobk[4]
+int relays,spsout,nt
+char keyphrase[25]="A Quick Brown Fox Jumps\n"
+
+function int Stimulus()
+  char buf[128]
+  int i,t
+  relays=-1
+  if Status(hrely)!=0 then
+    relays=((nt & 0x03)<<4) ^ ((nt & 0x02)<<3)
+    buf[0]=S_OUTPORT
+    $uint2(buf+1)=0x000C+BASE
+    $uint2(buf+3)=relays
+    SYS.Send(5,buf,0)                  // Discard answer
+  endif
+  spsout=-1
+  if Status(hsout)!=0 then
+    if Status(hwide)==0 then
+      spsout=0x01<<(nt%16)
+    else
+      spsout=0xFFFF>>(16-(nt%16))
+      if (nt & 16)!=0 spsout=(~spsout) & 0xFFFF
+    endif
+    buf[0]=S_OUTPORT
+    $uint2(buf+1)=0x0002+BASE
+    $uint2(buf+3)=spsout
+    SYS.Send(5,buf,0)                  // Discard answer
+    $uint2(buf+1)=0x0003+BASE
+    $uint2(buf+3)=spsout>>8
+    SYS.Send(5,buf,0)                  // Discard answer
+    t=Time()
+    while Time()-t<50 do
+      wait                             // 50 ms pause after output
+    enddo
+  endif
+end
+
+// Returns 0 if test is OK or -1 if test was timeouted/interrupted.
+function int Test()
+  char buf[128]
+  int i,t,port,id[4]
+  nt++
+  buf[0]=S_INPORT
+  $uint2(buf+1)=0x0002+BASE
+  id[0]=SYS.Sendimm(0,3,buf)
+  $uint2(buf+1)=0x0003+BASE
+  id[1]=SYS.Sendimm(1,3,buf)
+  $uint2(buf+1)=0x0009+BASE
+  id[2]=SYS.Sendimm(2,3,buf)
+  t=Time()
+  while $A[0].length==0 || $A[1].length==0 || $A[2].length==0 do
+    if Time()-t>5000 || Pressed(hexit) then
+      SYS.Killsend(id[0])
+      SYS.Killsend(id[1])
+      SYS.Killsend(id[2])
+      return -1
+    endif
+    wait
+  enddo
+  spsin=($A[0].inport & 0xFF)+($A[1].inport & 0xFF)*256
+  versin=$A[2].inport & 0xFF
+  for i=0,i<4,i++                      // Read LATEST inputs
+    buf[0]=S_INPORT
+    $uint2(buf+1)=0x000C+BASE+i
+    id[i]=SYS.Sendimm(i,3,buf)
+  enddo
+  while $A[0].length==0||$A[1].length==0||$A[2].length==0||$A[3].length==0 do
+    if Time()-t>5000 || Pressed(hexit) then
+      SYS.Killsend(id[0])
+      SYS.Killsend(id[1])
+      SYS.Killsend(id[2])
+      SYS.Killsend(id[3])
+      return -1
+    endif
+    wait
+  enddo
+  for i=0,i<4,i++
+    lain[i]=$A[i].inport
+  enddo
+  for i=0,i<4,i++
+    port=0x0004+BASE+(i & 2)           // Serial channel
+    buf[0]=S_INPORT
+    $uint2(buf+1)=port                 // Select register 0
+    SYS.Send(3,buf,0)                  // Discard answer
+    buf[0]=S_OUTPORT
+    $uint2(buf+1)=port
+    $uint2(buf+3)=12                   // Select register 12
+    SYS.Send(5,buf,0)                  // Discard answer
+    $uint2(buf+3)=((i & 1)==0?0:0xFF)  // Write to register 12
+    SYS.Send(5,buf,0)                  // Discard answer
+    $uint2(buf+3)=12                   // Select register 12
+    SYS.Send(5,buf,0)                  // Discard answer
+    buf[0]=S_INPORT
+    id[i]=SYS.Sendimm(i,3,buf)         // Read from register 12
+  enddo
+  while $A[0].length==0||$A[1].length==0||$A[2].length==0||$A[3].length==0 do
+    if Time()-t>5000 || Pressed(hexit) then
+      SYS.Killsend(id[0])
+      SYS.Killsend(id[1])
+      SYS.Killsend(id[2])
+      SYS.Killsend(id[3])
+      return -1
+    endif
+    wait
+  enddo
+  for i=0,i<4,i++
+    siobk[i]=$A[i].inport
+  enddo
+  for i=0,i<2,i++
+    port=0x0004+BASE+i*2               // Serial channel
+    buf[0]=S_INPORT
+    $uint2(buf+1)=port                 // Select register 0
+    SYS.Send(3,buf,0)                  // Discard answer
+    id[i]=SYS.Sendimm(i,3,buf)         // Read from register 0
+  enddo
+  while $A[0].length==0 || $A[1].length==0 do
+    if Time()-t>5000 || Pressed(hexit) then
+      SYS.Killsend(id[0])
+      SYS.Killsend(id[1])
+      return -1
+    endif
+    wait
+  enddo
+  siostat[0]=$A[0].inport
+  siostat[1]=$A[1].inport
+  if Status(hloop)==1 then
+    for i=0,i<2,i++
+      buf[0]=S_EXTINIT
+      buf[1]=i+0x08                    // Activate loopback mode
+      buf[2]=0xFB                      // 9600 baud, 8 bit, even parity
+      buf[3]=0                         // No timeout
+      $long(buf+4)=0; $long(buf+8)=0;
+      buf[5]='\n';                     // End-of-answer byte
+      $uint2(buf+12)=24                // Length of command
+      Memcpy(buf+14,keyphrase,24)
+      id[i]=SYS.Sendimm(i+4,38,buf)    // Send loopback test command
+    enddo
+    while $A[4].length==0 || $A[5].length==0 do
+      if Time()-t>5000 || Pressed(hexit) then
+        SYS.Killsend(id[0])
+        SYS.Killsend(id[1])
+        return -1
+      endif
+      wait
+    enddo
+  else
+    $A[4].length=0
+    $A[5].length=0
+  endif
+  return 0
+end
+
+function int Display()
+  char s[128]
+  int i,j,k,err
+  float f
+  clear hinfo
+  draw window=hinfo color=BLACK font=TIMESFONT
+  draw at 10,20 text=                                                          \
+    format("I/O extender test v1.1 - Base address 0x%02X, number of tests %i", \
+    BASE,nt)
+  draw at 10,40 text="I/O card presence bits"
+  if (versin & 0x40)!=0 then
+    add hioer text=format("Presence bits %i%i, expected 00 or 10",             \
+      (versin & 0x80)!=0,(versin & 0x40)!=0)
+    draw color=LIGHTRED
+  endif
+  draw at 175,40 text=format("%i%i",(versin & 0x80)!=0,(versin & 0x40)!=0)
+  draw color=BLACK text=" (expected: 00 or 10)"
+  draw at 10,55 text="EXTNR bit (JP5)"
+  draw at 175,55 text=format("%i",(versin & 0x20)!=0)
+  draw at 10,78 text="SPS version"
+  if (versin & 0x1F)==0x1F then
+    add hioer text="Wrong SPS version 0x1F"
+    draw color=LIGHTRED
+  endif
+  draw at 175,78 text=format("%i  (0x%02X)",versin & 0x1F,versin & 0x1F)
+  draw color=BLACK
+  draw at 10,93 text="SPS inputs"
+  if Status(hsout)!=0 && spsin!=spsout then
+    add hioer text=format("Outputs %04X, inputs %04X",spsout,spsin)
+    draw color=LIGHTRED
+  endif
+  j=0
+  for i=15,i>=0,i--
+    s[j]=((spsin & (1<<i))==0?'0':'1'); j++
+    if ((i & 0x03)==0 && i!=0) then s[j]=' '; j++; endif
+  enddo
+  s[j]='\0'
+  draw at 175,93 text=format("0x%04X",spsin)
+  draw at 225,93 text=format("(%s)",s)
+  draw color=BLACK
+  draw at 10,116 text="LATEST ports (hex)"
+  draw at 175,116 text="Status= "
+  if lain[0]==0xFF then
+    add hioer text="Wrong LATEST status bits 0xFF"
+    draw color=LIGHTRED
+  endif
+  draw text=format("%02X",lain[0]) color=BLACK
+  draw text=format("  Data= %02X %02X %02X",lain[1],lain[2],lain[3])
+  draw at 10,131 text="LATEST status"
+  i=sprintf(s,"%s",(lain[0] & 0x01)==0?"Run":"NoRun")
+  i=i+sprintf(s+i,"%s",(lain[0] & 0x02)==0?" Open":"")
+  i=i+sprintf(s+i,"%s",(lain[0] & 0x04)==0?" Good":"")
+  i=i+sprintf(s+i,"%s",(lain[0] & 0x08)==0?" Bad":"")
+  i=i+sprintf(s+i,"%s",(lain[0] & 0x10)==0?" BaseOK":" NoBase")
+  i=i+sprintf(s+i,"%s",(lain[0] & 0x20)==0?" CalOK":" NoCal")
+  draw at 175,131 text=s
+  err=0;
+  i=(lain[3]>>4) & 0x0F; f=i*10000.0; if i>9 err=1
+  i=lain[3] & 0x0F; f=f+i*1000.0; if i>9 err=1
+  i=(lain[2]>>4) & 0x0F; f=f+i*100.0; if i>9 err=1
+  i=lain[2] & 0x0F; f=f+i*10.0; if i>9 err=1
+  i=(lain[1]>>4) & 0x0F; f=f+i; if i>9 err=1
+  i=lain[1] & 0x0F; f=f+i*0.1; if i>9 err=1
+  draw at 10,146 text="LATEST reading"
+  if err==0 then
+    draw at 175,146 text=format("%.1f",f)
+  else
+    draw at 175,146 color=LIGHTRED text="(Invalid)" color=BLACK
+  endif
+  draw at 10,169 text="Serial 0 status"
+  draw at 175,169 text=format("0x%02X (CTS=%i)",                               \
+    siostat[0],(siostat[0] & 0x20)!=0)
+  draw at 10,184 text="Serial 0 readback (hex)"
+  if siobk[0]!=0 then
+    add hioer text=format("Serial 0: readback 0x%02X, expected 0x00",siobk[0])
+    draw color=LIGHTRED
+  endif
+  draw at 175,184 text=format("%02X",siobk[0]) color=BLACK
+  draw text=" (expected 00),  "
+  if siobk[1]!=0xFF then
+    add hioer text=format("Serial 0: readback 0x%02X, expected 0xFF",siobk[1])
+    draw color=LIGHTRED
+  endif
+  draw text=format("%02X",siobk[1]) color=BLACK
+  draw text=" (expected FF)"
+  draw at 10,199 text="Serial 0 loopback phrase"
+  if $A[4].length==0 then
+    draw at 175,199 color=DARKGRAY text="(Not requested)" color=BLACK
+  else if $A[4].answer!=S_EXTINIT then
+    add hioer text="Serial 0: general loopback error"
+    draw at 175,199 color=LIGHTRED text="(Error)" color=BLACK
+  else if ($uint2($A[4]+5) & 0x2)!=0 then
+    add hioer text="Serial 0: timeout loopback error"
+    draw at 175,199 color=LIGHTRED text="(Timeouted)" color=BLACK
+  else if ($uint2($A[4]+5) & 0x8000)!=0 then
+    add hioer text="Serial 0: card not recognized"
+    draw at 175,199 color=LIGHTRED text="(Card not recognized)" color=BLACK
+  else
+    k=0; j=$uint2($A[4]+7)
+    if j>128 j=128                     // Avoid indexing outside array
+    for i=0,i<j-1,i++
+      s[i]=$A[4].rawdata[9+i]
+    enddo
+    s[i]='\0'
+    if j!=24 then
+      k=1; draw color=LIGHTRED; endif
+    draw at 175,199 text=format("L=%i",j) color=BLACK
+    if Memcmp(s,keyphrase,23)!=0 then
+      k=1; draw color=LIGHTRED; endif
+    draw text=format(" '%s'",s) color=BLACK
+    if k!=0 add hioer text=format("Loopback 0: L=%02i '%s'",j,s)
+  endif
+  draw at 10,222 text="Serial 1 status"
+  draw at 175,222 text=format("0x%02X (CTS=%i)",                               \
+    siostat[1],(siostat[1] & 0x20)!=0)
+  draw at 10,237 text="Serial 1 readback (hex)"
+  if siobk[2]!=0 then
+    add hioer text=format("Serial 1: readback 0x%02X, expected 0x00",siobk[2])
+    draw color=LIGHTRED
+  endif
+  draw at 175,237 text=format("%02X",siobk[2]) color=BLACK
+  draw text=" (expected 00),  "
+  if siobk[3]!=0xFF then
+    add hioer text=format("Serial 1: readback 0x%02X, expected 0xFF",siobk[3])
+    draw color=LIGHTRED
+  endif
+  draw text=format("%02X",siobk[3]) color=BLACK
+  draw text=" (expected FF)"
+  draw at 10,252 text="Serial 1 loopback phrase"
+  if $A[5].length==0 then
+    draw at 175,252 color=DARKGRAY text="(Not requested)" color=BLACK
+  else if $A[5].answer!=S_EXTINIT then
+    add hioer text="Serial 1: general loopback error"
+    draw at 175,252 color=LIGHTRED text="(Error)" color=BLACK
+  else if ($uint2($A[5]+5) & 0x2)!=0 then
+    add hioer text="Serial 1: timeout loopback error"
+    draw at 175,252 color=LIGHTRED text="(Timeouted)" color=BLACK
+  else if ($uint2($A[5]+5) & 0x8000)!=0 then
+    add hioer text="Serial 1: card not recognized"
+    draw at 175,252 color=LIGHTRED text="(Card not recognized)" color=BLACK
+  else
+    k=0; j=$uint2($A[5]+7)
+    if j>128 j=128                     // Avoid indexing outside array
+    for i=0,i<j-1,i++
+      s[i]=$A[5].rawdata[9+i]
+    enddo
+    s[i]='\0'
+    if j!=24 then
+      k=1; draw color=LIGHTRED; endif
+    draw at 175,252 text=format("L=%i",j) color=BLACK
+    if Memcmp(s,keyphrase,23)!=0 then
+      k=1; draw color=LIGHTRED; endif
+    draw text=format(" '%s'",s) color=BLACK
+    if k!=0 add hioer text=format("Loopback 1: L=%02i '%s'",j,s)
+  endif
+  if spsout>=0 then
+    j=0
+    for i=15,i>=0,i--
+      s[j]=((spsout & (1<<i))==0?'0':'1'); j++
+      if ((i & 0x03)==0 && i!=0) then s[j]=' '; j++; endif
+    enddo
+    s[j]='\0'
+    draw at 10,277 text="SPS outputs"
+    draw at 175,277 text=format("0x%04X",spsout)
+    draw at 225,277 text=format("(%s)",s)
+  endif
+  if relays>=0 then
+    draw at 10,292 text="EXTERN & LATEST relays"
+    draw at 175,292 text=format("0x%02X  (LArly %i, EXTrly %i)",               \
+    relays,(relays & 0x10)!=0,(relays & 0x20)!=0)
+  endif
+  draw show
+end
+
+function int main()
+  handle hmain,hrept,hslow,htest,hclea
+  int p0,p1,p2,p3,p4,p5,run,firstloop
+  hmain=control WINDOW
+    window=NULL
+    position=10,10,510,380
+    name="I/O扩张卡自检"
+    help=" "
+    bkcolor=WHITEMAGENTA
+    size=128
+  endc
+  p0=0; p1=0; p2=0; p3=0; p4=0
+  getini("Debug","I/O extender self-test","%i,%i,%i,%i,%i,%i",                 \
+    &p0,&p1,&p2,&p3,&p4,&p5)
+  hinfo=control GRAPH                  // To avoid blinking
+    window=hmain
+    position=6,6,403,298
+    help="新I/O扩展卡的常规视图(版本位10)"
+    bkcolor=WHITE
+  endc
+  draw window=hinfo at 20,20 bitmap=0,0,0,"ioexnew"
+  draw show
+  draw window=hmain color=MAGENTA
+  hioer=control LIST
+    window=hmain
+    position=5,310,405,66
+    help="最近检测到的一些错误的列表"
+    mode=M_VSCROLL
+    size=16384
+  endc
+  hrely=control CUSTOMBOX
+    window=hmain
+    position=415,21,90,24
+    name="继电器"
+    help="重新切换LA测试和EXTERN继电器"
+    mode=(p0==0?0:M_CHECKED)
+  endc
+  hsout=control CUSTOMBOX
+    window=hmain
+    position=415,46,90,24
+    name="SPS输出"
+    help="测试SPS输出"
+    mode=(p1==0?0:M_CHECKED)
+  endc
+  hwide=control CUSTOMBOX
+    window=hmain
+    position=415,71,90,24
+    name="多路卡"
+    help="同时激活多个SPS输出"
+    mode=(p2==0?0:M_CHECKED)
+  endc
+  hloop=control CUSTOMBOX
+    window=hmain
+    position=415,106,90,24
+    name="环回"
+    help="使用环回功能测试串行I/O"
+    mode=(p3==0?0:M_CHECKED)
+  endc
+  hrept=control CUSTOMBOX
+    window=hmain
+    position=415,131,90,24
+    name="重复"
+    help="连续重复测试"
+    mode=(p4==0?0:M_CHECKED)
+  endc
+  hslow=control CUSTOMBOX
+    window=hmain
+    position=415,156,90,24
+    name="慢"
+    help="选中此项可在测试之间插入1秒暂停"
+    mode=(p5==0?0:M_CHECKED)
+  endc
+  htest=control BUTTON
+    window=hmain
+    position=415,292,90,24
+    name="测试"
+    help="开始自检"
+  endc
+  hclea=control BUTTON
+    window=hmain
+    position=415,322,90,24
+    name="清除"
+    help="清除错误和测试计数"
+  endc
+  hexit=control BUTTON
+    window=hmain
+    position=415,352,90,24
+    name="关闭"
+    help="关闭此窗口或中断等待的命令"
+  endc
+  draw show
+  run=0; nt=0; firstloop=1
+  while 1 do
+    if firstloop!=0 || Pressed(hsout) then
+      if Status(hsout)==0 then
+        disable hwide
+      else
+        enable hwide
+      endif
+    endif
+    if firstloop!=0 || Pressed(hrept) then
+      if Status(hrept)==0 then
+        disable hslow
+      else
+        enable hslow
+      endif
+    endif
+    if Pressed(htest) then
+      change hinfo help="自检结果"
+      run=1
+    else if Pressed(hclea) then
+      draw window=hinfo clear
+      if Status(hrept)==0 then
+        draw at 20,20 bitmap=0,0,0,"ioexnew"
+      endif
+      draw show
+      clear hioer
+      nt=0
+    else if Pressed(hexit) then
+      break
+    endif
+    if run!=0 then
+      Stimulus()
+      if Test()==0 then
+        if Status(hslow)!=0 delay 1000
+        Display()
+      else
+        add hioer text="Interrupt or I/O timeout!"
+        run=0                          // Interrupt test sequence on error
+      endif
+      if Status(hrept)==0 run=0        // Single test was requested
+    endif
+    firstloop=0
+    wait
+  enddo
+  setini("Debug","I/O extender self-test","%i,%i,%i,%i,%i,%i",                 \
+    Status(hrely),Status(hsout),Status(hwide),Status(hloop),                   \
+    Status(hrept),Status(hslow))
+  destroy hmain
+end
+

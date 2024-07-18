@@ -1,0 +1,731 @@
+#include "ls.icl"                  // Standard functions
+#include "or.icl"                // A2 command names
+#include "pa.icl"                  // Support for files in rich text format
+
+#define VERSION        "1.00"          // Version of this script
+
+external int SERV.Decodeanswer(char *answer,char *text,char *extra,int mask)
+external int SERV.Convertfield(char *answer,float *zc,float *zr)
+external int SERV.Convertfastc(char *answer,float *zc,float *zr)
+
+// Modified and extended emurecord structure, includes fields used internally
+// by this script and reuses some existing in a different way.
+typedef struct t_emurecord
+  int            timestamp;            // Timestamp, milliseconds
+  int            panel;                // Panel ID
+  int            n;                    // Number of participating heads
+  int            totalrec;             // Total number of emulation records
+  $float4        c;                    // Cosine capacity component, pF
+  $float4        z;                    // Sine capacity component, pF
+  $int2          nfield;               // Total number of field measurements
+  $int2          flags;                // Field/fastc flags
+  int            index;                // Index in emulation data
+  int            head[16];             // Heads
+  int            pad[16];              // Pad IDs
+  int            net[16];              // Net IDs
+  int            x[16];                // X pad coordinates, um
+  int            y[16];                // Y pad coordinates, um
+  int            r[16];                // Pad radii, um
+  $int2          fsin[16];             // Sine field components
+  $int2          fcos[16];             // Cosine field components
+  $float4        xdraw;                // X plot coordinate, pixels
+  $float4        ydraw;                // Y plot coordinate, pixels
+  int            heads;                // Mask for measurement finger
+  int            ants;                 // Mask for used antennae
+  int            panels;               // Mask for panel
+  int            selected;             // Temporary variable
+ends
+
+#define DX             820             // Width of main window
+#define DY             660             // height of main window
+#define PX             (DX-120)        // Visible width of plot window
+#define PY             510             // Visible height of plot window
+#define VX             8000            // Virtual X plot size
+#define VY             8000            // Virtual Y plot size
+
+#define NZOOM          5
+#define MAXZOOM        20.0
+#define NPANELS        11              // Max supported number of panels
+
+handle           hmain                 // Main window
+handle           htask                 // Name of task
+handle           hname                 // Name of emulation file
+handle           hbrowse               // Load different emulation file
+handle           hcontents             // View contents of emulation file
+handle           hplot                 // X-Y display
+handle           hinfo                 // Window with status and messages
+handle           hdata                 // Window with pad-related data
+handle           hquit                 // Button "Close"
+handle           hsel                  // Number of selected points
+handle           hzoom[NZOOM]          // Selected zoom factor
+struct t_emurecord *data               // Data buffer
+int              ndata                 // Actual number of data points
+int              maxdata               // Maximal number of data points
+int              selected              // Last selected (pointed) data point
+float            gridzerox             // Position of X zero, pixel
+float            gridzeroy             // Position of Y zero, pixel
+float            gridscalex            // X scale, pixel/unit
+float            gridscaley            // Y scale, pixel/unit
+char             gridnamex[64]         // Name of X axis
+char             gridnamey[64]         // Name of Y axis
+
+int              zoom                  // Zoom index
+float            zoomfact[NZOOM] = { 1.0, 2.0, 5.0, 10.0, 20.0 }
+
+int              nheads                // Total number of heads
+int              heads                 // List of selected measurement heads
+int              ants                  // List of selected antennas
+int              flags                 // List of selected flags
+int              panels;               // List of selected panels
+
+// Allocates memory and reads field data from Test Player. Returns 0 on success
+// and -1 on error.
+function int Readdata()
+  int i,j,n
+  float c,r,fsin,fcos,fi,sinfi,cosfi
+  char s[260],drv[5],path[260],name[260],ext[260],answer[1024]
+  struct t_emurecord emu
+  // Delete previous field/capacity data.
+  free(data)
+  maxdata=0
+  ndata=0
+  selected=-1
+  // Update file names.
+  SYS.Boardname(s)
+  Fnsplit(s,drv,path,name,ext)
+  change htask text=format(" %s",name)
+  SYS.Emuname(s)
+  Fnsplit(s,drv,path,name,ext)
+  Fnmerge(s,"","",name,ext)
+  change hname text=format(" %s",s)
+  // Estimate size of data and allocate data buffer.
+  j=SYS.Getemurec(0,emu,answer)
+  if j!=0 then                 // No emulation data
+    change hinfo color=RED
+    add hinfo text=format("No emulation data!")
+    return -1
+  endif
+  maxdata=emu.totalrec
+  if maxdata<=0 return -1              // Severe error
+  if alloc(data,maxdata*Sizeof(emu))==0 then
+    maxdata=0
+    change hinfo color=RED
+    add hinfo text=format("Unable to allocate data buffer (%i bytes)!",        \
+      maxdata*Sizeof(emu))
+    return -1
+  endif
+  // Read records and extract those with field or fastc.
+  for i=0,i<maxdata,i++ do
+    if SYS.Getemurec(i,data[ndata],answer)!=0 continue
+    if answer[4]!=S_MOVE continue
+    if answer[5]==S_FIELD then
+      SERV.Convertfield(answer,&c,&r)
+      fi=Atan2($int2(answer+24),$int2(answer+26))
+      sinfi=Sin(fi)
+      cosfi=Cos(fi)
+      n=($uint2(answer)-28)/4          // Number of field measurements
+      for j=0,j<n,j++ do
+        fsin=$int2(answer+28+j*4)      // Rotate field measurement
+        fcos=$int2(answer+30+j*4)
+        data[ndata].fsin[j]=-(fsin*sinfi+fcos*cosfi)
+        data[ndata].fcos[j]=fsin*cosfi-fcos*sinfi
+      enddo
+      data[ndata].nfield=n
+    else if answer[5]==S_FASTC then
+      SERV.Convertfastc(answer,&c,&r)
+      data[ndata].nfield=0
+    else
+      continue
+    endif
+    data[ndata].c=c
+    data[ndata].z=r
+    data[ndata].flags=$uint2(answer+6)
+    data[ndata].index=i
+    data[ndata].heads=1<<(data[ndata].head[0])
+    data[ndata].ants=0
+    for j=1,j<data[ndata].n,j++ do
+      data[ndata].ants=data[ndata].ants | (1<<(data[ndata].head[j]))
+    enddo
+    data[ndata].panels=1<<(data[ndata].panel)
+    ndata++
+  enddo
+  change hinfo color=GREEN
+  add hinfo text=format("Total of %i field/capacity answers read",ndata)
+  return 0                             // Success
+end
+
+// Flushes data generated by plot function to screen, taking into acccount
+// requested highlighting.
+function int Displaydata(int defpos)
+  int i,selected
+  float x,rx,multx,dx,y,ry,multy,dy,d,t
+  draw window=hplot bkcolor=WHITE clear
+  selected=0
+  // Select X scale so that distance between grid lines is approximately 50
+  // pixels.
+  rx=100/gridscalex
+  for multx=1.0e-15,1,multx=multx*1000.0 do
+    if rx<multx*1000.0 break
+  enddo
+  rx=rx/multx
+  if rx<2.0 then rx=1.0;
+  else if rx<5.0 then rx=2.0;
+  else if rx<10.0 then rx=5.0;
+  else if rx<20.0 then rx=10.0;
+  else if rx<50.0 then rx=20.0;
+  else if rx<100.0 then rx=50.0;
+  else if rx<200.0 then rx=100.0;
+  else if rx<500.0 then rx=200.0;
+  else rx=500.0; endif
+  // Select Y scale so that distance between grid lines is approximately 50
+  // pixels.
+  ry=100/gridscaley
+  for multy=1.0e-15,1,multy=multy*1000.0 do
+    if ry<multy*1000.0 break
+  enddo
+  ry=ry/multy
+  if ry<2.0 then ry=1.0;
+  else if ry<5.0 then ry=2.0;
+  else if ry<10.0 then ry=5.0;
+  else if ry<20.0 then ry=10.0;
+  else if ry<50.0 then ry=20.0;
+  else if ry<100.0 then ry=50.0;
+  else if ry<200.0 then ry=100.0;
+  else if ry<500.0 then ry=200.0;
+  else ry=500.0; endif
+  // Draw grid.
+  draw bkcolor=WHITE font=SMALLFONT
+  i=gridzerox/(gridscalex*rx*multx)
+  dx=i*rx*multx
+  i=gridzeroy/(gridscaley*ry*multy)
+  dy=i*ry*multy
+  draw color=PINK
+  for d=dx-rx*multx,d*gridscalex-gridzerox<=VX,d=d+rx*multx do
+    x=d*gridscalex-gridzerox
+    draw at x,0 to x,VY
+  enddo
+  for d=dy+ry*multy,gridzeroy-d*gridscaley<=VY,d=d-ry*multy do
+    y=gridzeroy-d*gridscaley
+    draw at 0,y to VX,y
+  enddo
+  for d=dx-rx*multx,d*gridscalex-gridzerox<=VX,d=d+rx*multx do
+    x=d*gridscalex-gridzerox
+    if Abs(d*gridscalex)<1 draw color=CYAN at x,0 to x,VY
+    draw mode=M_CENTERED
+    for t=dy,gridzeroy-t*gridscaley<=VY,t=t-4*ry*multy do
+      y=gridzeroy-t*gridscaley
+//      draw color=WHITE at x-20,y-15 fillrect x+21,y-4
+      draw color=DARKGRAY at x+1,y-3 text=format("%.0f",d/multx)
+    enddo
+  enddo
+  for d=dy+ry*multy,gridzeroy-d*gridscaley<=VY,d=d-ry*multy do
+    y=gridzeroy-d*gridscaley
+    if Abs(d*gridscaley)<1 draw color=CYAN at 0,y to VX,y
+    draw mode=M_RIGHT
+    for t=dx,t*gridscalex-gridzerox<=VX,t=t+4*rx*multx do
+      x=t*gridscalex-gridzerox
+//      draw color=WHITE at x-35,y-5 fillrect x-2,y+6
+      draw color=DARKGRAY at x-2,y+7 text=format("%.0f",d/multy)
+    enddo
+  enddo
+  // Go through data points and check for selections.
+  for i=0,i<ndata,i++ do
+    if (data[i].heads & heads) ||                                              \
+      (data[i].ants & ants) ||                                                 \
+      (data[i].flags & flags) ||                                               \
+      (data[i].panels & panels)                                                \
+    then
+      data[i].selected=1               // Point selected
+      selected=selected+1
+    else
+      data[i].selected=0               // No selection
+    endif
+  enddo
+  // Draw non-selected points.
+  if selected then
+    draw color=GRAY bkcolor=GRAY       // Draw non-selected points gray
+  else
+    draw color=BLACK bkcolor=BLACK     // Draw non-selected points black
+  endif
+  for i=0,i<ndata,i++ do
+    if data[i].selected==0 then
+      draw at data[i].xdraw,data[i].ydraw fillellipse 2,2
+    endif
+  enddo
+  // Now draw selected points so that they are better visible.
+  draw color=LIGHTRED bkcolor=LIGHTRED
+  for i=0,i<ndata,i++ do
+    if data[i].selected!=0 then
+      draw at data[i].xdraw,data[i].ydraw fillellipse 2,2
+    endif
+  enddo
+  if selected==0 then
+    change hsel color=DARKGRAY
+    change hsel text="0"
+  else
+    change hsel color=LIGHTRED
+    change hsel text=format("%i",selected)
+  endif
+  if defpos change hplot offset=(VX-PX)/2,(VY-PY)/2
+  draw show
+end
+
+function int Xyplot(int defpos)
+  int i
+  float x,y,cx,cy,ymin,ymax
+  cx=$LAY.xoffset
+  if cx==0.0 cx=300000.0
+  gridscalex=$LAY.rightlimit-$LAY.leftlimit
+  if gridscalex<=0.0 gridscalex=600000.0
+  gridscalex=(zoomfact[zoom]/MAXZOOM)*VX/gridscalex
+  cx=cx-VX/2.0/gridscalex
+  ymin=$LAY.bottom[0]
+  ymax=$LAY.top[0]
+  for i=1,i<$LAY.nfing,i++ do
+    ymin=Min(ymin,$LAY.bottom[i])
+    ymax=Max(ymax,$LAY.top[i])
+  enddo
+  cy=(ymin+ymax)/2.0
+  if cy==0.0 cy=310000.0
+  gridscaley=ymax-ymin
+  if gridscaley<=0.0 gridscaley=620000.0
+  gridscaley=(zoomfact[zoom]/MAXZOOM)*VY/gridscaley
+  cy=cy+VY/2.0/gridscaley
+  gridzerox=cx*gridscalex
+  gridzeroy=cy*gridscaley
+  Strcpy(gridnamex,"X")
+  Strcpy(gridnamey,"Y")
+  for i=0,i<ndata,i++ do
+    data[i].xdraw=data[i].x[0]*gridscalex-gridzerox
+    data[i].ydraw=gridzeroy-data[i].y[0]*gridscaley
+  enddo
+  Displaydata(defpos)
+end
+
+function int Sumcplot(int defpos)
+  int i,j
+  float r
+  gridzerox=(PX-VX)/2.0-PX/8
+  gridzeroy=(VY+PY)/2.0-PY/8
+  // Assume max capacity 300 pF and max sinsum of 32000 bits
+  gridscalex=(zoomfact[zoom]/MAXZOOM)*VX/300.0
+  gridscaley=(zoomfact[zoom]/MAXZOOM)*VY/32000.0
+  Strcpy(gridnamex,"C")
+  Strcpy(gridnamey,"Sinsum")
+  for i=0,i<ndata,i++ do
+    data[i].xdraw=data[i].c*gridscalex-gridzerox
+    r=0.0
+    for j=0,j<data[i].nfield,j++ do
+      r=r+data[i].fsin[j]
+    enddo
+    data[i].ydraw=gridzeroy-r*gridscaley
+  enddo
+  Displaydata(defpos)
+end
+
+function int Zcplot(int defpos)
+  int i
+  float r
+  gridzerox=(PX-VX)/2.0-PX/8
+  gridzeroy=(VY+PY)/2.0-PY/8
+  // Assume max capacity 300 pF
+  gridscalex=(zoomfact[zoom]/MAXZOOM)*VX/300.0
+  gridscaley=(zoomfact[zoom]/MAXZOOM)*VY/300.0
+  Strcpy(gridnamex,"C")
+  Strcpy(gridnamey,"Z")
+  for i=0,i<ndata,i++ do
+    data[i].xdraw=data[i].c*gridscalex-gridzerox
+    data[i].ydraw=gridzeroy-data[i].z*gridscaley
+  enddo
+  Displaydata(defpos)
+end
+
+function int Cossinplot(int defpos)
+  int i
+  float r
+  gridzerox=(PX-VX)/2.0-PX/8
+  gridzeroy=(VY+PY)/2.0-PY/8
+  // Assume max field 32000 bits
+  gridscalex=(zoomfact[zoom]/MAXZOOM)*VX/32000.0
+  gridscaley=(zoomfact[zoom]/MAXZOOM)*VY/32000.0
+  Strcpy(gridnamex,"Sin")
+  Strcpy(gridnamey,"Cos")
+  for i=0,i<ndata,i++ do
+    data[i].xdraw=data[i].fsin[0]*gridscalex-gridzerox
+    data[i].ydraw=gridzeroy-data[i].fcos[0]*gridscaley
+  enddo
+  Displaydata(defpos)
+end
+
+function int Commentpad()
+  int i,x,y,z,bestdata,isselected
+  float mousex,mousey,r,bestr
+  char answer[1024],s[256],extra[4096]
+  struct t_emurecord emu
+  if Mousexy(hplot,&x,&y,&z)!=0 then
+    mousex=x+Limit2(hplot)
+    mousey=y+Limit3(hplot)
+    bestr=1.0e33
+    bestdata=-1
+    for i=0,i<ndata,i++ do
+      r=(mousex-data[i].xdraw)*(mousex-data[i].xdraw)
+      r=r+(mousey-data[i].ydraw)*(mousey-data[i].ydraw)
+      if r<=bestr then
+        if r<bestr || isselected==0 then
+          bestr=r
+          bestdata=i
+          isselected=data[i].selected
+        endif
+      endif
+    enddo
+    if bestdata>=0 && bestdata!=selected && bestr<1000 then
+      clear hdata
+      add hdata text=format(" Panel %2i   pad %6i   net %5i\n",                \
+        data[bestdata].panel,data[bestdata].pad[0],data[bestdata].net[0])
+      add hdata text=format(" Meas head %2i  at (%.2f,%.2f) \n ",              \
+        data[bestdata].head[0],                                                \
+        data[bestdata].x[0]/1000.0,data[bestdata].y[0]/1000.0)
+      if data[bestdata].n>1 then
+        add hdata text=format(" Antennas %2i",data[bestdata].head[1])
+        for i=2,i<data[bestdata].n,i++ do
+          add hdata text=format(", %2i",data[bestdata].head[i])
+        enddo
+      endif
+      add hdata text="\n "
+      if SYS.Getemurec(data[bestdata].index,emu,answer)==0 then
+        SERV.Decodeanswer(answer,s,extra,0xFFFFFFFF)
+        add hdata text=s
+      endif
+      for i=0,i<data[bestdata].nfield,i++ do
+        add hdata text=format("\n   Field %i    Sin=%6.0f Cos=%6.0f",          \
+        i+1,data[bestdata].fsin[i],data[bestdata].fcos[i])
+      enddo
+      selected=bestdata
+    endif
+  endif
+end
+
+function int main()
+  int i,j,y,bottom
+  int drawtype,redraw,defpos
+  char s[512],name[260],drv[5],path[260],file[260],ext[260]
+  handle hzoom[NZOOM]
+  handle hheads[20],hants[20],hpanels[NPANELS]
+  handle hbad,hoverload,hnocont,hshort,hcdc
+  handle hxyplot,hsumcplot,hzcplot,hcossin
+  hmain=control WINDOW
+    window=NULL
+    position=5,5,DX,DY
+    name=format("电场查看 v%s",VERSION)
+    bkcolor=PINK
+    help=" "
+    size=512
+  endc
+  draw window=hmain font=INFOFONT color=BLACK
+  draw at 5,24 text="Task:"
+  draw at PX/2+10,24 text="Data:"
+  draw at DX-110,144 text="Sel:"
+  draw show
+  htask=control TEXT
+    window=hmain
+    position=45,5,PX/2-43,21
+    help="PCB名称"
+    mode=M_BORDER
+    bkcolor=WHITE
+    font=MEDIUMFONT
+  endc
+  hname=control TEXT
+    window=hmain
+    position=PX/2+47,5,PX/2-42,21
+    help="带有仿真数据的文件名"
+    mode=M_BORDER
+    bkcolor=WHITE
+    font=MEDIUMFONT
+  endc
+  hbrowse=control BUTTON
+    window=hmain
+    position=DX-110,5,50,20
+    name="浏览"
+    help="加载带有仿真数据的另一个文件"
+    font=SMALLFONT
+  endc
+  hcontents=control BUTTON
+    window=hmain
+    position=DX-55,5,50,20
+    name="目录"
+    help="按下打开仿真数据浏览器"
+    font=SMALLFONT
+  endc
+  hplot=control CHILD
+    window=hmain
+    position=6,31,PX-2,PY-2
+    help="X-Y 显示"
+    limits=VX,VY
+    mode=M_HSCROLL|M_VSCROLL
+    size=1000000
+  endc
+  hinfo=control LIST
+    window=hmain
+    position=5,PY+35,PX/2-3,DY-PY-40
+    help="信息"
+    mode=M_BORDER|M_VSCROLL
+    bkcolor=WHITE
+    font=SMALLFONT
+  endc
+  hdata=control TEXT
+    window=hmain
+    position=PX/2+7,PY+35,PX/2-2,DY-PY-40
+    help="测量相关数据"
+    mode=M_BORDER
+    bkcolor=WHITE
+    font=SMALLFONT
+  endc
+  add hinfo text=format("Field browser v%s",VERSION)
+  zoom=1                               // Default values
+  nheads=$LAY.nfing*2
+  heads=0
+  ants=0
+  flags=0
+  panels=0
+  drawtype=0
+  for i=0,i<NZOOM,i++ do
+    hzoom[i]=control BUTTON
+      window=hmain
+      position=DX-110,30+18*i,50,16
+      text=format("x %i",zoomfact[i])
+      help=format("按下可设置缩放系数x%i",zoomfact[i])
+      font=SMALLFONT
+      color=(i==zoom?YELLOW:BLACK)
+      bkcolor=(i==zoom?LIGHTRED:GRAY)
+    endc
+  enddo
+  hsel=control TEXT
+    window=hmain
+    position=DX-75,125,70,21
+    help="所选点数"
+    font=MEDIUMFONT
+    mode=M_BORDER|M_CENTERED
+    bkcolor=WHITE
+  endc
+  for i=0,i<nheads,i++ do
+    bottom=($LAY.side[i/2]==0?0:5)
+    hheads[i]=control BUTTON
+      window=hmain
+      position=DX-110,150+18*i+bottom,30,16
+      text=format("H %i",i)
+      help=format("按下以突出显示由头部%i进行的测量",i)
+      font=SMALLFONT
+      color=(heads & (1<<i)?YELLOW:BLACK)
+      bkcolor=(heads & (1<<i)?LIGHTRED:GRAY)
+    endc
+    hants[i]=control BUTTON
+      window=hmain
+      position=DX-75,150+18*i+bottom,30,16
+      text=format("A %i",i)
+      help=format("按下以突出显示使用天线%i进行的测量",i)
+      font=SMALLFONT
+      color=(ants & (1<<i)?YELLOW:BLACK)
+      bkcolor=(ants & (1<<i)?LIGHTRED:GRAY)
+    endc
+  enddo
+  hbad=control BUTTON
+    window=hmain
+    position=DX-40,150+18*0,35,16
+    text="Bad"
+    help="按下高亮错误的测量值"
+    font=SMALLFONT
+    color=(flags & FM_BAD?YELLOW:BLACK)
+    bkcolor=(flags & FM_BAD?LIGHTRED:GRAY)
+  endc
+  hoverload=control BUTTON
+    window=hmain
+    position=DX-40,150+18*1,35,16
+    text="Ovld"
+    help="按下高亮显示带有过载多路卡的测量"
+    font=SMALLFONT
+    color=(flags & FM_OVERLOAD?YELLOW:BLACK)
+    bkcolor=(flags & FM_OVERLOAD?LIGHTRED:GRAY)
+  endc
+  hnocont=control BUTTON
+    window=hmain
+    position=DX-40,150+18*2,35,16
+    text="NoCt"
+    help="按下高亮显示带有无接触手臂的测量"
+    font=SMALLFONT
+    color=(flags & (FM_NOCT1|FM_NOCT2)?YELLOW:BLACK)
+    bkcolor=(flags & (FM_NOCT1|FM_NOCT2)?LIGHTRED:GRAY)
+  endc
+  hshort=control BUTTON
+    window=hmain
+    position=DX-40,150+18*3,35,16
+    text="Short"
+    help="按下高亮显示带有对天线短路的测量"
+    font=SMALLFONT
+    color=(flags & FM_SHORT?YELLOW:BLACK)
+    bkcolor=(flags & FM_SHORT?LIGHTRED:GRAY)
+  endc
+  hcdc=control BUTTON
+    window=hmain
+    position=DX-40,150+18*4,35,16
+    text="Chg"
+    help="按下以突出显示充放电测量值"
+    font=SMALLFONT
+    color=((flags & AM_ART)==AM_AC?BLACK:YELLOW)
+    bkcolor=((flags & AM_ART)==AM_AC?GRAY:LIGHTRED)
+  endc
+  for i=0,i<NPANELS,i++ do
+    hpanels[i]=control BUTTON
+      window=hmain
+      position=DX-40,155+18*(i+5),35,16
+      text=format("P %i",i)
+      help=format("按下以突出显示排版%i上的测量",i)
+      font=SMALLFONT
+      color=(panels & (1<<i)?YELLOW:BLACK)
+      bkcolor=(panels & (1<<i)?LIGHTRED:GRAY)
+    endc
+  enddo
+  y=Max(458,170+18*nheads)
+  hxyplot=control RADIO
+    window=hmain
+    position=DX-110,y+18*0,105,16
+    name="X-Y"
+    help="绘制测量电场的焊盘的X-Y坐标"
+    font=INFOFONT
+    mode=M_CHECKED
+  endc
+  hsumcplot=control RADIO
+    window=hmain
+    position=DX-110,y+18*1,105,16
+    name="正弦和(C)"
+    help="根据容量绘制正弦场分量之和"
+    font=INFOFONT
+  endc
+  hzcplot=control RADIO
+    window=hmain
+    position=DX-110,y+18*2,105,16
+    name="Z(C)"
+    help="根据电容绘制Z容量分量"
+    font=INFOFONT
+  endc
+  hcossin=control RADIO
+    window=hmain
+    position=DX-110,y+18*3,105,16
+    name="余弦(正弦)"
+    help="相对于第一正弦分量绘制第一余弦分量"
+    font=INFOFONT
+  endc
+  hquit=control BUTTON
+    window=hmain
+    position=DX-110,DY-25,105,20
+    text="关闭"
+    help="按完成电场浏览器"
+  endc
+  Readdata()
+  redraw=1; defpos=1
+  while 1 do
+    Commentpad()
+    if Pressed(hbrowse) then
+      name[0]='\0'
+      SYS.Emuname(name)
+      if name[0]=='\0' then
+        SYS.Boardname(name)
+        Fnsplit(name,drv,path,file,ext)
+        Fnmerge(name,drv,path,file,".rcd")
+      endif
+      i=SYS.Browse(hmain,name,"Select emulation data",0)
+      if i==1 && name[0]!='\0' then
+        sprintf(s,"EMULATION ON %s",name)
+        SYS.Sendtext(s,0)
+        Readdata()
+        redraw=1; defpos=1
+      endif
+    else if Pressed(hcontents) then
+      SYS.Sendtext("EMULATION LIST",0)
+    else if Pressed(hquit) then
+      break
+    endif
+    for i=0,i<NZOOM,i++ do
+      if Pressed(hzoom[i]) then
+        change hzoom[zoom] color=BLACK
+        change hzoom[zoom] bkcolor=GRAY
+        zoom=i
+        change hzoom[zoom] color=YELLOW
+        change hzoom[zoom] bkcolor=LIGHTRED
+        redraw=1; defpos=1
+      endif
+    enddo
+    for i=0,i<nheads,i++ do
+      if Pressed(hheads[i]) then
+        heads=heads ^ (1<<i)
+        change hheads[i] color=(heads & (1<<i)?YELLOW:BLACK)
+        change hheads[i] bkcolor=(heads & (1<<i)?LIGHTRED:GRAY)
+        redraw=1; defpos=0
+      endif
+      if Pressed(hants[i]) then
+        ants=ants ^ (1<<i)
+        change hants[i] color=(ants & (1<<i)?YELLOW:BLACK)
+        change hants[i] bkcolor=(ants & (1<<i)?LIGHTRED:GRAY)
+        redraw=1; defpos=0
+      endif
+    enddo
+    if Pressed(hbad) then
+      flags=flags ^ FM_BAD
+      change hbad color=(flags & FM_BAD?YELLOW:BLACK)
+      change hbad bkcolor=(flags & FM_BAD?LIGHTRED:GRAY)
+      redraw=1; defpos=0
+    else if Pressed(hoverload) then
+      flags=flags ^ FM_OVERLOAD
+      change hoverload color=(flags & FM_OVERLOAD?YELLOW:BLACK)
+      change hoverload bkcolor=(flags & FM_OVERLOAD?LIGHTRED:GRAY)
+      redraw=1; defpos=0
+    else if Pressed(hnocont) then
+      flags=flags ^ (FM_NOCT1|FM_NOCT2)
+      change hnocont color=(flags & (FM_NOCT1|FM_NOCT2)?YELLOW:BLACK)
+      change hnocont bkcolor=(flags & (FM_NOCT1|FM_NOCT2)?LIGHTRED:GRAY)
+      redraw=1; defpos=0
+    else if Pressed(hshort) then
+      flags=flags ^ FM_SHORT
+      change hshort color=(flags & FM_SHORT?YELLOW:BLACK)
+      change hshort bkcolor=(flags & FM_SHORT?LIGHTRED:GRAY)
+      redraw=1; defpos=0
+    else if Pressed(hcdc) then
+      flags=flags ^ AM_DIS
+      change hcdc color=((flags & AM_ART)==AM_AC?BLACK:YELLOW)
+      change hcdc bkcolor=((flags & AM_ART)==AM_AC?GRAY:LIGHTRED)
+      redraw=1; defpos=0
+    endif
+    for i=0,i<NPANELS,i++ do
+      if Pressed(hpanels[i]) then
+        panels=panels ^ (1<<i)
+        change hpanels[i] color=(panels & (1<<i)?YELLOW:BLACK)
+        change hpanels[i] bkcolor=(panels & (1<<i)?LIGHTRED:GRAY)
+        redraw=1; defpos=0
+      endif
+    enddo
+    if Pressed(hxyplot) then
+      drawtype=0; redraw=1
+    else if Pressed(hsumcplot) then
+      drawtype=1; redraw=1
+    else if Pressed(hzcplot) then
+      drawtype=2; redraw=1
+    else if Pressed(hcossin) then
+      drawtype=3; redraw=1
+    endif
+
+
+
+
+
+    if redraw then
+      switch drawtype
+      case 0: Xyplot(defpos)
+      case 1: Sumcplot(defpos)
+      case 2: Zcplot(defpos)
+      case 3: Cossinplot(defpos)
+      endsw
+      redraw=0
+    endif
+    wait
+  enddo
+end
+

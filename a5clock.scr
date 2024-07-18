@@ -1,0 +1,315 @@
+#include "ls.icl"                  // Standard functions
+#include "or.icl"                // Command names
+#cmdbuff 2
+
+#define VERSION        "1.02"
+#define DESCRIPTION    "A5 head clocks tester"
+
+// 1.01: Firewire cycle clock.
+// 1.02: Measurement card.
+
+#define DX             400
+#define DY             155
+#define YSTEP          28
+#define NN             250             // Number of measurements
+
+handle           hmain                 // Main window
+handle           hprogress             // Progress bar
+handle           hinfo                 // Info text
+handle           hmainclk[32]          // Deviations of main timers
+handle           hfireclk[32]          // Deviations of Firewire clock timers
+handle           hmainclkmeas          // Deviations of main timers for meas
+handle           hfireclkmeas          // Deviations of Firewire clock for meas
+handle           hclose                // Close button
+
+int              nhead                 // Number of heads and video cameras
+int              headmask              // Mask of all available heads
+int              headtimer[32,NN]      // Readings of head controller timers
+int              headfire[32,NN]       // Readings of head FireWire timers
+int              cratetimer[NN]        // Readings of crate timer
+int              cratefire[NN]         // Readings of crate FireWire timer
+int              meastimer[NN]         // Readings of timer on measurement card
+int              measfire[NN]          // Readings of FireWire timer on meascard
+float            mainclk[32]           // Deviations of main timers
+float            fireclk[32]           // Deviations of Firewire clock timers
+float            mainclkmeas           // Deviations of main timers on meas card
+float            fireclkmeas           // Deviations of Firewire clock on meas
+
+function int Gettimes(int nn)
+  int t,head
+  char buf[32]
+  // Send commands to crate, all heads, video cameras and measurement card.
+  buf[0]=S_DEBUG
+  buf[1]=0x2B                          // Get timers
+  SYS.Sendimm(0,2,buf)
+  buf[0]=S_DEBUG
+  buf[1]=0x2C                          // Get Firewire cycle timers
+  SYS.Sendimm(1,2,buf)
+  // Wait for answer.
+  t=Time()+1000
+  while t>Time() do
+    if Pressed(hclose) return -1
+    if $A[0].length==0 || $A[0].command!=S_DEBUG continue
+    if $A[1].length!=0 && $A[1].command==S_DEBUG break
+    wait
+  enddo
+  // Gather answers from ordinary timers.
+  cratetimer[nn]=$int4($A[0]+5)
+  for head=0,head<nhead,head++ do
+    if ((1<<head) & headmask)==0 continue
+    headtimer[head,nn]=$int4($A[0]+9+4*head)
+  enddo
+  // Gather answer from measurement card.
+  meastimer[nn]=$int4($A[0]+9+4*32)
+  // Gather answers from Firewire cycle timers. Note that they wrap around to 0
+  // after count 3145727999=0x2EE00000*4-1.
+  t=($int4($A[1]+5) >> 2) & 0x3FFFFFFF
+  if nn>0 && t<cratefire[0] t=t+0x2EE00000
+  cratefire[nn]=t
+  for head=0,head<nhead,head++ do
+    if ((1<<head) & headmask)==0 continue
+    t=($int4($A[1]+9+4*head) >> 2) & 0x3FFFFFFF
+    if nn>0 && t<headfire[head,0] t=t+0x2EE00000
+    headfire[head,nn]=t
+  enddo
+  // Gather answer from Firewire cycle timer on measurement card.
+  t=($int4($A[1]+9+4*32) >> 2) & 0x3FFFFFFF
+  if nn>0 && t<measfire[0] t=t+0x2EE00000
+  measfire[nn]=t
+end
+
+// Returns deviation of main timer for selected head in p.p.M.
+function float Leastsqmain(int head)
+  int nn
+  float r,sx,sy,sxx,sxy
+  for nn=0,nn<NN,nn++ do
+    r=headtimer[head,nn]-cratetimer[nn]*1000.0
+    sx=sx+cratetimer[nn]
+    sy=sy+r
+    sxx=sxx+(cratetimer[nn]*1.0)*cratetimer[nn]
+    sxy=sxy+(cratetimer[nn]*1.0)*r
+  enddo
+  return (sx*sy-NN*sxy)/(sx*sx-NN*sxx)*1000.0
+end
+
+// Returns deviation of main timer for measurement card in p.p.M.
+function float Leastsqmainmeas()
+  int nn
+  float r,sx,sy,sxx,sxy
+  for nn=0,nn<NN,nn++ do
+    r=meastimer[nn]-cratetimer[nn]*1000.0
+    sx=sx+cratetimer[nn]
+    sy=sy+r
+    sxx=sxx+(cratetimer[nn]*1.0)*cratetimer[nn]
+    sxy=sxy+(cratetimer[nn]*1.0)*r
+  enddo
+  return (sx*sy-NN*sxy)/(sx*sx-NN*sxx)*1000.0
+end
+
+// Returns deviation of Firewire cycle timer for selected head in p.p.M.
+function float Leastsqfire(int head)
+  int nn
+  float r,sx,sy,sxx,sxy
+  for nn=0,nn<NN,nn++ do
+    r=headfire[head,nn]-cratefire[nn]
+    sx=sx+cratefire[nn]
+    sy=sy+r
+    sxx=sxx+(cratefire[nn]*1.0)*cratefire[nn]
+    sxy=sxy+(cratefire[nn]*1.0)*r
+  enddo
+  return (sx*sy-NN*sxy)/(sx*sx-NN*sxx)*1000000.0
+end
+
+// Returns deviation of Firewire cycle timer for measurement card in p.p.M.
+function float Leastsqfiremeas()
+  int nn
+  float r,sx,sy,sxx,sxy
+  for nn=0,nn<NN,nn++ do
+    r=measfire[nn]-cratefire[nn]
+    sx=sx+cratefire[nn]
+    sy=sy+r
+    sxx=sxx+(cratefire[nn]*1.0)*cratefire[nn]
+    sxy=sxy+(cratefire[nn]*1.0)*r
+  enddo
+  return (sx*sy-NN*sxy)/(sx*sx-NN*sxx)*1000000.0
+end
+
+function int main()
+  int i,head,t,nn,x,y,isdown,dy
+  char s[32]
+  nhead=$LAY.nfing*2
+  for head=0,head<nhead,head++ do
+    headmask=headmask|(1<<head)
+  enddo
+  if $LAY.cameras!=0 then
+    if ($LAY.cameras & 1) headmask=headmask|(1<<nhead)
+    if ($LAY.cameras & 2) headmask=headmask|(2<<nhead)
+    nhead=nhead+2
+  endif
+  dy=DY+(nhead/2+1)*YSTEP
+  hmain=control WINDOW
+    window=NULL
+    position=10,10,DX,dy
+    name=format("A5 头部时钟测试器v%s",VERSION)
+    help=" "
+    bkcolor=WHITEGREEN
+    size=1024
+  endc
+  hprogress=control PROGRESS
+    window=hmain
+    position=10,10,DX-20,20
+    text="Testing clocks"
+    help="测量进度"
+    color=LIGHTBLUE
+  endc
+  hinfo=control TEXT
+    window=hmain
+    position=10,40,DX-20,20
+    help=" "
+    font=MEDIUMFONT
+    color=DARKGRAY
+    mode=M_CENTERED
+  endc
+  y=62
+  isdown=0
+  draw window=hmain font=MEDIUMFONT color=GREEN
+  draw at 62,y+25 text="Main"
+  draw at 140,y+25 text="FW"
+  draw at DX/2+62,y+25 text="Main"
+  draw at DX/2+140,y+25 text="FW"
+  for head=0,head<nhead,head++ do
+    if (head & 1)==0 then
+      x=46
+      y=y+YSTEP
+      if head/2==$LAY.nfing then
+        y=y+6
+        sprintf(s,"Vtop")
+      else
+        if isdown==0 && $LAY.side[head/2]!=0 then
+          y=y+6
+          isdown=1
+        endif
+        sprintf(s,"%iL",head/2)
+      endif
+    else
+      x=DX/2+46
+      if head/2==$LAY.nfing then
+        sprintf(s,"Vbot")
+      else
+        sprintf(s,"%iR",head/2)
+      endif
+    endif
+    if ((1<<head) & headmask)==0 continue
+    draw window=hmain font=MEDIUMFONT color=GREEN at x-30,y+20 text=s
+    hmainclk[head]=control TEXT
+      window=hmain
+      position=x,y,67,21
+      help=format("测试头%s的主时钟偏差，百万分之几",s)
+      font=MEDIUMFONT
+      mode=M_BORDER
+    endc
+    hfireclk[head]=control TEXT
+      window=hmain
+      position=x+76,y,67,21
+      help=format(                                                             \
+        "Deviation of Firewire clock for head %s, parts per million",s)
+      font=MEDIUMFONT
+      mode=M_BORDER
+    endc
+  enddo
+  x=46
+  y=y+YSTEP+6
+  sprintf(s,"M")
+  draw window=hmain font=MEDIUMFONT color=GREEN at x-30,y+20 text=s
+  hmainclkmeas=control TEXT
+    window=hmain
+    position=x,y,67,21
+    help="测量卡主时钟的偏差， p.p.m."
+    font=MEDIUMFONT
+    mode=M_BORDER
+  endc
+  hfireclkmeas=control TEXT
+    window=hmain
+    position=x+76,y,67,21
+    help="测量卡的火线时钟偏差，p.p.m."
+    font=MEDIUMFONT
+    mode=M_BORDER
+  endc
+  draw show
+  hclose=control BUTTON
+    window=hmain
+    position=DX-100,dy-33,90,25
+    text="关闭"
+    help="按下可停止测试并关闭窗口 "
+  endc
+  // Gather information.
+  change hinfo text="Please avoid any activity on tester"
+  t=Time()+3000
+  for nn=0,nn<NN,nn++ do
+    while 1 do
+      wait
+      if Time()-t<nn*250 then
+        if Pressed(hclose) return
+        continue
+      endif
+      if Gettimes(nn)<0 return
+      change hprogress limits=nn+1,NN
+      break
+    enddo
+  enddo
+  Delay(500)                           // Psychological delay
+  // To increase accuracy of calculations, subtract constant shifts.
+  for head=0,head<nhead,head++ do
+    if ((1<<head) & headmask)==0 continue
+    i=headtimer[head,0]
+    for nn=0,nn<NN,nn++ do
+      headtimer[head,nn]=headtimer[head,nn]-i
+    enddo
+    i=headfire[head,0]
+    for nn=0,nn<NN,nn++ do
+      headfire[head,nn]=headfire[head,nn]-i
+    enddo
+  enddo
+  i=meastimer[0]
+  for nn=0,nn<NN,nn++ do
+    meastimer[nn]=meastimer[nn]-i
+  enddo
+  i=measfire[0]
+  for nn=0,nn<NN,nn++ do
+    measfire[nn]=measfire[nn]-i
+  enddo
+  i=cratetimer[0]
+  for nn=0,nn<NN,nn++ do
+    cratetimer[nn]=cratetimer[nn]-i
+  enddo
+  i=cratefire[0]
+  for nn=0,nn<NN,nn++ do
+    cratefire[nn]=cratefire[nn]-i
+  enddo
+  // Process data using least squares.
+  change hinfo text="Regression analysis..."
+  for head=0,head<nhead,head++ do
+    if ((1<<head) & headmask)==0 continue
+    mainclk[head]=Leastsqmain(head)
+    fireclk[head]=Leastsqfire(head)
+    change hmainclk[head] color=(Abs(mainclk[head])<100?BLACK:LIGHTRED)
+    change hmainclk[head] bkcolor=(Abs(mainclk[head])<100?WHITE:YELLOW)
+    change hmainclk[head] text=format(" %.1f",mainclk[head])
+    change hfireclk[head] color=(Abs(fireclk[head])<50?BLACK:LIGHTRED)
+    change hfireclk[head] bkcolor=(Abs(fireclk[head])<50?WHITE:YELLOW)
+    change hfireclk[head] text=format(" %.1f",fireclk[head])
+  enddo
+  mainclkmeas=Leastsqmainmeas()
+  fireclkmeas=Leastsqfiremeas()
+  change hmainclkmeas color=(Abs(mainclkmeas)<100?BLACK:LIGHTRED)
+  change hmainclkmeas bkcolor=(Abs(mainclkmeas)<100?WHITE:YELLOW)
+  change hmainclkmeas text=format(" %.1f",mainclkmeas)
+  change hfireclkmeas color=(Abs(fireclkmeas)<50?BLACK:LIGHTRED)
+  change hfireclkmeas bkcolor=(Abs(fireclkmeas)<50?WHITE:YELLOW)
+  change hfireclkmeas text=format(" %.1f",fireclkmeas)
+  change hinfo text="Main and Firewire clock deviations, p.p.M."
+  while 1 do
+    if Pressed(hclose) break
+    wait
+  enddo
+end

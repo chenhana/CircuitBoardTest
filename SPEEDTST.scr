@@ -1,0 +1,1539 @@
+#include "ls.icl"
+#include "or.icl"
+#multinst
+
+#define VERSION        ""
+#define DESCRIPTION    "Measures speed and reproducibility"
+
+// 1.02: Statistics of measurements.
+// 1.03: Statistics for M_RLMEAS (inductivity measurements).
+// 1.04: Cosmetical change (plus/minus symbol absent in TERMINALFONT).
+// 1.05: Statistics excludes measurements marked as bad.
+// 1.06: Statistics of first two antennas for field measurements.
+// 1.07: Internal DELAY command.
+// 1.08: Statistics for M_CRT (microshort detection measurements).
+// 1.09: Statistics for S_LAMEAS.
+// 1.10: Statistics for S_INPORT32.
+// 1.11: Larger list window.
+// 1.12: Statistics for M_UNIC.
+// 1.13: Up to 8 field/multiC antennas.
+// 1.14: Statistics for M_DIVIDER.
+// 1.15: Support for extended SERV functionality.
+// 1.16: Bug with field/multic statistics if frequency is transferred.
+// 1.17: Statistics for shortcuts.
+// 1.18: Support for M_RLDIFF.
+// 1.19: Macro substitutions.
+// 1.20: Statistics for M_UI and M_UIEX.
+// 1.21: Wide screen.
+// 1.22: Text size extended to 768 bytes to support long COMP commands.
+// 1.23: Statistics for M_COMP.
+// 1.24: Support for expressions, up to 8 macro definitions.
+// 1.25: Protocol, copying statistics to clipboard, random in expressions.
+// 1.26: Multiline edit mode.
+// 1.27: Units of measurement in COMPX statistics.
+// 1.28: Macros in multiline editor.
+// 1.29: Statistics for M_CALIBRATE.
+// 1.30: Text size extended to 1024 bytes to support long COMP commands.
+
+#define NBUF           20              // No. of simultaneously pending commands
+#cmdbuff NBUF
+
+#define NCMD           10              // No. of different commands
+#define NANT           8               // Stats for at most 8 field antennas
+#define CMDY           28              // Y distance between command controls
+#define XSIZ           720             // Size of window in X direction
+
+#define NMACRO         8               // Number of macro definitions, 4 or 8
+
+handle htact                           // Displays actual test duration
+handle hnact                           // Displays actual number of answers
+handle hspeed                          // Displays actual test speed
+handle htime                           // Displays mean duration of command
+handle hprot                           // Button "Protocol"
+handle hcopy                           // Button "Copy to clipboard"
+handle honce                           // Button "Run once"
+handle hstart                          // Button "Start"
+handle hstop                           // Button "Stop"
+handle hstatus                         // Actual test status
+handle htrun                           // Stop when time expires
+handle htedit                          // Time to run test
+handle htscroll                        // Changes time to run test
+handle hnrun                           // Stop when number of commands reached
+handle hnedit                          // Number of commands to send in test
+handle hnscroll                        // Changes no. of cmds to send in test
+handle hlist                           // Speed test history list
+handle henable[NCMD]                   // Check boxes that enable commands
+handle hcmd[NCMD]                      // Commands
+handle hedit[NCMD]                     // Edit command in multiline mode
+handle hsend[NCMD]                     // Send single command
+int    meastype[NCMD]                  // Type of measurements
+int    measstat[NCMD]                  // Status of last measurement
+int    measshort[NCMD]                 // Number of shortcuts
+int    measbad[NCMD]                   // Number of bad measurements
+handle hmacro[NMACRO]                  // Macro definitions
+float  d1[NCMD][5]                     // Statistics of first result
+float  d2[NCMD][5]                     // Statistics of second result
+float  d3[NCMD][5]                     // Statistics of third result
+float  d4[NCMD][5]                     // Statistics of fourth result
+float  dsin[NCMD][NANT][5]             // Statistics of field sine
+float  dcos[NCMD][NANT][5]             // Statistics of field cosine
+float  compunits[NCMD]                 // Units of COMPX measurements
+int    source[NBUF]                    // Line where command originates
+int    running                         // 1: first two seconds, 2: main test
+int    stopontime                      // 1: stop when time expires
+int    nsent                           // Total number of commands sent
+int    nsent2s                         // No. of commands sent in first 2 sec
+int    nansw                           // Total number of answers
+int    nansw2s                         // Number of answers in first 2 sec
+int    tstart                          // Time when test was started
+int    tupdate                         // Time of last update
+int    tstop                           // Time to run test, seconds
+int    nstop                           // Number of commands to send
+int    next                            // Next command to be sent
+int    issmall                         // Whether small font is selected
+handle hfile                           // Protocol file or NULL
+char   batch[32767]                    // Statistics from the last run
+int    nbatch                          // Size of statistics
+
+external int SERV.Ohmstotext(float r,int status,char *s)
+external int SERV.Ohmsshort(float r,int status,char *s)
+external int SERV.Milliohmstotext(float r,int status,char *s)
+external int SERV.Pftotext(float c,char *s)
+external int SERV.Henrytotext(float h,char *s)
+external int SERV.Convertfield(char *answer,float *zc,float *zr);
+external int SERV.Convertfastc(char *answer,float *zc,float *zr);
+external int SERV.Convertmultic(char *answer,int n,float *zc,float *zr);
+external int SERV.Decodeanswer(char *answer,char *text,char *extra,int mask);
+external int SERV.Scanint(char *cmd,int *value)
+external int SERV.Scanfloat(char *cmd,float *value)
+external int SERV.Parsecmdext(char *cmd,char *buf,char *error);
+
+// Service function, adds text to the list and to the log file, if last is
+// active. If flag Addtobatch is set, also adds it to the batch.
+function int Batchandlog(char *s,int addtobatch)
+  int length
+  add hlist text=s
+  if hfile!=NULL then
+    fprintf(hfile,"%s\n",s)
+  endif
+  if addtobatch then
+    length=Strlen(s)
+    if nbatch+length<32760 then
+      nbatch=nbatch+sprintf(batch+nbatch,"%s\r\n",s)
+    endif
+  endif
+end
+
+// Converts command index into letter.
+function int Letter(int index)
+  index++
+  if index<1 return '?'
+  if index<10 return '0'+index
+  return 'A'+index-10
+end
+
+function int Answerproc(char *answer,int info)
+  int color
+  char s[1024],text[1024],extra[2048]
+  if answer[4]==0xF0 return            // Do not display SCRIPT messages
+  color=SERV.Decodeanswer(answer,text,extra,0x7FFFFFFF)
+  if color==(-1) return
+  if color==BLACK color=DARKGRAY
+  change hlist color=color
+  sprintf(s,"Cmd %c %s",Letter(info),text)
+  Batchandlog(s,0)
+end
+
+function int Initsigma(float disp[])
+  disp[0]=0.0
+  disp[1]=0.0
+  disp[2]=0.0
+  disp[3]=0.0
+  disp[4]=0.0
+end
+
+// Function adds next measured value to array disp[5] which accumulates data
+// necessary to calculate normal dispersion, mean, minimal and maximal.
+function int Addsigma(float disp[],float value)
+  if disp[0]<=0.0 then
+    disp[0]=1.0                        // First point, data is still undefined
+    disp[1]=value
+    disp[2]=value*value
+    disp[3]=value
+    disp[4]=value
+  else
+    disp[0]=disp[0]+1.0
+    disp[1]=disp[1]+value
+    disp[2]=disp[2]+value*value
+    disp[3]=Min(disp[3],value)
+    disp[4]=Max(disp[4],value)
+  endif
+end
+
+// Function returns number of data items gathered by Addsigma()
+function int Getcount(float disp[])
+  return disp[0]
+end
+
+// Function calculates mean value based on data gathered by Addsigma()
+function float Getmean(float disp[])
+  if disp[0]<1.0 then
+    return 0.0
+  else
+    return disp[1]/disp[0]
+  endif
+end
+
+// Function calculates minimal value based on data gathered by Addsigma()
+function float Getmin(float disp[])
+  return disp[3]
+end
+
+// Function calculates minimal value based on data gathered by Addsigma()
+function float Getmax(float disp[])
+  return disp[4]
+end
+
+// Function calculates normal dispersion based on data gathered by Addsigma()
+function float Getsigma(float disp[])
+  float r
+  if disp[0]<2.0 then
+    return 0.0
+  else
+    r=(disp[0]*disp[2]-disp[1]*disp[1])/disp[0]/(disp[0]-1.0)
+    if r<=0 then
+      return 0.0
+    else
+      return Sqrt(r)
+    endif
+  endif
+end
+
+function int Pftotextfine(float c,char *s)
+  int i,units                          // SCRIPT2 zeroes local variables
+  c=c*1000.0
+  while Abs(c)>1000.0 && units<5 do
+    c=c/1000.0; units++
+  enddo
+  if Abs(c)<10 then
+    i=sprintf(s,"%7.4f",c)
+  else if Abs(c)<100 then
+    i=sprintf(s,"%7.3f",c)
+  else
+    i=sprintf(s,"%7.2f",c)
+  endif
+  if units==0 i=i+sprintf(s+i," fF")
+  if units==1 i=i+sprintf(s+i," pF")
+  if units==2 i=i+sprintf(s+i," nF")
+  if units==3 i=i+sprintf(s+i," uF")
+  if units==4 i=i+sprintf(s+i," mF")
+  if units==5 i=i+sprintf(s+i,"  F")
+  return i
+end
+
+function int Update(int lastupdate)
+  int i,j,k,m,n,status,factor
+  float t,value,sigma
+  char s[1024],pm[8],bad[64]
+  tupdate=Time()
+  t=(tupdate-tstart)/1000.0
+  if running==2 then
+    n=nansw-nansw2s
+    if t<10000.0 then
+      change htact text=format(" %.1f",t)
+    else
+      change htact text=format(" %.0f",t)
+    endif
+    change hnact text=format(" %i",n)
+    if (t<1.0 && lastupdate==0) || t<=0 then
+      change hspeed text=" ?"
+    else if n/t>=1000.0 then
+      change hspeed text=format(" %.0f",n/t)
+    else if n/t>=100.0 then
+      change hspeed text=format(" %.1f",n/t)
+    else
+      change hspeed text=format(" %.2f",n/t)
+    endif
+    if (t<1.0 && lastupdate==0) || n==0 then
+      change htime text=" ?"
+    else if t*1000.0/n>=1000.0 then
+      change htime text=format(" %.0f",t*1000.0/n)
+    else if t*1000.0/n>=100.0 then
+      change htime text=format(" %.1f",t*1000.0/n)
+    else
+      change htime text=format(" %.2f",t*1000.0/n)
+    endif
+    if lastupdate!=0 && t>=1.0 && n>0 then
+      nbatch=0
+      for i=0,i<NCMD,i++ do
+        if Status(henable[i])==0 then
+          s[i]=' '
+        else
+          s[i]=(i<9?'1'+i:'A'+i-9)
+        endif
+      enddo
+      sprintf(s+NCMD,"  %6.1f s   %6i cmd    %6.2f cmd/s   %6.2f ms/cmd",      \
+        t,n,n/t,t*1000.0/n)
+      change hlist color=BLACK
+      Batchandlog(s,1)
+      change hlist color=RED
+      for i=0,i<NCMD,i++ do
+        if Getcount(d1[i])<5 continue  // Not enough data
+        j=sprintf(s,"%c  ",(i<9?'1'+i:'A'+i-9))
+        if issmall then
+          Strcpy(pm," +-")
+        else
+          Strcpy(pm," -+")
+        endif
+        m=0; bad[0]='\0'
+        if measbad[i]>0 m=m+sprintf(bad+m,", %i bad",measbad[i])
+        if measshort[i]>0 m=m+sprintf(bad+m,", %i shorts",measshort[i])
+        switch meastype[i]
+          case S_FIELD:
+            j=j+sprintf(s+j,"FIELD:  C =");
+            j=j+SERV.Pftotext(Getmean(d1[i]),s+j)
+            j=j+sprintf(s+j,"%s",pm)
+            j=j+SERV.Pftotext(Getsigma(d1[i]),s+j)
+            j=j+sprintf(s+j,", Z =")
+            j=j+SERV.Pftotext(Getmean(d2[i]),s+j)
+            j=j+sprintf(s+j,"%s",pm)
+            j=j+SERV.Pftotext(Getsigma(d2[i]),s+j)
+            Strcpy(s+j,bad)
+            Batchandlog(s,1)
+            // Field antennas.
+            for k=0,k<NANT,k++ do
+              if Getcount(dsin[i][k])==0 break
+              j=sprintf(s,"           A%i.sin = %.0f%s %.0f",                  \
+                k+1,Getmean(dsin[i][k]),pm,Getsigma(dsin[i][k]))
+              j=j+sprintf(s+j,", A%i.cos = %.0f%s %.0f bit",                   \
+                k+1,Getmean(dcos[i][k]),pm,Getsigma(dcos[i][k]))
+              sprintf(s+j," (%.4f rad)",                                       \
+                Atan2(Getmean(dcos[i][k]),Getmean(dsin[i][k])))
+              Batchandlog(s,1)
+            enddo
+          case S_RMEAS:
+            j=j+sprintf(s+j,"RMEAS:  R =");
+            j=j+SERV.Milliohmstotext(Getmean(d1[i]),measstat[i],s+j)
+            j=j+sprintf(s+j,"%s",pm)
+            j=j+SERV.Milliohmstotext(Getsigma(d1[i]),measstat[i],s+j)
+            Strcpy(s+j,bad)
+            Batchandlog(s,1)
+          case S_LAMEAS:
+            j=j+sprintf(s+j,"LAMEAS: D = %.1f",Getmean(d1[i]));
+            j=j+sprintf(s+j,"%s",pm)
+            j=j+sprintf(s+j," %.1f units",Getsigma(d1[i]));
+            Strcpy(s+j,bad)
+            Batchandlog(s,1)
+          case S_EXACTR:
+            j=j+sprintf(s+j,"EXACTR: R =");
+            j=j+SERV.Milliohmstotext(Getmean(d1[i]),measstat[i],s+j)
+            j=j+sprintf(s+j,"%s",pm)
+            j=j+SERV.Milliohmstotext(Getsigma(d1[i]),measstat[i],s+j)
+            Strcpy(s+j,bad)
+            Batchandlog(s,1)
+          case S_HVMEAS:
+            j=j+sprintf(s+j,"HVMEAS: R =");
+            j=j+SERV.Ohmstotext(Getmean(d1[i]),measstat[i],s+j)
+            j=j+sprintf(s+j,"%s",pm)
+            j=j+SERV.Ohmstotext(Getsigma(d1[i]),measstat[i],s+j)
+            Strcpy(s+j,bad)
+            Batchandlog(s,1)
+          case S_FASTC:
+            j=j+sprintf(s+j,"FASTC:  C =");
+            j=j+Pftotextfine(Getmean(d1[i]),s+j)
+            j=j+sprintf(s+j,"%s",pm)
+            j=j+Pftotextfine(Getsigma(d1[i]),s+j)
+            if Getcount(d2[i])>0 then
+              j=j+sprintf(s+j,", Z =")
+              j=j+Pftotextfine(Getmean(d2[i]),s+j)
+              j=j+sprintf(s+j,"%s",pm)
+              j=j+Pftotextfine(Getsigma(d2[i]),s+j)
+            endif
+            if Getcount(d3[i])>0 then
+              j=j+sprintf(s+j,", R =")
+              j=j+SERV.Ohmstotext(Getmean(d3[i]),0,s+j)
+              j=j+sprintf(s+j,"%s",pm)
+              j=j+SERV.Ohmstotext(Getsigma(d3[i]),0,s+j)
+            endif
+            Strcpy(s+j,bad)
+            Batchandlog(s,1)
+          case S_INPORT32:
+            j=j+sprintf(s+j,"INPORT: Mean = %.2f",Getmean(d1[i]));
+            j=j+sprintf(s+j,"%s",pm)
+            j=j+sprintf(s+j," %.2f",Getsigma(d1[i]))
+            Batchandlog(s,1)
+          case S_CALIBRATE:
+            j=j+sprintf(s+j,"CALIBR: X = %.1f",Getmean(d1[i]));
+            j=j+sprintf(s+j,"%s",pm)
+            j=j+sprintf(s+j," %.2f, ",Getsigma(d1[i]))
+            j=j+sprintf(s+j,"Y = %.1f",Getmean(d2[i]));
+            j=j+sprintf(s+j,"%s",pm)
+            j=j+sprintf(s+j," %.2f, ",Getsigma(d2[i]))
+            j=j+sprintf(s+j,"W = %.1f",Getmean(d3[i]));
+            j=j+sprintf(s+j,"%s",pm)
+            j=j+sprintf(s+j," %.2f",Getsigma(d3[i]))
+            if Getcount(d4[i])>0 then
+              j=j+sprintf(s+j,", Z = %.1f",Getmean(d4[i]));
+              j=j+sprintf(s+j,"%s",pm)
+              j=j+sprintf(s+j," %.2f",Getsigma(d4[i]))
+            endif
+            j=j+sprintf(s+j," um")
+            Batchandlog(s,1)
+          case M_RLMEAS,M_RLDIFF:
+            if meastype[i]==M_RLDIFF then
+              j=j+sprintf(s+j,"RLDIFF: R =")
+            else
+              j=j+sprintf(s+j,"RLMEAS: R =")
+            endif
+            j=j+SERV.Ohmstotext(Getmean(d1[i]),measstat[i],s+j)
+            j=j+sprintf(s+j,"%s",pm)
+            j=j+SERV.Ohmstotext(Getsigma(d1[i]),measstat[i],s+j)
+            j=j+sprintf(s+j,", L =")
+            j=j+SERV.Henrytotext(Getmean(d2[i]),s+j)
+            j=j+sprintf(s+j,"%s",pm)
+            j=j+SERV.Henrytotext(Getsigma(d2[i]),s+j)
+            Strcpy(s+j,bad)
+            Batchandlog(s,1)
+          case M_CRT:
+            j=j+sprintf(s+j,"MSD:    C =");
+            j=j+SERV.Pftotext(Getmean(d1[i]),s+j)
+            j=j+sprintf(s+j,"%s",pm)
+            j=j+SERV.Pftotext(Getsigma(d1[i]),s+j)
+            j=j+sprintf(s+j,", R =")
+            j=j+SERV.Ohmstotext(Getmean(d2[i]),0,s+j)
+            j=j+sprintf(s+j,"%s",pm)
+            j=j+SERV.Ohmstotext(Getsigma(d2[i]),0,s+j)
+            Strcpy(s+j,bad)
+            Batchandlog(s,1)
+          case M_UI,M_UIEX:
+            j=j+sprintf(s+j,"UI ");
+            Strcpy(s+j,bad)
+            Batchandlog(s,1)
+            for k=0,k<NANT,k++ do
+              if Getcount(dsin[i][k])==0 break
+              j=sprintf(s,"           U%i = %6.3f",k+1,Getmean(dsin[i][k]))
+              j=j+sprintf(s+j,"%s",pm)
+              j=j+sprintf(s+j," %8.5f V",Getsigma(dsin[i][k]))
+              Batchandlog(s,1)
+            enddo
+          case M_MULTIC:
+            j=j+sprintf(s+j,"MULTIC: C =");
+            j=j+SERV.Pftotext(Getmean(d1[i]),s+j)
+            j=j+sprintf(s+j,"%s",pm)
+            j=j+SERV.Pftotext(Getsigma(d1[i]),s+j)
+            j=j+sprintf(s+j,", Z =")
+            j=j+SERV.Pftotext(Getmean(d2[i]),s+j)
+            j=j+sprintf(s+j,"%s",pm)
+            j=j+SERV.Pftotext(Getsigma(d2[i]),s+j)
+            Strcpy(s+j,bad)
+            Batchandlog(s,1)
+            for k=0,k<NANT,k++ do
+              if Getcount(dsin[i][k])==0 break
+              j=sprintf(s,"           C%i = ",k+1);
+              j=j+SERV.Pftotext(Getmean(dsin[i][k]),s+j)
+              j=j+sprintf(s+j,"%s",pm)
+              j=j+SERV.Pftotext(Getsigma(dsin[i][k]),s+j)
+              j=j+sprintf(s+j,", Z%i =",k+1)
+              j=j+SERV.Pftotext(Getmean(dcos[i][k]),s+j)
+              j=j+sprintf(s+j,"%s",pm)
+              j=j+SERV.Pftotext(Getsigma(dcos[i][k]),s+j)
+              sprintf(s+j," (%.4f rad)",                                       \
+                Atan2(Getmean(dcos[i][k]),Getmean(dsin[i][k])))
+              Batchandlog(s,1)
+            enddo
+          case M_UNIC:
+            j=j+sprintf(s+j,"UNIC: C =");
+            j=j+Pftotextfine(Getmean(d1[i]),s+j)
+            j=j+sprintf(s+j,"%s",pm)
+            j=j+Pftotextfine(Getsigma(d1[i]),s+j)
+            j=j+sprintf(s+j," R =");
+            j=j+SERV.Ohmsshort(Getmean(d2[i]),0,s+j)
+            j=j+sprintf(s+j,"%s",pm)
+            j=j+SERV.Ohmsshort(Getsigma(d2[i]),0,s+j)
+            j=j+sprintf(s+j," P =");
+            j=j+SERV.Ohmsshort(Getmean(d3[i]),0,s+j)
+            j=j+sprintf(s+j,"%s",pm)
+            j=j+SERV.Ohmsshort(Getsigma(d3[i]),0,s+j)
+            Strcpy(s+j,bad)
+            Batchandlog(s,1)
+          case M_DIVIDER:
+            j=j+sprintf(s+j,"Divider: D = %.3f",Getmean(d1[i]));
+            j=j+sprintf(s+j,"%s",pm)
+            j=j+sprintf(s+j,"%.3f",Getsigma(d1[i]));
+            if Getcount(d2[i])>0 then
+              j=j+sprintf(s+j," Rp =");
+              j=j+SERV.Ohmsshort(Getmean(d2[i]),0,s+j)
+              j=j+sprintf(s+j,"%s",pm)
+              j=j+SERV.Ohmsshort(Getsigma(d2[i]),0,s+j)
+              j=j+sprintf(s+j," Rg =");
+              j=j+SERV.Ohmsshort(Getmean(d3[i]),0,s+j)
+              j=j+sprintf(s+j,"%s",pm)
+              j=j+SERV.Ohmsshort(Getsigma(d3[i]),0,s+j)
+            endif
+            Strcpy(s+j,bad)
+            Batchandlog(s,1)
+          case M_COMP:
+            if (compunits[0] & 0x000F0000)==0 then
+              j=j+sprintf(s+j,"COMP (units depend on component)");
+            else
+              j=j+sprintf(s+j,"COMP");
+            endif
+            Strcpy(s+j,bad)
+            Batchandlog(s,1)
+            for k=0,k<NANT,k++ do
+              if Getcount(dsin[i][k])==0 break
+              value=Getmean(dsin[i][k])
+              sigma=Getsigma(dsin[i][k])
+              status=compunits[k] & 0x000F0000
+              if status==0 then
+                if Abs(value)>=0.001 && (sigma==0.0 || sigma>=0.001) then
+                  j=sprintf(s,"           [%i] = %8.5g",k+1,value)
+                  j=j+sprintf(s+j,"%s",pm)
+                  j=j+sprintf(s+j," %8.5g",sigma)
+                else
+                  j=sprintf(s,"           [%i] = %8.2e",k+1,value)
+                  j=j+sprintf(s+j,"%s",pm)
+                  j=j+sprintf(s+j," %8.2e",sigma)
+                endif
+              else
+                factor=0
+                if value!=0.0 && status!=0x00050000 && status!=0x00060000 then
+                  while Abs(value)>1000.0 && factor<3 do
+                    value=value/1000.0; sigma=sigma/1000.0; factor++
+                  enddo
+                  while Abs(value)<0.999999 && factor>(-4) do
+                    value=value*1000.0; sigma=sigma*1000.0; factor--
+                  enddo
+                endif
+                j=sprintf(s,"           [%i] = %8.5g",k+1,value)
+                j=j+sprintf(s+j,"%s",pm)
+                j=j+sprintf(s+j," %8.5g ",sigma)
+                switch factor
+                  case 3:  j=j+sprintf(s+j,"G")
+                  case 2:  j=j+sprintf(s+j,"M")
+                  case 1:  j=j+sprintf(s+j,"k")
+                  case 0:
+                  case -1: j=j+sprintf(s+j,"m")
+                  case -2: j=j+sprintf(s+j,"u")
+                  case -3: j=j+sprintf(s+j,"n")
+                  case -4: j=j+sprintf(s+j,"p")
+                  case -5: j=j+sprintf(s+j,"f")
+                  default: j=j+sprintf(s+j,"?")
+                endsw
+                switch status
+                  case 0x00010000: j=j+sprintf(s+j,"V")
+                  case 0x00020000: j=j+sprintf(s+j,"A")
+                  case 0x00030000: j=j+sprintf(s+j,"Ohm")
+                  case 0x00040000: j=j+sprintf(s+j,"F")
+                  case 0x00050000: j=j+sprintf(s+j,"deg")
+                  case 0x00060000: j=j+sprintf(s+j,"um")
+                  default: j=j+sprintf(s+j,"???")
+                endsw
+              endif
+              Batchandlog(s,1)
+            enddo
+          default: continue            // Unsupported measurement
+        endsw
+      enddo
+      if nbatch>0 enable hcopy
+    endif
+  else
+    change htact text=" 0"
+    change hnact text=" 0"
+    change hspeed text=" ?"
+    change htime text=" ?"
+  endif
+end
+
+function int Start()
+  int i,k
+  char s[80]
+  disable honce
+  disable hstart
+  disable hcopy
+  for i=0,i<NBUF,i++ do
+    SYS.Killimm(i)
+    source[i]=-1
+    $A[i].length=1                     // Invalid length, means free buffer
+  enddo
+  for i=0,i<NCMD,i++ do
+    disable hedit[i]
+    disable hsend[i]
+    meastype[i]=S_NOP
+    measbad[i]=0
+    measshort[i]=0
+    Initsigma(d1[i])
+    Initsigma(d2[i])
+    Initsigma(d3[i])
+    Initsigma(d4[i])
+    for k=0,k<NANT,k++ do
+      Initsigma(dsin[i][k])
+      Initsigma(dcos[i][k])
+      compunits[k]=0
+    enddo
+  enddo
+  disable htrun
+  disable hnrun
+  stopontime=Status(htrun)
+  disable htedit
+  disable htscroll
+  tstop=0; Text(htedit,s); sscanf(s,"%i",&tstop)
+  if tstop<0 tstop=0
+  if tstop>9000000 tstop=9000000
+  if tstop==0 tstop=10
+  change htedit text=format(" %i",tstop)
+  disable hnedit
+  disable hnscroll
+  nstop=0; Text(hnedit,s); sscanf(s,"%i",&nstop)
+  if nstop<0 nstop=0
+  if nstop>9000000 nstop=9000000
+  if nstop==0 nstop=100
+  change hnedit text=format(" %i",nstop)
+  change hstart bkcolor=YELLOW
+  enable hstop
+  nsent=0; nsent2s=0
+  nansw=0; nansw2s=0
+  next=0
+  running=1
+  change hstatus text=" Starting test"
+  tstart=Time()
+  Update(0)
+end
+
+function int Stop()
+  int i
+  char s[8]
+  Update(1)
+  running=0
+  enable honce
+  change hstart bkcolor=WHITEMAGENTA
+  enable hstart
+  disable hstop
+  enable htrun
+  enable htedit
+  enable htscroll
+  enable hnrun
+  enable hnedit
+  enable hnscroll
+  for i=0,i<NCMD,i++ do
+    enable hedit[i]
+    enable hsend[i]
+  enddo
+  change hstatus text=" Test finished"
+end
+
+external int Getsum(char *s,float *value)
+
+// Calculates value of the term: term=float|R(sum)|(sum), where R(x) is a
+// random number between -x and +x. Returns length of term on success and -1
+// on error.
+function int Getterm(char *s,float *value)
+  int i,n
+  i=0
+  while s[i]==' ' || s[i]=='\t' do i++; enddo
+  if Toupper(s[i])=='R' && s[i+1]=='(' then
+    i=i+2
+    n=Getsum(s+i,value)
+    if n<0 || s[i+n]!=')' return -1
+    value[0]=Random(Abs(value[0])*2)-Abs(value[0])
+    return i+n+1
+  else if s[i]=='(' then
+    i++
+    n=Getsum(s+i,value)
+    if n<0 || s[i+n]!=')' return -1
+    return i+n+1
+  else
+    n=SERV.Scanfloat(s+i,value)
+    if n<0 return -1
+    return i+n
+  endif
+end
+
+// Calculates value of the mul: mul=term|mul*term. Returns length of mul on
+// success and -1 on error.
+function int Getmul(char *s,float *value)
+  int i,n
+  float v
+  i=Getterm(s,value)
+  if i<0 return -1
+  while 1 do
+    while s[i]==' ' || s[i]=='\t' do i++; enddo
+    if s[i]!='*' return i
+    i++
+    n=Getterm(s+i,&v)
+    if n<0 return -1
+    i=i+n
+    value[0]=value[0]*v
+  enddo
+end
+
+// Calculates value of the sum: sum=mul|sum+mul|sum-mul. Returns length of sum
+// on success and -1 on error.
+function int Getsum(char *s,float *value)
+  int i,n,sign
+  float v
+  i=Getmul(s,value)
+  if i<0 return -1
+  while 1 do
+    while s[i]==' ' || s[i]=='\t' do i++; enddo
+    if s[i]=='+' then
+      sign='+'
+    else if s[i]=='-' then
+      sign='-'
+    else
+      return i
+    endif
+    i++
+    n=Getmul(s+i,&v)
+    if n<0 return -1
+    i=i+n
+    if sign=='+' then
+      value[0]=value[0]+v
+    else
+      value[0]=value[0]-v
+    endif
+  enddo
+end
+
+// Substitutes macros and expressions in s and saves result to cmd. Recursive
+// substitution is not supported. Expressions stay in angulart brackets and may
+// include numbers, operations +, -, * and parentheses (). For example,
+// "<5*0.25>" stays for "1.25". Returns length of the resulting string (limited
+// to 1023 characters plus terminal null).
+function int Substitute(char *s,char *cmd)
+  int i,j,k,n,quoted
+  float value
+  char r[1024],t[1024]
+  // Replace macros.
+  i=0; j=0
+  while 1 do
+    if s[i]=='\0' then
+      break                            // End of command
+    else if j>=1023 then
+      break                            // Command length limit reached
+    else if s[i]=='%' then
+      if s[i+1]=='%' then
+        r[j]='%'; i=i+2; j++
+      else if s[i+1]<'1' || s[i+1]>='1'+NMACRO then
+        r[j]='%'; i++; j++
+      else
+        t[0]='\0'; Text(hmacro[s[i+1]-'1'],t)
+        k=0
+        while t[k]!='\0' && j<254 do
+          r[j]=t[k]; j++; k++
+        enddo
+        i=i+2
+      endif
+    else
+      r[j]=s[i]
+      i++; j++
+    endif
+  enddo
+  r[j]='\0'
+  // Replace expressions.
+  i=0; j=0; quoted=0
+  while 1 do
+    if r[i]=='\0' then
+      break                            // End of command
+    else if j>=1023 then
+      break                            // Command length limit reached
+    else if r[i]=='"' then
+      quoted=quoted ^ 1
+      cmd[j]=r[i]
+      i++; j++
+    else if r[i]=='{' && quoted==0 then
+      i++                              // Expression starts
+      n=Getsum(r+i,&value)
+      if n<0 then
+        cmd[0]='\0'
+        return -1
+      endif
+      i=i+n
+      while r[i]==' ' || r[i]=='\t' do i++; enddo
+      if r[i]!='}' then
+        cmd[0]='\0'
+        return -1
+      endif
+      i++
+      j=j+sprintf(cmd+j,"%g",value)
+    else
+      cmd[j]=r[i]
+      i++; j++
+    endif
+  enddo
+  cmd[j]='\0'
+  return j
+end
+
+// Gets text for the measurement with the specified index, substituting macros
+// and expressions. Recursive substitution is not supported. Expressions stay
+// in angulart brackets and may include numbers, operations +, -, * and
+// parentheses (). For example, "<5*0.25>" stays for "1.25". Returns length of
+// the resulting string (limited to 1023 characters plus terminal null).
+function int Gettext(int index,char *cmd)
+  char s[1024]
+  s[0]='\0'; Text(hcmd[index],s)
+  return Substitute(s,cmd)
+end
+
+// Converts command s to multiline format for editing buf.
+function int Singlelinetomultiline(char *s,char *buf)
+  int j,k,n
+  char stack[64]
+  j=0                                  // Input
+  n=0                                  // Output
+  k=0                                  // Stack
+  while 1 do
+    if s[j]=='\0' then
+      buf[n]='\0'; break
+    else if k>0 && s[j]==stack[k-1] then
+      buf[n]=s[j]; n++; j++; k--
+    else if k<2 && (s[j]==' ' || s[j]=='\t') && j>2 then
+      buf[n]='\r'; n++;
+      buf[n]='\n'; n++;
+      j++
+      while s[j]==' ' || s[j]=='\t' do j++; enddo
+    else
+      if s[j]=='(' then
+        stack[k]=')'; k++
+      else if s[j]=='[' then
+        stack[k]=']'; k++
+      else if s[j]=='{' then
+        stack[k]='}'; k++
+      else if s[j]=='"' then
+        stack[k]='"'; k++
+      endif
+      buf[n]=s[j]; n++; j++
+    endif
+  enddo
+end
+
+// Converts multiline command buf to single-line form s.
+function int Multilinetosingleline(char *buf,char *s)
+  int j,n
+  j=0                                  // Input
+  n=0                                  // Output
+  while 1 do
+    if buf[j]=='\0' then
+      s[n]='\0'; break
+    else if buf[j]=='\n' then
+      s[n]=' '; n++; j++
+      if buf[j]=='\r' j++
+    else if buf[j]=='\r' then
+      s[n]=' '; n++; j++
+      if buf[j]=='\n' j++
+    else
+      s[n]=buf[j]; n++; j++
+    endif
+  enddo
+end
+
+// Main program.
+function int main()
+  int i,j,k,m,dx,y,t,mask,runonce,nant,nmrow,nmcol,toedit
+  float r,c,u,padx,pady,wx,wy
+  char s[2048],cmd[2048],buf[2048],error[256]
+  handle hmain,htframe,hexit
+  handle heframe,hetitle,heedit,heok,hecancel
+  hmain=control WINDOW
+    window=NULL
+    position=20,20,XSIZ,342+NCMD*CMDY+(NMACRO>4?28:0)
+    name=format("速度和干扰测试%s",VERSION)
+    help=" "
+    bkcolor=LIGHTGRAY
+    size=1024
+  endc
+  // Create child with test controls.
+  htframe=control CHILD
+    window=hmain
+    position=8,8,XSIZ-16,NCMD*CMDY+6
+    help=" "
+    bkcolor=WHITEMAGENTA
+  endc
+  draw window=hmain
+  Getini("Debug","Speedtest","%i,%i,%i,%i",&tstop,&nstop,&mask,&j)
+  for i=0,i<NCMD,i++ do
+    y=5+i*CMDY
+    if i<9 then
+      sprintf(s,"%i",i+1)
+    else
+      sprintf(s,"%c",'A'+i-9)
+    endif
+    henable[i]=control CUSTOMBOX
+      window=htframe
+      position=5,y,30,24
+      name=s
+      help=format("启用第%i行中的命令", i+1) 
+      font=MEDIUMFONT
+      mode=((mask & (1<<i))==0?0:M_CHECKED)
+    endc
+    hedit[i]=control BUTTON
+      window=htframe
+      position=40,y,34,24
+      name="编辑"
+      help=format("在多行模式下编辑%i行中的命令",i+1)
+      color=MAGENTA
+      bkcolor=LIGHTGRAY
+    endc
+    hcmd[i]=control COMBOEDIT
+      window=htframe
+      position=78,y,XSIZ-145,251
+      name=format("速度测试%i",i+1)
+      help=format("在此处键入命令%i。把表达理解为"          \
+        "braces, like: {0.1+%%1*2.5}",i+1)
+      mode=M_VSCROLL
+    endc
+    hsend[i]=control BUTTON
+      window=htframe
+      position=XSIZ-63,y,42,24
+      name="发送"
+      help=format("按下可以测试第%i行中的命令",i+1)
+    endc
+  enddo
+  // Create child with edit controls.
+  heframe=control CHILD
+    window=hmain
+    position=1008,8,XSIZ-16,NCMD*CMDY+6
+    help=" "
+    bkcolor=WHITEMAGENTA
+  endc
+  heedit=control EDIT
+    window=heframe
+    position=5,5,XSIZ-26,NCMD*CMDY-32
+    help="在此处编辑命令"
+    font=FIXEDSYS
+    color=BLACK
+    bkcolor=WHITE
+    mode=M_BORDER|M_VSCROLL
+  endc
+  hetitle=control TEXT
+    window=heframe
+    position=5,NCMD*CMDY+6-26,200,24
+    text="Editing"
+    font=MEDIUMFONT
+  endc
+  heok=control BUTTON
+    window=heframe
+    position=XSIZ-191,NCMD*CMDY+6-28,80,24
+    text="确定"
+    help="按下接受修改"
+    bkcolor=WHITEMAGENTA
+  endc
+  hecancel=control BUTTON
+    window=heframe
+    position=XSIZ-101,NCMD*CMDY+6-28,80,24
+    text="Cancel"
+    help="按此放弃修改"
+    bkcolor=WHITEMAGENTA
+  endc
+  toedit=-1                            // Index of command in multiline edit
+  y=10+NCMD*CMDY+10
+  if NMACRO>4 then
+    nmrow=2
+  else
+    nmrow=1
+  endif
+  nmcol=(NMACRO+1)/nmrow
+  draw window=hmain font=INFOFONT color=BLACK bkcolor=WHITEMAGENTA
+  draw at 7,y fillrect XSIZ-7,y+32+(nmrow-1)*28
+  draw at 10,y+24 text="宏指令:"
+  dx=(XSIZ-68)/nmcol
+  for i=0,i<NMACRO,i++ do
+    draw at 61+(i%nmcol)*dx,y+24+(i/nmcol)*28 text=format("%%%i=",i+1)
+    hmacro[i]=control COMBOEDIT
+      window=hmain
+      position=90+(i%nmcol)*dx,y+4+(i/nmcol)*28,dx-33,200
+      name=format("速度宏 %i",i)
+      help=format("此文本将替换上面任何命令中的'%%% i'",i+1)
+    endc
+  enddo
+  y=10+NCMD*CMDY+38+(nmrow-1)*28
+  draw window=hmain font=INFOFONT color=BLACK bkcolor=WHITEMAGENTA
+  draw at 8,y+22 text="停止测试:"
+  draw at 7,y+24 fillrect 236,y+79
+  htrun=control RADIO
+    window=hmain
+    position=12,y+28,50,22
+    name="在"
+    help="在指定时间后停止测试"
+    font=INFOFONT
+    mode=(j==0?0:M_CHECKED)
+    bkcolor=WHITEMAGENTA
+  endc
+  htedit=control EDIT
+    window=hmain
+    position=62,y+28,78,22
+    text=format(" %i",tstop)
+    help="在指定的秒数内停止测试"
+    font=MEDIUMFONT
+    bkcolor=WHITE
+  endc
+  htscroll=control VSCROLL
+    window=hmain
+    position=140,y+28,20,22
+    help="按下更改要求的测试持续时间"
+    bkcolor=WHITE
+    mode=M_NOTAB
+    limits=1,-1
+  endc
+  draw at 164,y+46 text="秒"
+  hnrun=control RADIO
+    window=hmain
+    position=12,y+53,50,22
+    name="之后"
+    help="在指定的命令数后停止测试"
+    font=INFOFONT
+    mode=(j!=0?0:M_CHECKED)
+    bkcolor=WHITEMAGENTA
+  endc
+  hnedit=control EDIT
+    window=hmain
+    position=62,y+53,78,22
+    text=format(" %i",nstop)
+    help="发送指定数量的命令后停止测试"
+    font=MEDIUMFONT
+    bkcolor=WHITE
+  endc
+  hnscroll=control VSCROLL
+    window=hmain
+    position=140,y+53,20,22
+    help="按下可更改请求的命令数"
+    bkcolor=WHITE
+    mode=M_NOTAB
+    limits=1,-1
+  endc
+  draw at 164,y+71 text="命令"
+  draw at 242,y+22 text="实际统计:"
+  draw at 241,y+24 fillrect XSIZ-167,y+79
+  htact=control TEXT
+    window=hmain
+    position=246,y+28,84,22
+    text=" 0"
+    help="自测试开始以来的实际时间，秒"
+    bkcolor=WHITE
+    font=MEDIUMFONT
+    mode=M_BORDER
+  endc
+  draw at 333,y+46 text="秒"
+  hnact=control TEXT
+    window=hmain
+    text=" 0"
+    position=246,y+53,84,22
+    help="测试开始后的实际命令数"
+    bkcolor=WHITE
+    font=MEDIUMFONT
+    mode=M_BORDER
+  endc
+  draw at 333,y+71 text="命令"
+  hspeed=control TEXT
+    window=hmain
+    position=410,y+28,66,22
+    text=" ?"
+    help="平均测试速度，每秒命令数"
+    bkcolor=WHITE
+    font=MEDIUMFONT
+    mode=M_BORDER
+  endc
+  draw at 480,y+46 text="cmd /sec"
+  htime=control TEXT
+    window=hmain
+    position=410,y+53,66,22
+    text=" ?"
+    help="命令的平均持续时间，毫秒"
+    bkcolor=WHITE
+    font=MEDIUMFONT
+    mode=M_BORDER
+  endc
+  draw at 480,y+71 text="ms /cmd"
+  hprot=control BUTTON
+    window=hmain
+    position=XSIZ-161,y+24,154,25
+    name="协议"
+    help="按下可启动或停止协议"
+    font=INFOFONT
+    bkcolor=WHITEMAGENTA
+  endc
+  hcopy=control BUTTON
+    window=hmain
+    position=XSIZ-161,y+54,154,25
+    name="复制到剪贴板"
+    help="按下可将上一个统计信息复制到剪贴板"
+    font=INFOFONT
+    bkcolor=WHITEMAGENTA
+  endc
+  disable hcopy
+  nbatch=0
+  y=y+80
+  hlist=control LIST
+    window=hmain
+    position=7,4+y,XSIZ-14,177
+    help="速度测试历史和测量统计(1西格玛)"
+    font=FIXEDFONT
+    mode=M_VSCROLL
+    size=8192
+    menu="1Clear||2Small font|3Normal font"
+  endc
+  hstatus=control TEXT
+    window=hmain
+    position=7,186+y,XSIZ-285,24
+    text=format(" 速度和干扰测试%s",VERSION)
+    help="当前测试状态"
+    mode=M_BORDER
+    bkcolor=WHITE
+    font=MEDIUMFONT
+  endc
+  honce=control BUTTON
+    window=hmain
+    position=XSIZ-270,186+y,73,24
+    name="运行1次"
+    help="按下可以执行每个选定的命令"
+    bkcolor=WHITEMAGENTA
+  endc
+  hstart=control BUTTON
+    window=hmain
+    position=XSIZ-190,186+y,53,24
+    name="开始"
+    help="按下即可开始测试"
+    bkcolor=WHITEMAGENTA
+  endc
+  hstop=control BUTTON
+    window=hmain
+    position=XSIZ-130,186+y,53,24
+    name="停止"
+    help="按下即可停止测试"
+    bkcolor=WHITEMAGENTA
+  endc
+  disable hstop
+  hexit=control BUTTON
+    window=hmain
+    position=XSIZ-70,186+y,63,24
+    name="退出"
+    help="按下可以关闭此窗口"
+    bkcolor=WHITEMAGENTA
+  endc
+  if hexit==NULL then
+    lprintf(LIGHTRED,"SPEEDTST: Out of controls")
+    return
+  endif
+  draw show
+  runonce=0
+  issmall=0
+  while 1 do
+    if running then
+      t=Time()
+      if running==1 then
+        if t-tstart>=2000 then         // Initial timeout 2 seconds
+          nsent2s=nsent
+          nansw2s=nansw
+          change hstatus text=" Main test"
+          tstart=t
+          running=2
+        endif
+      else if stopontime then
+        if (t-tstart)/1000.0>=tstop Stop()
+      else
+        if nansw-nansw2s>=nstop Stop()
+      endif
+      if running==0 continue
+      if running==2 && (t-tupdate>99) Update(0)
+      for i=0,i<NBUF,i++ do
+        if $A[i].length==0 continue    // Command still pending
+        if $A[i].length>=5 then
+          nansw++                      // Answer received
+          j=source[i]
+          if running!=2 || j<0 then
+            ;
+          else if $A[i].answer==S_INPORT32 then
+            meastype[j]=$A[i].answer
+            Addsigma(d1[j],$int4($A[i]+5))
+          else if $A[i].answer==S_CALIBRATE then
+            meastype[j]=$A[i].answer
+            if $A[i].length>=31 then
+              padx=$int4($A[i]+23)/256.0
+              pady=$int4($A[i]+27)/256.0
+            else
+              padx=$int4($A[i]+5)*0.5+$int4($A[i]+9)*0.5
+              pady=$int4($A[i]+13)*0.5+$int4($A[i]+17)*0.5
+            endif
+            Addsigma(d1[j],padx)
+            Addsigma(d2[j],pady)
+            wx=$int4($A[i]+5)-$int4($A[i]+9)
+            wy=$int4($A[i]+13)-$int4($A[i]+17)
+            Addsigma(d3[j],Sqrt(wx*wx+wy*wy))
+            if $A[i].length>=23 then
+              Addsigma(d4[j],$int2($A[i]+21))
+            endif
+          else if $A[i].answer==S_MOVE then
+            // Add answer to statistics. I discard answers masrked as bad.
+            if meastype[j]==S_NOP || meastype[j]==$A[i].subcmd then
+              meastype[j]=$A[i].subcmd
+              measstat[j]=$A[i].status
+              if ($A[i].status & 0x8000)!=0 then
+                measbad[j]++           // No hardware
+              else if meastype[j]!=S_HVMEAS && ($A[i].status & 0x0800)!=0 then
+                measbad[j]++           // Bad measurement
+              else if (meastype[j]==S_HVMEAS || meastype[j]==M_CRT) &&         \
+                ($A[i].status & 0x0020)!=0 then
+                measbad[j]++           // HV or MSD breakdown
+              else
+                switch meastype[j]
+                  case S_FIELD:
+                    if ($A[i].status & 0x0020)!=0 measshort[j]++
+                    SERV.Convertfield($A[i],&c,&r)
+                    Addsigma(d1[j],c)
+                    Addsigma(d2[j],r)
+                    nant=Min(NANT,Max(0,$uint1($A[i]+9)-$uint1($A[i]+8)+1)+    \
+                      Max(0,$uint1($A[i]+11)-$uint1($A[i]+10)+1))
+                    for k=0,k<nant,k++ do
+                      Addsigma(dsin[j][k],$int2($A[i]+28+4*k))
+                      Addsigma(dcos[j][k],$int2($A[i]+30+4*k))
+                    enddo
+                  case S_RMEAS:
+                    Addsigma(d1[j],$A[i].r)
+                  case S_LAMEAS:
+                    Addsigma(d1[j],$A[i].r)
+                  case S_EXACTR:
+                    Addsigma(d1[j],$A[i].r)
+                  case S_HVMEAS:
+                    Addsigma(d1[j],$A[i].r)
+                  case S_FASTC:
+                    if ($A[i].status & 0x0020)!=0 measshort[j]++
+                    SERV.Convertfastc($A[i],&c,&r)
+                    Addsigma(d1[j],c)
+                    if ($A[i].status & 0x0180)==0x0180 then
+                      Addsigma(d3[j],r)
+                    else
+                      Addsigma(d2[j],r)
+                    endif
+                  case M_RLMEAS,M_RLDIFF:
+                    Addsigma(d1[j],$A[i].r)
+                    Addsigma(d2[j],$float4($A[i]+12))
+                  case M_CRT:
+                    if ($A[i].status & 0x0100)!=0 measshort[j]++
+                    Addsigma(d1[j],$float4($A[i]+9))
+                    Addsigma(d2[j],$float4($A[i]+13))
+                  case M_UI,M_UIEX:
+                    if ($A[i].status & 0x8801)!=0 then
+                      measbad[j]++
+                    else
+                      Addsigma(d1[j],0.0)      // Pro forma
+                      m=Min(($A[i].length-8)/10,NANT)
+                      for k=0,k<m,k++ do
+                        u=$float4($A[i]+10+10*k)
+                        Addsigma(dsin[j][k],u)
+                      enddo
+                    endif
+                  case M_MULTIC:
+                    if ($A[i].status & 0x0020)!=0 measshort[j]++
+                    SERV.Convertfastc($A[i],&c,&r)
+                    Addsigma(d1[j],c)
+                    Addsigma(d2[j],r)
+                    for k=0,k<NANT,k++ do
+                      if (($A[i].status & 0x4)!=0 && $A[i].length<32+k*4) ||   \
+                        (($A[i].status & 0x4)==0 && $A[i].length<30+k*4)       \
+                        break          // Bit 0x0004: frequency here
+                      SERV.Convertmultic($A[i],k,&c,&r)
+                      Addsigma(dsin[j][k],c)
+                      Addsigma(dcos[j][k],r)
+                    enddo
+                  case M_UNIC:
+                    if ($A[i].status & 0x0020)!=0 measshort[j]++
+                    Addsigma(d1[j],$float4($A[i]+10))
+                    Addsigma(d2[j],$float4($A[i]+14))
+                    Addsigma(d3[j],$float4($A[i]+18))
+                  case M_DIVIDER:
+                    Addsigma(d1[j],$float4($A[i]+8))
+                    if $A[i].status & 0x0040 then
+                      Addsigma(d2[j],$float4($A[i]+12))
+                      Addsigma(d3[j],$float4($A[i]+16))
+                    endif
+                  case M_COMP:
+                    if ($A[i].status & 0x8890)!=0 then
+                      measbad[j]++
+                    else
+                      Addsigma(d1[j],0.0)      // Pro forma
+                      if $A[i].status & 0x4000 then
+                        // Extended format with individual stati and units.
+                        m=Min(($A[i].length-10)/8,NANT)
+                        for k=0,k<m,k++ do
+                          u=$float4($A[i]+10+8*k)
+                          Addsigma(dsin[j][k],u)
+                          compunits[k]=$int4($A[i]+14+8*k)
+                        enddo
+                      else
+                        m=Min(($A[i].length-10)/4,NANT)
+                        for k=0,k<m,k++ do
+                          u=$float4($A[i]+10+4*k)
+                          Addsigma(dsin[j][k],u)
+                          compunits[k]=0
+                        enddo
+                      endif
+                    endif
+                  default:             // Unsupported measurement
+                endsw
+              endif
+            endif
+          endif
+          $A[i].length=1               // Invalid length means "accepted"
+        endif
+        for j=0,j<NCMD,j++ do          // Find next command to send
+          if Status(henable[next])!=0 then
+            if Gettext(next,s)<0 then
+              change hstatus text=format(" Cmd %c: Invalid expression {...}",  \
+                Letter(next))
+              Stop()
+            else if s[0]!='\0' then
+              break
+            endif
+          endif
+          next=(next+1)%NCMD
+        enddo
+        if j>=NCMD then                // No commands, continuation impossible
+          change hstatus text=" All commands disabled or empty!"
+          Stop()
+        else if running!=0 then        // OK, send next command
+          // Check for internal DELAY command.
+          k=0
+          while s[k]==' ' || s[k]=='\t' do k++; enddo
+          if Memicmp(s,"DELAY ",6)==0 then
+            m=SERV.Scanint(s+k+6,&t)
+            if m<=0 || t<=0 || t>30000 then
+              change hstatus text=format(" Cmd %c: Invalid delay",Letter(next))
+              Stop()
+            else
+              m=Time()
+              while Time()-m<t do
+                wait
+              enddo
+              next=(next+1)%NCMD
+            endif
+          else if SERV.Cmdimm(i,s+k)<=0 then
+            change hstatus text=format(" Unable to send command %i",i+1)
+            Stop()
+          else
+            source[i]=next
+            nsent++
+            next=(next+1)%NCMD
+          endif
+        endif
+      enddo
+    else
+      for i=0,i<NCMD,i++ do
+        if Pressed(hedit[i]) && toedit<0 then
+          toedit=i
+          disable hstart
+          change htframe position=1007,7,XSIZ-16,NCMD*CMDY+6
+          change heframe position=7,7,XSIZ-16,NCMD*CMDY+6
+          change hetitle text=format("Editing command %c",Letter(i))
+          s[0]='\0'; Text(hcmd[i],s)
+          Singlelinetomultiline(s,buf)
+          change heedit text=buf
+        endif
+        if runonce then
+          if Status(henable[i])==0 continue
+        else if Pressed(hsend[i])==0 then
+          continue
+        endif
+        confirm hcmd[i]
+        if Gettext(i,s)<0 then
+          change hstatus text=format(" Cmd %c: Invalid expression <...>",      \
+            Letter(next))
+          break
+        else if s[0]=='\0' then
+          break
+        else if s[0]=='$' then
+          if Embedded()==0 then
+            change hstatus text=" Can't pass command to TP"
+          else
+            k=SYS.Sendtext(s+1,i)
+            if k<=0 then
+              change hstatus text=format(" Unable to send command %c",         \
+              Letter(i))
+            else
+              change hstatus text=format(" Command %c sent",Letter(i))
+            endif
+          endif
+        else
+          // Check for internal DELAY command. Even in manual mode it must
+          // be executed.
+          k=0
+          while s[k]==' ' || s[k]=='\t' do k++; enddo
+          if Memicmp(s,"DELAY ",6)==0 then
+            m=SERV.Scanint(s+k+6,&t)
+            if m<=0 || t<=0 || t>30000 then
+              change hstatus text=format(" Cmd %c: Invalid delay",Letter(i))
+            else
+              change hstatus text=format(" Delay %i ms",t)
+              m=Time()
+              while Time()-m<t do
+                wait
+              enddo
+            endif
+          else
+            j=SERV.Parsecmdext(s+k,buf,error)
+            if j<0 then
+              change hstatus text=format(" Cmd %c: %s",Letter(i),error)
+            else
+              k=SYS.Send(j,buf,i)
+              if k<=0 then
+                change hstatus text=format(" Unable to send command %c",       \
+                Letter(i))
+              else
+                change hstatus text=format(" Command %c sent",Letter(i))
+              endif
+            endif
+          endif
+        endif
+      enddo
+      runonce=0
+    endif
+    switch Menu(hlist)
+      case 1: clear hlist
+      case 2: change hlist font=TERMINALFONT; issmall=1
+      case 3: change hlist font=FIXEDFONT; issmall=0
+    endsw
+    if toedit>=0 && Pressed(heok) then
+      Text(heedit,buf)
+      Multilinetosingleline(buf,s)
+      change hcmd[toedit] text=s
+      confirm hcmd[toedit]
+      change heframe position=1007,7,XSIZ-16,NCMD*CMDY+6
+      change htframe position=7,7,XSIZ-16,NCMD*CMDY+6
+      if running==0 enable hstart
+      toedit=-1
+    else if toedit>=0 && Pressed(hecancel) then
+      change heframe position=1007,7,XSIZ-16,NCMD*CMDY+6
+      change htframe position=7,7,XSIZ-16,NCMD*CMDY+6
+      if running==0 enable hstart
+      toedit=-1
+    else if Pressed(htedit) || Pressed(htscroll) then
+      tstop=0; Text(htedit,s); sscanf(s,"%i",&tstop)
+      if tstop<20 then i=1;
+      else if tstop<200 then i=10;
+      else if tstop<2000 then i=100;
+      else if tstop<20000 then i=1000;
+      else if tstop<200000 then i=10000;
+      else i=100000; endif
+      tstop=tstop+i*Status(htscroll)
+      change htscroll select=0
+      if tstop<0 tstop=0
+      if tstop>9000000 tstop=9000000
+      change htedit text=format(" %i",tstop)
+      change htrun mode=M_CHECKED
+    else if Pressed(hnedit) || Pressed(hnscroll) then
+      nstop=0; Text(hnedit,s); sscanf(s,"%i",&nstop)
+      if nstop<20 then i=1;
+      else if nstop<200 then i=10;
+      else if nstop<2000 then i=100;
+      else if nstop<20000 then i=1000;
+      else if nstop<200000 then i=10000;
+      else i=100000; endif
+      nstop=nstop+i*Status(hnscroll)
+      change hnscroll select=0
+      if nstop<0 nstop=0
+      if nstop>9000000 nstop=9000000
+      change hnedit text=format(" %i",nstop)
+      change hnrun mode=M_CHECKED
+    else if Pressed(hcopy) then
+      Clipcopy(batch)
+    else if Pressed(honce) then
+      if toedit>=0 then
+        Text(heedit,buf)
+        Multilinetosingleline(buf,s)
+        Substitute(s,cmd)
+        if cmd[0]=='\0' then
+          ;
+        else if cmd[0]=='$' then
+          if Embedded()==0 then
+            change hstatus text=" Can't pass command to TP"
+          else
+            k=SYS.Sendtext(cmd+1,i)
+            if k<=0 then
+              change hstatus text=" Unable to send command"
+            else
+              change hstatus text=" Command sent"
+            endif
+          endif
+        else
+          k=0
+          while cmd[k]==' ' || cmd[k]=='\t' do k++; enddo
+          if Memicmp(cmd,"DELAY ",6)==0 then
+            change hstatus text=" Delay ignored"
+          else
+            j=SERV.Parsecmdext(cmd+k,buf,error)
+            if j<0 then
+              change hstatus text=format(" Edit: %s",error)
+            else
+              k=SYS.Send(j,buf,toedit)
+              if k<=0 then
+                change hstatus text=" Unable to send command"
+              else
+                change hstatus text=" Command sent"
+              endif
+            endif
+          endif
+        endif
+      else if running==0 then
+        j=0
+        for i=0,i<NCMD,i++ do
+          if Status(henable[i])!=0 j++
+        enddo
+        if j==0 then
+          change hstatus text=" All commands disabled!"
+        else
+          for i=0,i<NCMD,i++ do
+            confirm hcmd[i]
+          enddo
+          runonce=1
+        endif
+      endif
+    else if Pressed(hprot) then
+      if hfile==NULL then
+        Strcpy(s,"speedtst.txt")
+        if SYS.Browse(hmain,s,"Select protocol file",0)!=0 then
+          hfile=Fopen(s,"wt")
+          if hfile==NULL then
+            change hstatus text=" Unable to open protocol"
+          else
+            change hprot color=YELLOW
+            change hprot bkcolor=LIGHTRED
+          endif
+        endif
+      else
+        Fclose(hfile)
+        hfile=NULL
+        change hprot color=BLACK
+        change hprot bkcolor=WHITEMAGENTA
+      endif
+    else if Pressed(hstart) && running==0 then
+      j=0
+      for i=0,i<NCMD,i++ do
+        if Status(henable[i])!=0 j++
+      enddo
+      if j==0 then
+        change hstatus text=" All commands disabled!"
+      else
+        for i=0,i<NCMD,i++ do
+          confirm hcmd[i]
+        enddo
+        Start()
+      endif
+    else if Pressed(hstop) && running!=0 then
+      Stop()
+    else if Pressed(hexit) then
+      Text(htedit,s); sscanf(s,"%i",&tstop)
+      Text(hnedit,s); sscanf(s,"%i",&nstop)
+      mask=0
+      for i=0,i<NCMD,i++ do
+        if Status(henable[i])!=0 mask=mask|(1<<i)
+      enddo
+      Setini("Debug","Speedtest","%i,%i,%i,%i",tstop,nstop,mask,Status(htrun))
+      for i=0,i<NMACRO,i++ do
+        confirm hmacro[i]
+      enddo
+      break
+    endif
+    wait
+  enddo
+end
+

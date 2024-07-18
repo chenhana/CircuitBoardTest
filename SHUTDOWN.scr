@@ -1,0 +1,234 @@
+﻿#include "ls.icl"
+#include "or.icl"
+#cmdbuff 2
+
+external int SYS.Accessio(int slavepresent);
+
+function int main()
+  int i,n,t,tjet,currprocess,token
+  char buf[256],compname[256],newstate[256]
+  handle hmain,syslist,hinfo,user,advapi,kernel,hser
+  // Temporarily disable access to slave.
+  SYS.Accessio(0);
+  user=LoadDLL("user32.dll");
+  advapi=LoadDLL("Advapi32.dll");
+  kernel=LoadDLL("Kernel32.dll");
+  // Give program the rights to shutdown. Window$, Window$...
+  i=256
+  CallDLL(kernel,"GetComputerNameA",compname,&i);
+  currprocess=CallDLL(kernel,"GetCurrentProcess");
+  CallDLL(advapi,"OpenProcessToken",currprocess,0x28,&token);
+  CallDLL(advapi,"LookupPrivilegeValueA",compname,                             \
+    "SeShutdownPrivilege",newstate+4)
+  $uint4(newstate)=1
+  $uint4(newstate+12)=2
+  CallDLL(advapi,"AdjustTokenPrivileges",token,0,newstate,0,0,0)
+  SYS.Compile("serv.scr",1);
+  hmain=SYS.Getmainwindow()
+  change hmain position=*,*,638,456
+  change hmain name="UPS监视器"
+  syslist=SYS.Getsyslist();
+  clear syslist
+  change syslist mode=0
+  change syslist help="系统信息"
+  change syslist font=LARGEFONT
+  change syslist position=5,149,628,303
+  hinfo=control TEXT
+    window=NULL
+    position=5,5,628,139
+    help=" "
+    font=HUGEFONT
+    color=LIGHTRED
+    mode=M_CENTERED|M_BORDER
+  endc
+  while 1 do
+    hser=Fserial(2,9600,8,NOPARITY)
+    if (hser!=NULL) break
+    change hinfo text="TRYING TO OPEN COM2:"
+    delay 500
+    clear hinfo
+    delay 500
+  enddo
+  while 1 do
+    // Wait for signal from UPS.
+    change hinfo color=BLACK
+    change hinfo text="MONITORING\nUPS"
+    t=0
+    while 1 do
+      Fwrite("A",1,hser)
+      delay 3000                       // Check interface each 3 seconds
+      n=Fread(buf,1,hser)
+      if n==0 break                    // UPS activated!
+      t++
+      if t==5 then
+        i=CallDLL(user,"FindWindowA","OLLYTEST","UPS Monitor")
+        CallDLL(user,"ShowWindow",i,6) // Minimize window
+      endif
+    enddo
+    // UPS active, restore main window.
+    i=CallDLL(user,"FindWindowA","OLLYTEST","UPS Monitor")
+    CallDLL(user,"ShowWindow",i,9)     // restore window
+    Strtime(buf,"Signal on %a %d-%b-%Y %H:%M:%S",0,0)
+    add syslist text=format("%s",buf)
+    // Wait 60 seconds for recovery.
+    t=Time()
+    for i=60,i>0,i-- do
+      change hinfo color=LIGHTRED
+      change hinfo text=format("UPS ACTIVE\nSHUTDOWN IN %i S",i)
+      Fwrite("A",1,hser)
+      while Time()-t<1000 do
+        wait
+      enddo
+      t=t+1000
+      n=Fread(buf,1,hser)
+      if n!=0 && buf[0]=='A' break     // UPS recovered
+    enddo
+    if i<=0 break                      // No recovery, shut down
+  enddo
+  change hinfo text="SHUTDOWN\nIN PROGRESS"
+  add syslist text="Closing Test Player..."
+  SYS.Killwinproc("Test");
+  SYS.Killwinproc("PCB Test");
+  delay 1000
+  add syslist text="Closing Flying Debugger..."
+  SYS.Killwinproc("Flying Debugger");
+  delay 1000
+  add syslist text="Closing another instance of Ollytest..."
+  SYS.Killwinproc("OllyTest");
+  delay 1000
+  // Re-enable access to slave.
+  SYS.Accessio(1);
+  add syslist text="Soft Reset..."
+  for i=0,i<5,i++ do
+    SYS.Softimm(0)
+    t=Time()+10000
+    while $A[0].length==0 do
+      if t<Time() break
+      wait
+    enddo
+    if $A[0].length!=0 break
+    add syslist text="Retrying Soft Reset..."
+  enddo
+  add syslist text="Stopping LINX printer..."
+  for i=0,i<10,i++ do
+    delay 200
+    buf[0]=S_DEBUG
+    buf[1]=0x15                        // Command to LINX printer
+    buf[2]=0
+    buf[3]=0
+    buf[4]=18                          // Stop print
+    SYS.Sendimm(0,5,buf)               // Send command
+    t=Time()+3000                      // Set timeout 3 seconds
+    while $A[0].length==0 do
+      if t<Time() break                // Error: timeout
+      wait
+    enddo
+    if $A[0].length!=0 then            // Answer received, check
+      if $A[0].rawdata[5]!=6 continue
+      if $A[0].rawdata[7]==0 break     // Command accepted
+    endif
+  enddo
+  if i>=10 && ($A[0].answer==S_ERROR || $A[0].length==5) then
+    add syslist text="Unable to access printer!"
+    goto skipprinter
+  endif
+  delay 500
+  add syslist text="Stopping printer jet head..."
+  for i=0,i<5,i++ do
+    buf[0]=S_DEBUG
+    buf[1]=0x15                        // Command to LINX printer
+    buf[2]=0
+    buf[3]=0
+    buf[4]=16                          // Stop jet
+    SYS.Sendimm(0,5,buf)               // Send command
+    t=Time()+3000                      // Set timeout 3 seconds
+    while $A[0].length==0 do
+      if t<Time() break                // Error: timeout
+      wait
+    enddo
+    if $A[0].length!=0 then            // Answer received, check
+      if $A[0].rawdata[5]!=6 continue
+      if $A[0].rawdata[7]==0 break     // Command accepted
+    endif
+    delay 500
+  enddo
+  if i>=5 && $A[0].length==5 then
+    add syslist text="Unable to access printer!"
+    goto skipprinter
+  endif
+  delay 500
+  tjet=Time()+90000
+  while tjet>Time() do
+    buf[0]=S_DEBUG
+    buf[1]=0x15                        // Command to LINX printer
+    buf[2]=0
+    buf[3]=0
+    buf[4]=20                          // Status request
+    SYS.Sendimm(0,5,buf)               // Send command
+    t=Time()+3000                      // Set timeout 3 seconds
+    while $A[0].length==0 do
+      if t<Time() break                // Error: timeout
+      wait
+    enddo
+    if $A[0].length>=0 then            // Answer received, check
+      if $A[0].rawdata[5]!=6 continue
+      if $A[0].rawdata[7]!=0 continue  // Command accepted
+      if $A[0].rawdata[9]==3 break     // Jet off
+    endif
+  enddo
+  add syslist text="Switching printer off..."
+  for i=0,i<5,i++ do
+    buf[0]=S_DEBUG
+    buf[1]=0x15                        // Command to LINX printer
+    buf[2]=0
+    buf[3]=0
+    buf[4]=95                          // Switch printer off
+    buf[5]=1
+    SYS.Sendimm(0,6,buf)               // Send command
+    t=Time()+10000                     // Set timeout 10 seconds
+    while $A[0].length==0 do
+      if t<Time() break                // Error: timeout
+      wait
+    enddo
+    if $A[0].length!=0 then            // Answer received, check
+      if $A[0].rawdata[5]!=6 continue
+      if $A[0].rawdata[7]==0 break     // Command accepted
+    endif
+    delay 1000
+    add syslist text="Retrying printer off..."
+  enddo
+  t=Time()+16000
+  while t>Time() do
+    wait
+  enddo
+skipprinter:
+  add syslist text="Sending Power Off..."
+  buf[0]=S_LOADRUN
+  buf[1]=0                             // Hard reset
+  buf[2]=0x55                          // Power off
+  buf[3]=0
+  buf[4]=0
+  buf[5]=0
+  for i=0,i<5,i++ do
+    SYS.Sendimm(0,6,buf)
+    t=Time()+10000
+    while $A[0].length==0 do
+      if t<Time() break
+      wait
+    enddo
+    if $A[0].length!=0 break
+    add syslist text="Retrying Power Off..."
+  enddo
+  delay 2000
+  add syslist text="Shutdown Windows NT..."
+  delay 2000
+
+  advapi=LoadDLL("Advapi32.dll");
+  CallDLL(advapi,"InitiateSystemShutdownA",                                    \
+    0,"Shutdown on request from UPS",60,1,0);
+
+  change hinfo text="SHUTDOWN\nCOMPLETED"
+  while 1 do
+    wait
+  enddo
+end

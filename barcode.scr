@@ -1,0 +1,231 @@
+#include "ls.icl"
+#include "or.icl"
+
+#define VERSION        "1.00"
+
+#cmdbuff 2                             // 2 answer buffers
+
+#define MAINX          450             // Width of main window
+#define MAINY          300             // Height of main window
+
+handle           hmain                 // Main window
+handle           hcmd                  // Commands
+handle           hdev1                 // Select first barcode reader
+handle           hdev2                 // Select second barcode reader
+handle           hwait                 // Wait message
+handle           hinit                 // Init button
+handle           hsend                 // Send button
+handle           hrep                  // Repeat button
+handle           hanswer               // Answer from barcode
+handle           hexit                 // Exit button
+
+// First character:
+// (*) There will be no answer;
+// (+) Comment.
+char             sinit[4,64] = {     \ // Initialization strings
+  "*<K200,4>",                       \ // Scan on request
+  "*<K201,S>",                       \ // Letter 'A' starts conversion
+  "+Use command <S> to scan code.",  \ // Comment for user
+  "" }                                 // End of sequence
+
+// Sends command and receives answer.
+function int Sendcmd(char *s,int waitanswer)
+  int i,t,status
+  char buf[1024]
+  i=Strlen(s)
+  if i==0 return                       // No command
+  if i>1000 then
+    change hanswer color=LIGHTRED
+    add hanswer text="Command is too long"
+    return
+  endif
+  buf[0]=S_EXTINIT
+  if Status(hdev1) & 1 then
+    buf[1]=0x02                        // RS-232 on channel 2 (reader 1)
+  else
+    buf[1]=0x03                        // RS-232 on channel 3 (reader 2)
+  endif
+  if waitanswer then
+    buf[1]=buf[1] | 0x40               // Answer from device will follow
+  endif
+  buf[2]=0x1A                          // 9600, even, 1 stop, 7 bit
+  buf[3]=(waitanswer?5:2)              // Timeout
+  buf[4]=0                             // End of echo
+  buf[5]='\n'                          // End of answer
+  buf[6]=0                             // End of prompt
+  buf[7]=0
+  buf[8]=0
+  buf[9]=0
+  buf[10]=0
+  buf[11]=0
+  $uint2(buf+12)=i
+  Memcpy(buf+14,s,i)
+  if SYS.Sendimm(0,i+14,buf)<=0 then
+    change hanswer color=LIGHTRED
+    add hanswer text="Unable to send command"
+    return
+  endif
+  change hwait color=LIGHTRED
+  change hanswer color=DARKGRAY
+  add hanswer text=format("Sent: '%s'",s)
+  t=Time()
+  while $A[0].length==0 do
+    if Time()-t>6000 then              // No answer at all from tester
+      change hanswer color=LIGHTRED
+      add hanswer text="No answer from tester"
+      change hwait color=GRAY
+      return
+    endif
+    wait
+  enddo
+  change hwait color=GRAY
+  status=$uint2($A[0]+5)
+  if status!=0 then
+    change hanswer color=LIGHTRED
+    add hanswer text=                                                          \
+      format("Error while executing command (status 0x%04X):",status)
+    if status & 0x8000 add hanswer text=" - Serial interface absent"
+    if status & 0x0040 add hanswer text=" - Answer is too long"
+    if status & 0x0020 add hanswer text=" - BREAK detected"
+    if status & 0x0010 add hanswer text=" - I/O error while receiving answer"
+    if status & 0x0008 add hanswer text=" - Internal error in BARCODE.SCR"
+    if status & 0x0002 add hanswer text=" - Timeout while waiting for answer"
+  endif
+  i=$uint2($A[0]+7)
+  if i>0 then
+    Memcpy(buf,$A[0]+9,i)
+    buf[i]='\0'
+    if buf[i-1]=='\r' || buf[i-1]=='\n' buf[i-1]='\0'
+    if buf[i-2]=='\r' || buf[i-2]=='\n' buf[i-2]='\0'
+    change hanswer color=GREEN
+    add hanswer text=format("Answer: '%s'",buf)
+  endif
+  if waitanswer==0 delay 50            // Not too fast!..
+end
+
+function int main()
+  int i,n,repcnt,repsel
+  char s[1024]
+  hmain=control WINDOW
+    window=NULL
+    position=10,10,MAINX,MAINY
+    help=" "
+    name=format("条码测试 v%s",VERSION)
+    bkcolor=GRAY
+    size=1024
+  endc
+  hcmd=control COMBOEDIT
+    window=hmain
+    position=5,5,MAINX-10,190
+    name="条形码"
+    help="命令"
+    mode=M_VSCROLL
+  endc
+  draw window=hmain at 5,51 font=INFOFONT text="Select scanner:" show
+  hdev1=control RADIO
+    window=hmain
+    position=100,33,28,24
+    text="1"
+    help="选择第一个条形码阅读器"
+    mode=M_CHECKED
+  endc
+  hdev2=control RADIO
+    window=hmain
+    position=130,33,28,24
+    text="2"
+    help="选择第二个条形码阅读器"
+  endc
+  hwait=control TEXT
+    window=hmain
+    position=MAINX/2-55,35,65,24
+    text="稍等..."
+    help=" "
+    font=MEDIUMFONT
+    color=GRAY                         // Initially invisible
+  endc
+  hinit=control BUTTON
+    window=hmain
+    position=MAINX-210,32,65,24
+    text="Init"
+    help="发送初始化命令"
+  endc
+  hsend=control BUTTON
+    window=hmain
+    position=MAINX-140,32,65,24
+    text="Send"
+    help="发送命令"
+  endc
+  hrep=control BUTTON
+    window=hmain
+    position=MAINX-70,32,65,24
+    text="Repeat"
+    help="重复命令"
+    color=BLACK
+    bkcolor=GRAY
+  endc
+  hanswer=control LIST
+    window=hmain
+    position=5,59,MAINX-10,MAINY-90
+    help="响应"
+    bkcolor=WHITE
+    mode=M_BORDER|M_VSCROLL
+    size=524288
+    menu="1Large font|2Small font|3Clear"
+  endc
+  hexit=control BUTTON
+    window=hmain
+    position=MAINX-70,MAINY-28,65,24
+    text="关闭"
+    help="关闭窗口"
+  endc
+  change hanswer color=BLACK
+  add hanswer text="Ready."
+  repcnt=0; repsel=0
+  while 1 do
+    if Pressed(hdev1) || Pressed(hdev2) then
+      repcnt=0
+    else if Pressed(hinit) then
+      for i=0,sinit[i,0]!='\0',i++ do
+        if sinit[i,0]=='+' then        // Comment
+          change hanswer color=BLACK
+          add hanswer text=sinit[i]+1
+        else if sinit[i,0]=='*' then   // Don't wait for answer
+          Sendcmd(sinit[i]+1,0)
+        else
+          Sendcmd(sinit[i]+1,1)        // Wait for answer
+        endif
+      enddo
+      repcnt=0
+    else if Pressed(hsend) then
+      repcnt=1
+    else if Pressed(hrep) then
+      if repcnt>1 then repcnt=0;
+      else repcnt=0x7FFFFFFF; endif
+    else if Pressed(hexit) then
+      break
+    endif
+    if repcnt then
+      repcnt--
+      n=Text(hcmd,s)
+      if n!=0 Sendcmd(s,1)
+    endif
+    if repcnt>1 && repsel==0 then
+      change hrep color=LIGHTRED
+      change hrep bkcolor=YELLOW
+      repsel=1
+    else if repcnt==0 && repsel!=0 then
+      change hrep color=BLACK
+      change hrep bkcolor=GRAY
+      repsel=0
+    endif
+    i=Menu(hanswer)
+    if i==1 then
+      change hanswer font=MAINFONT
+    else if i==2 then
+      change hanswer font=TERMINALFONT
+    else if i==3 then
+      clear hanswer
+    endif
+    wait
+  enddo
+end

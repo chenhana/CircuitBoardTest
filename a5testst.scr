@@ -1,0 +1,392 @@
+#define VERSION        "1.02"
+#define DESCRIPTION    "A5/A6 production test"
+
+// 1.01: Small bugfix (line 277, wrong "+i", correct "+1").
+// 1.02: Support for testers with more than 16 heads.
+
+#include "ls.icl"                  // Standard functions
+#include "or.icl"                // A2 command names
+#multinst
+#cmdbuff 32
+#zeroid                                // Process answers with zero command ID
+
+#define MAINX          600
+#define MAINY          400             // Minimal height, may be increased
+#define STATX          115
+#define STATY          30
+#define STATDX         (MAINX-220)
+#define STATDY         (mainy-40)
+
+handle           hmain                 // Main window
+handle           hselstat              // General statistics
+handle           hselhead[32]          // Individual per-head statistics
+handle           hresult               // General statistics data
+handle           hlist[32]             // Individual statistics lists
+handle           htestheads            // Test heads
+handle           htestvideo            // Test video cameras
+handle           hdonttouch            // Don't touch board
+handle           hruntime              // Duration of test
+handle           hstart                // Start test
+handle           hstop                 // Stop test
+handle           hclear                // Clear all statistics
+handle           hexit                 // Close window
+int              mainy                 // Height of the main window, pixel
+int              selected              // Currently selected head (-1: general)
+int              nmove[32]             // Number of movements per head
+int              nerr[32]              // Number of errors per head
+int              redraw                // Update main statistics
+int              running               // Whether test is running
+int              runstart              // Time of last runtime update
+int              runtime               // Test time, seconds
+float            lastx[32],lasty[32]   // Last contacted point, mm
+
+external int SERV.Decodeanswer(char *answer,char *text,char *extra,int mask);
+
+function int Answerproc(char *answer,int info)
+  char text[256],extra[2048]
+  int head
+  if answer[4]==0xF0 then
+    // Internal message.
+    if Stricmp(answer+5,"HARD RESET")==0 then
+      change hstart color=BLACK
+      change hstart bkcolor=GRAY
+      running=0
+    endif
+  else if answer[4]==S_ERROR && (answer[6] & 0xFC)==0 && answer[7]!=0xFF then
+    // Error from head/video controller.
+    head=answer[7]*2
+    if (answer[8] & 0x4C) head++
+    if head<32 && hselhead[head]!=NULL then
+      SERV.Decodeanswer(answer,text,extra,0x7FFFFFFF)
+      add hlist[head] text=text
+      nerr[head]++
+      redraw=1
+    endif
+  endif
+end
+
+// Service function, highlights specified button and shows corresponding log.
+function int Showlog(handle h)
+  int i
+  for i=0,i<32,i++ do
+    if hselhead[i]==NULL continue
+    if hselhead[i]==h then
+      change hselhead[i] color=LIGHTRED
+      change hselhead[i] bkcolor=YELLOW
+      change hlist[i] position=STATX,STATY,STATDX,STATDY
+      selected=i
+    else
+      change hselhead[i] color=BLACK
+      change hselhead[i] bkcolor=GRAY
+      change hlist[i] position=-10,-10,1,1
+    endif
+  enddo
+  if h==hselstat then
+    change hselstat color=LIGHTRED
+    change hselstat bkcolor=YELLOW
+    change hresult position=STATX,STATY,STATDX-2,STATDY-2
+    selected=-1
+  else
+    change hselstat color=BLACK
+    change hselstat bkcolor=GRAY
+    change hresult position=-10,-10,1,1
+  endif
+end
+
+function int main()
+  int i,j,n,x,y,rail,head
+  float x0,y0,x1,y1
+  float r,step,lx,ly,rx,ry,newlx,newly,newrx,newry
+  char s[256]
+  mainy=MAINY
+  if $LAY.nfing>8 mainy=mainy+32*($LAY.nfing-8)
+  // Create main window.
+  hmain=control WINDOW
+    window=NULL
+    position=10,10,MAINX,mainy
+    name=format("%s v%s",DESCRIPTION,VERSION)
+    help=" "
+    bkcolor=LIGHTGRAY
+    size=128
+  endc
+  // Create general statistics button and window.
+  hselstat=control BUTTON
+    window=hmain
+    position=5,30,100,20
+    name="描述"
+    help="查看错误的一般统计信息"
+    color=BLACK
+    bkcolor=GRAY
+  endc
+  hresult=control CHILD
+    window=hmain
+    position=STATX+1,STATY+1,STATDX-2,STATDY-2
+    name=""
+    help="错误的一般统计息"
+    color=BLACK
+    bkcolor=WHITE
+    mode=M_BORDER
+    size=4096
+  endc
+  // Create individual statistics buttons and lists.
+  for j=0,j<=$LAY.nfing,j++ do         // Rail
+    y=65+j*25
+    if j>=$LAY.nfing/2 y=y+10
+    if j>=$LAY.nfing y=y+10
+    for i=0,i<2,i++ do                 // Head
+      if j==$LAY.nfing &&                                                      \
+        ((i==0 && ($LAY.cameras & 1)==0) ||                                    \
+        (i==1 && ($LAY.cameras & 2)==0)) continue
+      x=i*55+5
+      hselhead[j*2+i]=control BUTTON
+        window=hmain
+        position=x,y,45,20
+        name=format("%i%c",j,i==0?'L':'R')
+        help=format("按下可查看测试头%i%c的统计信息",j,i==0?'L':'R')
+        color=BLACK
+        bkcolor=GRAY
+      endc
+      hlist[j*2+i]=control LIST
+        window=hmain
+        position=-10,-10,1,1
+        help=format("测试头%i%c的统计",j,i==0?'L':'R')
+        color=BLACK
+        bkcolor=WHITE
+        size=65536                     // Enough for 500-700 messages
+        font=TERMINALFONT
+      endc
+      if i==0 then                     // Left head
+        lastx[j*2+i]=$LAY.leftlimit/1000.0+20.0
+      else                             // Right head
+        lastx[j*2+i]=$LAY.rightlimit/1000.0-20.0
+      endif
+      lasty[j*2+i]=$LAY.yoffset[j]/1000.0
+      $A[j*2+i].length=5
+    enddo
+  enddo
+  // Create test type selection controls.
+  htestheads=control CHECKBOX
+    window=hmain
+    position=MAINX-100,30,90,20
+    text="Test heads"
+    help="检查测试头"
+    mode=M_CHECKED
+  endc
+  htestvideo=control CHECKBOX
+    window=hmain
+    position=MAINX-100,60,90,20
+    text="Test video"
+    help="测试摄像头"
+    mode=($LAY.cameras==0?0:M_CHECKED)
+  endc
+  if $LAY.cameras==0 disable htestvideo
+  hdonttouch=control CHECKBOX
+    window=hmain
+    position=MAINX-100,90,90,20
+    text="Don't touch"
+    help="在不接触板的情况下移动测试头"
+    mode=M_CHECKED
+  endc
+  // Create runtime clock.
+  hruntime=control TEXT
+    window=hmain
+    position=MAINX-95,150,80,20
+    text="0:00.00"
+    help="随机测试的总时长，小时:分钟"
+    font=MEDIUMFONT
+    mode=M_BORDER|M_CENTERED
+  endc
+  // Create action buttons.
+  hstart=control BUTTON
+    window=hmain
+    position=MAINX-100,mainy-135,90,25
+    text="Start"
+    help="按下即可开始测试"
+    color=BLACK
+    bkcolor=GRAY
+  endc
+  hstop=control BUTTON
+    window=hmain
+    position=MAINX-100,mainy-105,90,25
+    text="停止"
+    help="按下即可停止测试"
+  endc
+  hclear=control BUTTON
+    window=hmain
+    position=MAINX-100,mainy-75,90,25
+    text="Clear"
+    help="按下可以清除所有统计信息"
+  endc
+  hexit=control BUTTON
+    window=hmain
+    position=MAINX-100,mainy-35,90,25
+    text="Exit"
+    help="按下可以关闭生产测试"
+  endc
+  selected=-1                          // General statistics by default
+  redraw=1
+  running=0
+  runtime=0
+  while 1 do
+    if Pressed(hselstat) then          // Show general statistics
+      Showlog(hselstat)
+    else if Pressed(htestheads) then
+      if Status(htestheads)==0 && Status(htestvideo)==0 then
+        change htestvideo mode=M_CHECKED
+      endif
+    else if Pressed(htestvideo) then
+      if Status(htestheads)==0 && Status(htestvideo)==0 then
+        change htestheads mode=M_CHECKED
+      endif
+    else if Pressed(hstart) then
+      if running continue              // Test is already running
+      runstart=Time()
+      change hstart color=LIGHTRED
+      change hstart bkcolor=YELLOW
+      running=1
+    else if Pressed(hstop) then
+      change hstart color=BLACK
+      change hstart bkcolor=GRAY
+      running=0
+    else if Pressed(hclear) then
+      for i=0,i<32,i++ do
+        if hselhead[i]==NULL continue
+        clear hlist[i]
+        nmove[i]=0
+        nerr[i]=0
+      enddo
+      runtime=0
+      runstart=Time()
+      change hruntime text="0:00.00"
+      redraw=1
+    else if Pressed(hexit) then
+      break
+    endif
+    for i=0,i<32,i++ do
+      if hselhead[i]==NULL continue
+      if Pressed(hselhead[i]) Showlog(hselhead[i])
+    enddo
+    if running then
+      // Update timer.
+      if Time()-runstart>1000 then
+        runtime++
+        change hruntime text=format("%i:%02i.%02i",                            \
+          runtime/3600,(runtime/60)%60,runtime%60)
+        runstart=runstart+1000
+        redraw=1
+      endif
+      if Status(htestheads)!=0 &&                                              \
+        (Status(htestvideo)==0 || (runtime & 0xFF)<=192) then
+        // Move heads.
+        for rail=0,rail<$LAY.nfing,rail++ do
+          if hselhead[rail*2]==NULL || hselhead[rail*2+1]==NULL continue
+          if $A[rail*2].length==0 && $A[rail*2+1].length==0 continue
+          // Working area limits, safety border 10 mm.
+          x0=$LAY.leftlimit/1000.0+10.0
+          x1=$LAY.rightlimit/1000.0-10.0
+          y0=$LAY.bottom[rail]/1000.0+10.0
+          y1=$LAY.top[rail]/1000.0-10.0
+          // Calculate new coordinates.
+          while 1 do
+            lx=lastx[rail*2]
+            ly=lasty[rail*2]
+            rx=lastx[rail*2+1]
+            ry=lasty[rail*2+1]
+            step=Random(x1-x0)         // Prefere small steps
+            step=Random(step)
+            step=Random(step)
+            newlx=lx+Random(step)-step/2.0
+            newly=ly+Random(step)-step/2.0
+            newrx=rx+Random(step)-step/2.0
+            newry=ry+Random(step)-step/2.0
+            if newlx<x0 || newlx>x1 || newly<y0 || newly>y1 continue
+            if newrx<x0 || newrx>x1 || newry<y0 || newry>y1 continue
+            if Abs(newlx-newrx)>20.0 break
+          enddo
+          // Exchange left and right if necessary.
+          if newlx>newrx then
+            r=newlx; newlx=newrx; newrx=r;
+          endif
+          // Save new coordinates.
+          lastx[rail*2]=newlx
+          lasty[rail*2]=newly
+          lastx[rail*2+1]=newrx
+          lasty[rail*2+1]=newry
+          // Send command.
+          n=sprintf(s,"M %i(%f,%fA50H10) %i(%f,%fA50H10) ",                    \
+            rail*2,newlx,newly,rail*2+1,newrx,newry)
+          if Status(hdonttouch)==0 then
+            sprintf(s+n,"R(%i,%i)",rail*2,rail*2+1)
+          else
+            sprintf(s+n,"NOP")
+          endif
+          if $A[rail*2].length!=0 then
+            $A[rail*2].length=0
+            SERV.Cmdimm(rail*2,s)
+          else if $A[rail*2+1].length!=0 then
+            $A[rail*2+1].length=0
+            SERV.Cmdimm(rail*2+1,s)
+          endif
+          nmove[rail*2]++
+          nmove[rail*2+1]++
+        enddo
+      else if Status(htestvideo)!=0 &&                                         \
+        (Status(htestheads)==0 || (runtime & 0xFF)>192) then
+        // Move video cameras.
+        for i=0,i<2,i++ do
+          head=$LAY.nfing*2+i
+          if hselhead[head]==NULL continue
+          if $A[head].length==0 continue
+          // Working area limits, safety border 20 mm.
+          x0=($LAY.leftlimit+$LAY.videodeadx)/1000.0+20.0
+          x1=($LAY.rightlimit-$LAY.videodeadx)/1000.0-20.0
+          y0=$LAY.bottom[$LAY.nfing]/1000.0+20.0
+          y1=$LAY.top[$LAY.nfing]/1000.0-20.0
+          // Calculate new coordinates.
+          while 1 do
+            lx=lastx[head]
+            ly=lasty[head]
+            step=Random(x1-x0)         // Prefere small steps
+            step=Random(step)
+            newlx=lx+Random(step)-step/2.0
+            newly=ly+Random(step)-step/2.0
+            if newlx>x0 && newlx<x1 && newly>y0 && newly<y1 break
+          enddo
+          // Save new coordinates.
+          lastx[head]=newlx
+          lasty[head]=newly
+          // Send command.
+          n=sprintf(s,"M %i(%f,%fA5) NOP",head,newlx,newly)
+          $A[head].length=0
+          SERV.Cmdimm(head,s)
+          nmove[head]++
+        enddo
+      endif
+    endif
+    if redraw then
+      // Redraw main statistics.
+      redraw=0                         // Volatile! Clear before using data!
+      draw window=hresult bkcolor=WHITE
+      clear hresult
+      y=10
+      for i=0,i<32,i++ do
+        if i==$LAY.nfing y=y+5
+        if i==$LAY.nfing*2 y=y+5
+        if hselhead[i]==NULL continue
+        draw at 10,y color=BLACK
+        if i>=$LAY.nfing*2 then
+          draw text=format("Video %s:",(i & 1?"bot":"top"))
+        else
+          draw text=format("Head %i%c:",i/2,(i & 1?'R':'L'))
+        endif
+        draw color=(nerr[i]==0?BLACK:LIGHTRED)
+        draw at 90,y text=format("%i movements, %i errors",nmove[i],nerr[i])
+        y=y+18
+      enddo
+      draw show
+    endif
+    wait
+  enddo
+  SYS.Softreset(0)
+end
+

@@ -1,0 +1,377 @@
+#include "ls.icl"
+#include "fm.icl"
+
+// Layout of buffer "buf" used in all calls in this file:
+// $short(buf+0)   - current position in current text buffer
+// $short(buf+2)   - current paragraph of current text buffer
+// $short(buf+4)   - current pointer to character formatting information
+// $short(buf+6)   - current pointer to paragraph formatting information
+// $long(buf+8)    - last paragraph start
+// $long(buf+12)   - last character descriptor start
+// $short(buf+16)  - number of pictures in the file
+// $short(buf+18)  - offset of valid data in current text buffer
+// $long(buf+20)   - base of unique object names
+// $short(buf+24)  - start of character formatting information
+// $short(buf+26)  - end of character formatting information
+// $short(buf+28)  - start of paragraph formatting information
+// $short(buf+30)  - end of paragraph formatting information
+// $char(buf+32)   - alignment of current text paragraph
+// $char(buf+33)   - current paragraph is picture
+// $char(buf+40)   - font/italic/bold of current character block
+// $char(buf+41)   - font size of current character block
+// 128..255        - current text buffer
+//                 - character formatting information (each entry 8 bytes long)
+//                 - paragraph formatting information (each entry 8 bytes long)
+
+function int Writetext(handle f,char *buf,char *text)
+  int i,j,ofs
+  ofs=0
+  i=Strlen(text)
+  j=$short(buf+0)
+  while 1 do
+    if i==0 then
+      break
+    else if (i+j<128) then
+      Memcpy(buf+128+j,text+ofs,i)
+      break
+    else
+      Memcpy(buf+128+j,text+ofs,128-j)
+      Fwrite(buf+128+$short(buf+18),128-$short(buf+18),f)
+      $short(buf+18)=0                 // Clear valid text data offset
+      $short(buf+2)=$short(buf+2)+1
+      ofs=ofs+128-j
+      i=i-(128-j)
+      j=0
+    endif
+  enddo
+  $short(buf+0)=j+i
+end
+
+// Creates and prepares MSWrite-compatible file
+function handle WRITE.Open(char *name,char *buf,int buflen)
+  int nentries
+  handle f
+  if (buflen<WRI_MINBUF) return NULL   // Less then 120 char/paragraph entries
+  nentries=(buflen-256)/16
+  $short(buf+0)=0                      // Current position in buffer
+  $short(buf+2)=1                      // Current text paragraph in buffer
+  $short(buf+24)=256                   // Start of character information
+  $short(buf+26)=256+nentries*8        // End of character information
+  $short(buf+28)=256+nentries*8        // Start of paragraph information
+  $short(buf+30)=256+nentries*16       // End of paragraph information
+  $short(buf+4)=$short(buf+24)         // Character formatting information
+  $short(buf+6)=$short(buf+28)         // Paragraph formatting information
+  $long(buf+8)=128                     // Last paragraph start
+  $long(buf+12)=128                    // Last character descriptor start
+  $short(buf+16)=0                     // No pictures till now
+  $short(buf+18)=0                     // Initial offset of valid text data
+  $long(buf+20)=Random(0x7FFFFFFF)     // Set base of unique object names
+  $char(buf+32)=WRI_FORMAT             // Justified alignment as default
+  $char(buf+33)=0                      // Current paragraph is not a picture
+  $char(buf+40)=0                      // System font as default
+  $char(buf+41)=24                     // Font size 12 points as default
+  f=Fopen(name,"w+b")
+  Fwrite(buf,128,f)                    // Placeholder for Write header
+  return f
+end
+
+// Sets the beginning of the new paragraph
+function int WRITE.Paragraph(handle f,char *buf,int justify)
+  int i,j
+  i=$short(buf+2)*128+$short(buf+0)
+  if i>$long(buf+8) then
+    Writetext(f,buf,"\r\n")
+    i=i+2
+    j=$short(buf+6)
+    $long(buf+j)=i                     // End of previous text paragraph
+    if j<$short(buf+30) then
+      $long(buf+8)=i                   // Replace with start of new paragraph
+      $char(buf+j+4)=$char(buf+32)     // Store properties of previous paragraph
+      $char(buf+j+5)=$char(buf+33)
+      j=j+8                            // Size of internal paragraph descriptor
+      $short(buf+6)=j
+    endif
+  endif
+  $char(buf+32)=justify
+  $char(buf+33)=0
+end
+
+function int WRITE.Fmt(handle f,char *buf,int font,int bolditalic,int size)
+  int i,j
+  i=$short(buf+2)*128+$short(buf+0)
+  if size<=0 size=12                   // Default font size
+  if size>127 size=127                 // Maximal allowed font size
+  if i>$long(buf+12) then
+    j=$short(buf+4)
+    $long(buf+j)=i                     // End of previous character block
+    if j<$short(buf+26) then
+      $long(buf+12)=i                  // Replace with start of new block
+      $char(buf+j+4)=$char(buf+40)     // Store properties of previous block
+      $char(buf+j+5)=$char(buf+41)
+      j=j+8                            // Size of internal block descriptor
+      $short(buf+4)=j
+    endif
+  endif
+  $char(buf+40)=(font & 7)*4+(bolditalic & 3)
+  $char(buf+41)=size*2                 // Size in halfpoints!
+end
+
+// Simplified version of WRITE.Fmt, uses standard SCRIPT2 definitions
+function int WRITE.Font(handle f,char *buf,int otfont)
+  if otfont==FIXEDFONT then
+    WRITE.Fmt(f,buf,WRI_COURIER,WRI_BOLD,12)
+  else if otfont==INFOFONT then
+    WRITE.Fmt(f,buf,WRI_ARIAL,WRI_ITALIC,12)
+  else if otfont==TERMINALFONT then
+    WRITE.Fmt(f,buf,WRI_COURNEW,WRI_NORMAL,10)
+  else if otfont==SMALLFONT then
+    WRITE.Fmt(f,buf,WRI_ARIAL,WRI_NORMAL,9)
+  else if otfont==MEDIUMFONT then
+    WRITE.Fmt(f,buf,WRI_TIMES,WRI_BOLD,15)
+  else if otfont==LARGEFONT then
+    WRITE.Fmt(f,buf,WRI_TIMES,WRI_BOLD,30)
+  else if otfont==HUGEFONT then
+    WRITE.Fmt(f,buf,WRI_TIMES,WRI_BOLD,48)
+  else
+    WRITE.Fmt(f,buf,WRI_ARIAL,WRI_NORMAL,12)
+  endif
+end
+
+// Adds text to the Write-compatible file
+function int WRITE.Addtext(handle f,char *buf,char *text)
+  int i,j;
+  i=0; j=0;
+  while 1 do                           // Eliminate characters that has special
+    text[j]=text[i]                    // meaning in Write
+    if text[i]==0 break
+    if text[i]!='\r' && text[i]!='\n' j=j+1
+    i=i+1
+  enddo
+  Writetext(f,buf,text)
+end
+
+// Adds page number to the Write-compatible file
+function int WRITE.Addpagenumber(handle f,char *buf)
+  int i,j
+  char s[2]
+  i=$short(buf+2)*128+$short(buf+0)
+  if i>$long(buf+12) then
+    j=$short(buf+4)
+    $long(buf+j)=i                     // End of previous character block
+    if j<$short(buf+26) then
+      $long(buf+12)=i                  // Replace with start of new block
+      $char(buf+j+4)=$char(buf+40)     // Store properties of previous block
+      $char(buf+j+5)=$char(buf+41)
+      j=j+8                            // Size of internal block descriptor
+      $short(buf+4)=j
+    endif
+  endif
+  s[0]=1; s[1]=0; Writetext(f,buf,s)
+  i=$short(buf+2)*128+$short(buf+0)
+  j=$short(buf+4)
+  $long(buf+j)=i                       // End of page number character block
+  if j<$short(buf+26) then
+    $long(buf+12)=i                    // Replace with start of new block
+    $char(buf+j+4)=$char(buf+40)|0x40
+    $char(buf+j+5)=$char(buf+41)
+    j=j+8                              // Size of internal block descriptor
+    $short(buf+4)=j
+  endif
+end
+
+// Cuts picture from graph window and inserts it into the Write-compatible file
+function int WRITE.Addpicture(handle f,char *buf,handle graph,                 \
+  int x0,int y0,int x1,int y1)
+  char hdr[83],pro[26]
+  int i,posolehdr,posoleend,sizex,sizey
+  if x0<0 x0=0; if x1-x0>999 x1=x0+999
+  if y0<0 y0=0; if y1-y0>999 y1=y0+999
+  if x1<=x0 || y1<=y0 return -1        // Invalid input data
+  WRITE.Paragraph(f,buf,$char(buf+32)) // Close previous text paragraph
+  if ($short(buf+0)-$short(buf+18)>0)
+    Fwrite(buf+128+$short(buf+18),$short(buf+0)-$short(buf+18),f);
+  $short(buf+18)=$short(buf+0);
+  $char(hdr+0)=0xE4                    // hdr.mm - OLE object description
+  $short(hdr+6)=2                      // hdr.objectType - embedded object
+  $short(hdr+10)=1440;                 // Stub for horizontal size
+  $short(hdr+12)=1440;                 // Stub for vertical size
+  $long(hdr+24)=$long(buf+20)+$short(buf+16)
+  $short(hdr+30)=40                    // Number of bytes in the header (fixed)
+  $short(hdr+36)=1000                  // X scaling factor 1:1
+  $short(hdr+38)=1000                  // Y scaling factor 1:1
+  $long(hdr+40)=0x00000501             // OLE version number
+  $long(hdr+44)=2                      // OLE format ID
+  $long(hdr+48)=7                      // Length of class string
+  Memcpy(hdr+52,"PBrush\0",7)          // Class string: Paintbrush picture
+  $long(hdr+59)=0                      // Topic string absent
+  $long(hdr+63)=12                     // Length of item string
+  posolehdr=Ftell(f)                   // Fix begin of OLE header
+  Fwrite(hdr,83,f)                     // Write stubbed OLE header
+  i=SYS.Writebmp(graph,x0,y0,x1,y1,f,1)
+  if i==0 then                         // Unable to get bitmap!
+    Fseek(f,posolehdr,0)
+    return -1                          // Discard OLE header
+  endif
+  $long(hdr+79)=i                      // Size of native bitmap data
+  $long(pro+0)=0x00000501              // OLE version number
+  $long(pro+4)=0                       // No presentation object
+  Fwrite(pro,8,f)                      // Write empty presentation object
+  $long(hdr+16)=i+43+8                 // Object data size (with presentation)
+  posoleend=Ftell(f)                   // Fix end of OLE
+  Fseek(f,posolehdr+83,0)
+  Fread(pro,26,f)                      // Read bitmap header
+  sizex=$long(pro+18)                  // X bitmap size, pixels
+  sizey=$long(pro+22)                  // Y bitmap size, pixels
+  $short(hdr+10)=sizex*15;             // Horizontal picture size, 1/1440 inch
+  $short(hdr+12)=sizey*15;             // Vertical picture size, 1/1440 inch
+  sprintf(hdr+67,"0 0 %3i %3i",sizex,sizey)
+  Fseek(f,posolehdr,0)
+  Fwrite(hdr,83,f)                     // Write actual OLE header
+  Fseek(f,posoleend,0)
+  $short(buf+0)=posoleend%128          // Correct text buffer properties
+  $short(buf+2)=posoleend/128
+  $short(buf+18)=posoleend%128 
+  $char(buf+33)=1                      // Current paragraph is a picture
+  WRITE.Paragraph(f,buf,$char(buf+32)) // Close OLE paragraph
+  $short(buf+16)=$short(buf+16)+1      // Increment number of pictures
+end
+
+// Closes Write-compatible file
+function int WRITE.Close(handle f,char *buf)
+  char fontname[8,16] = {                                                      \
+    "Times New Roman","Arial","Courier","Courier New",                         \
+    "LinePrinter","Times New Roman","Symbol","WingDings" };
+  char s[128]                          // Write file header
+  char t[128]                          // Table paragraph
+  int i,j,k,p,q,len,par
+  WRITE.Paragraph(f,buf,$char(buf+32)) // Add last paragraph format
+  WRITE.Fmt(f,buf,$char(buf+40)>>2,                                            \
+    $char(buf+40) & 3,$char(buf+41))   // Add last character format
+  len=$short(buf+0)                    // Current position
+  par=$short(buf+2)                    // Current paragraph
+  if $short(buf+16)==0 then
+    $short(s+0)=0xBE31;                // Write file without OLE objects
+  else
+    $short(s+0)=0xBE32;                // Write file with OLE objects
+  endif
+  $short(s+4)=0xAB00;                  // Tool (hell if I know what it is)
+  $long(s+14)=par*128+len              // Text length
+  if (len!=0) then
+    for i=len,i<128,i=i+1              // Quite unnecessary, just a cosmetical
+      buf[128+i]=0                     // operation!
+    enddo
+    Fwrite(buf+128+$short(buf+18),                                             \
+      128-$short(buf+18),f)            // Flush last paragraph
+    par=par+1
+  endif
+  // Store character information (the so called character section)
+  i=$short(buf+24)                     // Offset of character formatting data
+  j=$short(buf+4)                      // End of character formatting data
+  q=128                                // First character covered by page
+  while 1 do
+    k=0                                // Number of FODs on the current page
+    $long(t+0)=q                       // First character covered by page
+    while 1 do
+      if i>=j break                    // No more FODs
+      if k>=10 break                   // Max number of FODs per page
+      $long(t+4+k*6)=$long(buf+i)      // FOD.fcLim - first uncovered byte
+      $short(t+8+k*6)=60+k*6           // FOD.bfprop - offset to FPROP
+      $char(t+64+k*6)=5                // FPROP.cch - length of CHP prefix
+      $char(t+66+k*6)=$char(buf+4+i) & 0x3F // CHP.ftc+CHP.fItalic+CHP.fBold
+      $char(t+67+k*6)=$char(buf+5+i)   // CHP.hps - font size in halfpoints
+      $char(t+68+k*6)=$char(buf+4+i) & 0x40 // CHP.fSpecial
+      $char(t+69+k*6)=0                // Ignored by Write
+      q=$long(buf+i)
+      i=i+8
+      k=k+1
+    enddo
+    t[127]=k                           // Number of FODs on the current page
+    Fwrite(t,128,f)
+    par=par+1
+    if i>=j break                      // Character section completed
+  enddo
+  // Store paragraph information (paragraph section)
+  $short(s+18)=par                     // Page for start of paragraph info
+  for i=0,i<128,i=i+1
+    t[i]=0                             // Set unused bytes to default zero
+  enddo
+  i=$short(buf+28)                     // Offset of paragraph formatting data
+  j=$short(buf+6)                      // End of character formatting data
+  q=128                                // First character covered by page
+  while 1 do
+    k=0                                // Number of FODs on the current page
+    $long(t+0)=q                       // First character covered by page
+    while 1 do
+      if i>=j break                    // No more FODs
+      if k>=5 break                    // Max number of FODs per page
+      $long(t+4+k*6)=$long(buf+i)      // FOD.fcLim - first uncovered byte
+      $short(t+8+k*6)=30+k*18          // FOD.bfprop - offset to FPROP
+      $char(t+34+k*18)=17              // FPROP.cch - length of PAP prefix
+      $char(t+35+k*18)=60              // Undocumented but must be so
+      p=$char(buf+4+i) & WRI_CENTERED
+      if p==WRI_FORMAT then $char(t+36+k*18)=3;
+      else if p==WRI_LEFT then $char(t+36+k*18)=0;
+      else if p==WRI_RIGHT then $char(t+36+k*18)=2;
+      else $char(t+36+k*18)=1; endif;  // PAP.jc - paragraph justification
+      $char(t+37+k*18)=30              // Undocumented but must be so
+      $short(t+43+k*18)=300            // PAP.dxaLeft1 - first-line indent
+      $short(t+45+k*18)=200            // PAP.dyaLine - interline spacing
+      if $char(buf+5+i)==0 then
+        q=0                            // Text paragraph
+        if ($char(buf+4+i) & WRI_HEADER)!=0 then
+          q=q|0x02                     // Mark as header
+          if ($char(buf+4+i) & WRI_NOFIRST)==0 q=q|0x08
+        else if ($char(buf+4+i) & WRI_FOOTER)!=0 then
+          q=q|0x03                     // Mark as footer
+          if ($char(buf+4+i) & WRI_NOFIRST)==0 q=q|0x08
+        endif
+      else
+        q=0x10                         // OLE (picture) paragraph
+      endif
+      $char(t+51+k*18)=q
+      q=$long(buf+i)
+      i=i+8
+      k=k+1
+    enddo
+    t[127]=k                           // Number of FODs on the current page
+    Fwrite(t,128,f)
+    par=par+1
+    if i>=j break                      // Character section completed
+  enddo
+  $short(s+20)=par                     // Footnote table is absent
+  $short(s+22)=par                     // Page of section property is absent
+  $short(s+24)=par                     // Page of section table is absent
+  $short(s+26)=par                     // Page table is absent
+  // Store font information
+  $short(s+28)=par                     // Page of font face-name table
+  $short(t+0)=8                        // We have 8 (predefined) fonts
+  i=0                                  // Currently processed font
+  j=2                                  // Pointer in paragraph
+  while 1 do
+    k=0                                // Number of fonts on the current page
+    while 1 do
+      if j>128-20 break                // No more fonts fit into the page
+      if i>=8 break
+      $short(t+j)=2+Strlen(fontname[i])
+      j=j+2
+      $char(t+j)=0                     // Don't care about font family
+      j=j+1
+      Strcpy(t+j,fontname[i])
+      j=j+1+Strlen(fontname[i])
+      i=i+1
+    enddo
+    $short(t+j)=(i>=8?0:0xffff)
+    Fwrite(t,128,f)
+    j=0; par=par+1
+    if i>=8 break
+  enddo
+  $short(s+96)=par                     // Count of pages in whole table
+  Fseek(f,0,0)                         // Store prepared Write header
+  Fwrite(s,128,f)
+  Fclose(f)                            // That's all, folks!
+end
+
+// Dummy function, required by SCRIPT2 syntax rules
+function int main()
+end
+

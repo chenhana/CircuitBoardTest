@@ -1,0 +1,899 @@
+#include "ls.icl"
+
+#define VERSION        "1.11"
+#define DESCRIPTION    "OllyTest setup utility"
+
+// 1.01: Bug fix: IP address was incorrectly read from .ini file.
+// 1.02: Added TCP/IP port.
+// 1.03: Added hi-res camera XC-HR70.
+// 1.04: Added several scripts.
+// 1.05: Support for head cameras.
+// 1.06: Support for Firewire cameras.
+// 1.07: Support for Firewire 90 degrees rotation.
+// 1.08: L&M Parameter server startup options.
+// 1.09: Support for S2a.
+// 1.10: Force RGB camera mode.
+// 1.11: FireMirr camera type.
+
+#define DX             500             // Width of card in main window
+#define DY             350             // Height of card in main window
+
+#define NSCRIPT        26
+#define LH             16              // Height of record in script list
+
+// Layout configuration bits in $LAY.config.
+#define LC_SMASK2      0x20000000      // Extention of LC_SMASK
+#define LC_AUTOPROBE   0x10000000      // Autodetect probes (Kelvin or standard)
+#define LC_TYPEMASK    0x0B000000      // General type of machine
+#define   LC_STD       0x00000000      // LC_TYPEMASK: standard A5/A6 tester
+#define   LC_NEWA1     0x01000000      // LC_TYPEMASK: new A1 (slow A5) tester
+#define   LC_S1        0x02000000      // LC_TYPEMASK: S1/S2
+#define   LC_A8        0x03000000      // LC_TYPEMASK: A7/A8
+#define LC_VACUUMBOX   0x04000000      // Disable movements on bottom side
+#define LC_MOREMASK    0x00C00000      // Mask for more space bits
+#define   LC_MOREBOT   0x00800000      // Give more space on bottom
+#define   LC_MORETOP   0x00400000      // Give more space on the top
+#define LC_DEADLOCKS   0x00200000      // Autoresolve deadlocks
+#define LC_ILLUM       0x00100000      // Auto switch video illumination on/off
+#define LC_HARDZ       0x00040000      // Hard Z contacting (A2/A4/A5 only)
+#define LC_QUAKE       0x00020000      // Earthquake protection on (M2 only)
+#define LC_SMASK1      0x0001C000      // Mask for type of loading system
+#define LC_RELAYS      0x00002000      // Slow (LATEST-compatible) relays
+#define LC_OHTYPE      0x00001C00      // Mask to extract on-head type
+#define   LC_NOFIELD   0x00001000      // On-heads without field amplifier
+#define   LC_PHADJ     0x00000C00      // On-heads with adjustable field phase
+#define   LC_ACTIVE    0x00000400      // Active on-heads (with Dallas/R1-R4)
+#define   LC_PASSIVE   0x00000000      // Passive on-heads (manual C adjust)
+#define LC_TRAFFICS    0x00000200      // Hitachi-style traffic lights
+#define LC_ZSENSORS    0x00000100      // A series: Z pressure sensors active
+#define LC_LOWBAUD     0x00000100      // M2: low AFMCU I/O baud rate
+#define LC_ISM2        0x00000080      // M2 tester
+#define LC_A2LOADER    0x00000040      // A2-style loader, enables LC_SMASK
+#define LC_ENCODERS    0x00000020      // Tester with encoders
+#define LC_COVER       0x00000010      // I have forgotten what it means
+#define LC_HIGHZ       0x00000008      // Z always moves with full hub (B1)
+#define LC_LDELAY      0x00000004      // Wait after light off (obsolete)
+#define LC_AMASK       0x00000003      // Mask for type of antennae
+#define   LC_EXTANT    0x00000000      // LC_AMASK: external (A1) antennae
+#define   LC_INTANT    0x00000001      // LC_AMASK: internal antennae (void)
+#define   LC_FINGANT   0x00000002      // LC_AMASK: finger antennae
+// Alternative (old) interpretation of LC_OHTYPE bits.
+#define LC_PHASEADJ    0x00000800      // On-heads with adjustable field phase
+#define LC_ACTIVEONHD  0x00000400      // Active on-heads (with Dallas/R1-R4)
+// Tester types in LC_SMASK=(LC_SMASK2|LC_SMASK1).
+#define LC_LMMAN       0x0001C000      // L&M manual tester
+#define LC_LMS2        0x00018000      // L&M for S2a
+#define LC_EPCOS       0x00014000      // L&M for EPCOS tester
+#define LC_LM          0x00010000      // L&M for A5a
+#define LC_A5WIDE      0x0000C000      // A5 wide shuttle
+#define LC_AUTOMATE    0x00008000      // Automatical shuttle
+#define LC_A2XSHUT     0x00004000      // A2X shuttle
+#define LC_A2SHUT      0x00000000      // A2 standard shuttle
+// Useful shortcuts and substitutions.
+#define LC_SMASK       (LC_SMASK2|LC_SMASK1)
+#define LC_LDMASK      (LC_SMASK2|LC_SMASK1|LC_A2LOADER)
+#define LC_LMAUTO      (LC_LM|LC_A2LOADER)
+#define LC_LMS2AUTO    (LC_LMS2|LC_A2LOADER)
+#define LC_EPCOSAUTO   (LC_EPCOS|LC_A2LOADER)
+#define LC_LMMANUAL    (LC_LMMAN|LC_A2LOADER)
+
+handle           hmain                 // Main window
+handle           hcard                 // Tab window
+handle           hchild                // Child window in tab control
+handle           hexit                 // Close button
+// Setup pane.
+handle           hslave                // Slave connection
+handle           htcpip                // TCP/IP connection
+handle           halone                // No connection at all
+handle           hslaveaddr            // Slave address
+handle           hipaddr               // IP address of crate computer
+handle           hipport               // Port on crate computer
+handle           hinput[8]             // Input on frame grabber
+handle           hsyncmaster[2]        // Whether videos in sync master mode
+handle           hpalfilter[2]         // Whether videos in PAL filter mode
+handle           hcameratype[2]        // Camera type
+handle           hforcergb[2]          // Force RGB chip (raw mode)
+handle           hupdate               // Update ini file now
+int              connection            // 0: slave, 1: TCP/IP, -1: none
+int              useiodriver           // Whether to use I/O driver
+int              slaveaddr             // Slave I/O base address
+char             ipaddr[80]            // IP address of crate computer
+int              ipport                // IP port of crate computer
+int              input[8]              // Input on frame grabber
+int              syncmaster[2]         // Whether videos in sync master mode
+int              palfilter[2]          // Whether videos in PAL filter mode
+int              cameratype[2]         // Camera type
+int              forcergb[2]           // Force RGB chip (raw mode)
+// Parameter server pane.
+handle           hpsname               // ="默认: start Parameter server
+handle           hmechname             // Command to start MECH client
+handle           hbcodename            // Command to start barcode reader
+handle           hupdateps             // Update ini file now
+// Versions pane.
+handle           hlist                 // List of script files
+handle           hsave                 // Save list to file
+
+char script[NSCRIPT][16] = {         \ // List of important scripts
+  "MAIN",                            \
+  "DEBUG",                           \
+  "TDEBUG",                          \
+  "LOADER",                          \
+  "LAYOUT",                          \
+  "CALIBR",                          \
+  "MEASTEST",                        \
+  "CTEST",                           \
+  "SELFTEST",                        \
+  "SPEEDTST",                        \
+  "NEEDLES",                         \
+  "RASTER",                          \
+  "VIDEO",                           \
+  "SPS",                             \
+  "A5ACCEL",                         \
+  "A5BUS",                           \
+  "A5CAMADJ",                        \
+  "A5MEAS",                          \
+  "A5MOSC",                          \
+  "A5PHASES",                        \
+  "A5PARMS",                         \
+  "A5PROT",                          \
+  "A5SELF",                          \
+  "A5STATE",                         \
+  "A5TREE",                          \
+  "SETUP" }
+char             prot[NSCRIPT][256]    // Protocolled script data
+int              nprot                 // Number of protocolled lines
+
+// Creates OllyTest setup card and fills it with data from the .ini file.
+function int Createtestcard()
+  int i,j,x,xc,channel
+  char s[256]
+  clear hchild
+  // I/O driver usage.
+  useiodriver=1
+  getini("System","UseIODriver","%i",&useiodriver)
+  // Slave address.
+  slaveaddr=0
+  getini("System","SlaveBase","%i",&slaveaddr)
+  if (slaveaddr!=0 && slaveaddr!=0x300 &&                                      \
+    slaveaddr!=0x310 && slaveaddr!=0x320 &&                                    \
+    slaveaddr!=0x330) slaveaddr=0
+  // IP address and port.
+  ipaddr[0]='\0'
+  getini("System","NetName","%s",ipaddr)
+  ipport=4757
+  getini("System","TCP/IP port","%i",&ipport)
+  if ipport!=4757 ipport=4756
+  // Calculate type of connection.
+  if ipaddr[0]!='\0' then
+    connection=1
+  else if useiodriver==0 || slaveaddr==0 then
+    connection=-1
+  else
+    connection=0
+  endif
+  // Video inputs.
+  for i=0,i<8,i++ do
+    input[i]=i
+    sprintf(s,"Channel[%i]",i)
+    getini("System",s,input+i)
+    if (input[i]<0 || input[i]>7) input[i]=i
+  enddo
+  // Sync master mode.
+  i=-1
+  getini("System","SyncMaster",&i)
+  if i>=0 then
+    syncmaster[0]=(i!=0)
+    syncmaster[1]=(i!=0)
+  else
+    i=0; getini("System","SyncMaster[0]",&i)
+    syncmaster[0]=(i!=0)
+    i=0; getini("System","SyncMaster[1]",&i)
+    syncmaster[1]=(i!=0)
+  endif
+  // PAL filter mode.
+  i=-1
+  getini("System","VideoPALFilter",&i)
+  if i>=0 then
+    palfilter[0]=(i!=0)
+    palfilter[1]=(i!=0)
+  else
+    i=0; getini("System","VideoPALFilter[0]",&i)
+    palfilter[0]=(i!=0)
+    i=0; getini("System","VideoPALFilter[1]",&i)
+    palfilter[1]=(i!=0)
+  endif
+  // Force RGB mode.
+  i=0
+  getini("System","ForceRGB",&i)
+  forcergb[0]=(i!=0)
+  forcergb[1]=(i!=0)
+  // Camera type.
+  cameratype[0]=0; cameratype[1]=0
+  s[0]='\0'; getini("System","CameraType",s)
+  if Memicmp(s,"MX12",4)==0 then
+    cameratype[0]=1; cameratype[1]=1
+  else if Memicmp(s,"XC-HR70",7)==0 then
+    cameratype[0]=2; cameratype[1]=2
+  else if Memicmp(s,"Firewire",8)==0 then
+    cameratype[0]=3; cameratype[1]=3
+  else if Memicmp(s,"Fire90",6)==0 then
+    cameratype[0]=4; cameratype[1]=4
+  else if Memicmp(s,"FireMirr",8)==0 then
+    cameratype[0]=5; cameratype[1]=5
+  else
+    s[0]='\0'; getini("System","CameraType[0]",s)
+    if Memicmp(s,"MX12",4)==0 cameratype[0]=1
+    if Memicmp(s,"XC-HR70",7)==0 cameratype[0]=2
+    if Memicmp(s,"Firewire",8)==0 cameratype[0]=3
+    if Memicmp(s,"Fire90",6)==0 cameratype[0]=4
+    if Memicmp(s,"FireMirr",8)==0 cameratype[0]=5
+    s[0]='\0'; getini("System","CameraType[1]",s)
+    if Memicmp(s,"MX12",4)==0 cameratype[1]=1
+    if Memicmp(s,"XC-HR70",7)==0 cameratype[1]=2
+    if Memicmp(s,"Firewire",8)==0 cameratype[1]=3
+    if Memicmp(s,"Fire90",6)==0 cameratype[1]=4
+    if Memicmp(s,"FireMirr",8)==0 cameratype[1]=5
+  endif
+  if cameratype[0]==3 then
+    cameratype[1]=3
+  else if cameratype[0]==4 then
+    cameratype[1]=4
+  else if cameratype[1]==3 then
+    cameratype[1]=cameratype[0]
+  else if cameratype[1]==4 then
+    cameratype[1]=cameratype[0]
+  endif
+  draw window=hchild font=INFOFONT color=BLACK
+  // Connection to tester.
+  draw at 10,24 text="联机:"
+  hslave=control RADIO
+    window=hchild
+    position=40,32,220,24
+    text="使用从接口"
+    help="选择检测仪是否通过从属接口连接"
+    font=INFOFONT
+    mode=(connection==0)
+  endc
+  draw at 263,51 text="I/O地址 ="
+  hslaveaddr=control COMBOLIST
+    window=hchild
+    position=330,31,70,150
+    help="从接口的基本I/O地址"
+    mode=M_VSCROLL
+    bkcolor=WHITE
+  endc
+  add hslaveaddr text="0x300"
+  add hslaveaddr text="0x310"
+  add hslaveaddr text="0x320"
+  add hslaveaddr text="0x330"
+  if slaveaddr==0 then
+    change hslaveaddr select=0
+  else
+    change hslaveaddr select=format("0x%X",slaveaddr)
+  endif
+  if connection!=0 disable hslaveaddr
+  htcpip=control RADIO
+    window=hchild
+    position=40,58,220,24
+    text="使用TCP/IP连接"
+    help="选择测试机是否通过TCP/IP连接"
+    font=INFOFONT
+    mode=(connection>0)
+  endc
+  draw at 263,77 text="IP地址 ="
+  hipaddr=control COMBOEDIT
+    window=hchild
+    position=330,57,140,150
+    text="IP address"
+    help="内核计算机的IP地址"
+    bkcolor=WHITE
+  endc
+  if ipaddr[0]=='\0' Strcpy(ipaddr,"10.11.10.116")
+  add hipaddr text=ipaddr
+  change hipaddr select=ipaddr
+  if connection<=0 disable hipaddr
+  draw at 263,103 text="IP端口 ="
+  hipport=control COMBOLIST
+    window=hchild
+    position=330,83,70,150
+    text="IP port"
+    help="内核计算机的IP端口(4756:主通道，4757:调试)"
+    bkcolor=WHITE
+  endc
+  add hipport text="4756"
+  add hipport text="4757"
+  change hipport select=format("%i",ipport)
+  if connection<=0 disable hipport
+  halone=control RADIO
+    window=hchild
+    position=40,84,220,24
+    text="无连接(演示模式)"
+    help="选择是否使用OllyTest进行演示"
+    font=INFOFONT
+    mode=(connection<0)
+  endc
+  // Video cameras.
+  draw at 10,134 text="视频相机:"
+  if $LAY.cameras!=0 || $LAY.headcameras==0 then
+    draw at 165,134 text="Top"
+    draw at 260,134 text="Bottom"
+    draw at 42,163 text="Video input" at 360,163 text="默认:  0, 1"
+  else
+    draw at 42,163 text="视频输入" at 360,163 text="默认:  0, 1, ..."
+  endif
+  draw at 42,191 text="主同步" at 360,191 text="默认:  off"
+  draw at 42,217 text="PAL过滤" at 360,217 text="默认:  off"
+  draw at 42,245 text="相机" at 360,245 text="默认:  PAL"
+  draw at 42,273 text="RGB" at 360,273 text="默认:  off"
+  for i=0,i<2,i++ do
+    x=160+i*100
+    Strcpy(s,(i==0?"top":"bottom"))
+    if $LAY.cameras!=0 || $LAY.headcameras==0 then
+      // Dedicated cameras: one per side.
+      hinput[i]=control COMBOLIST
+        window=hchild
+        position=x,143,40,180
+        help=format("为%s相机选择帧抓取器输入",s)
+      endc
+      for j=0,j<8,j++ do
+        add hinput[i] text=format("%i",j)
+      enddo
+      change hinput[i] select=input[i]
+    else
+      // Head cameras.
+      channel=-1; xc=x
+      for j=0,j<$LAY.nfing*2,j++ do
+        if ($LAY.headcameras & (1<<j))==0 continue
+        channel++
+        if $LAY.side[j/2]!=i continue
+        if channel>=8 break
+        draw at xc+3,160 text=format("%i%c",j/2,(j & 1?'R':'L'))
+        hinput[channel]=control EDIT
+          window=hchild
+          position=xc,146,20,20
+          help=format("为头摄像头%i%c选择输入",j/2,(j & 1?'R':'L'))
+          mode=M_CENTERED
+          bkcolor=WHITE
+        endc
+        change hinput[channel] text=format(" %i",input[channel])
+        xc=xc+22
+      enddo
+    endif
+    hsyncmaster[i]=control CHECKBOX
+      window=hchild
+      position=x+2,173,24,22
+      help=format("选中可以激活%s相机上的同步主模式",s)
+      mode=(syncmaster[i]!=0)
+    endc
+    hpalfilter[i]=control CHECKBOX
+      window=hchild
+      position=x+2,199,24,22
+      help=format("选中以激活%s相机上的PAL筛选器",s)
+      mode=(palfilter[i]!=0)
+    endc
+    hcameratype[i]=control COMBOLIST
+      window=hchild
+      position=x,226,85,180
+      help=format("选择%s相机的类型",s)
+    endc
+    add hcameratype[i] text="PAL"
+    add hcameratype[i] text="MX12P"
+    add hcameratype[i] text="XC-HR70"
+    add hcameratype[i] text="Firewire"
+    add hcameratype[i] text="Fire90"
+    add hcameratype[i] text="FireMirr"
+    change hcameratype[i] select=cameratype[i]
+    hforcergb[i]=control CHECKBOX
+      window=hchild
+      position=x+2,255,24,22
+      help=format("选中在%s相机上强制RGB模式",s)
+      mode=(forcergb[i]!=0)
+    endc
+    if cameratype[i]==3 || cameratype[i]==4 then
+      disable hsyncmaster[i]
+      disable hpalfilter[i]
+    else
+      disable hforcergb[i]
+    endif
+  enddo
+  hupdate=control BUTTON
+    window=hchild
+    position=10,287,135,24
+    text="保存"
+    help="按下可将配置写ollytest.ini"
+    font=INFOFONT
+    bkcolor=LIGHTGRAY
+  endc
+  draw at 155,307
+  draw text="(提示：修改后，需要重新打开系统才能生效。)"
+  draw show
+end
+
+// Saves contents of OllyTest setup card to .ini file.
+function int Savetestcard()
+  int i,j
+  char s[256]
+  // I/O driver usage.
+  if connection<0 then
+    setini("System","UseIODriver",1)
+  else
+    setini("System","UseIODriver",NULL)
+  endif
+  // Slave address.
+  i=Status(hslaveaddr)
+  setini("System","SlaveBase","%i",0x300+i*0x10)
+  // IP address and port.
+  if connection>0 then
+    confirm(hipaddr)
+    ipaddr[0]='\0'; Text(hipaddr,ipaddr)
+    setini("System","NetName",ipaddr)
+    confirm(hipport)
+    s[0]='\0'; Text(hipport,s)
+    setini("System","TCP/IP port",s)
+  else
+    setini("System","NetName",NULL)
+    setini("System","TCP/IP port",NULL)
+  endif
+  // Video inputs.
+  if $LAY.cameras!=0 || $LAY.headcameras==0 then
+    i=Status(hinput[0])
+    j=Status(hinput[1])
+    if i==j j=(i+1)%8
+    setini("System","Channel[0]",i)
+    setini("System","Channel[1]",j)
+  else
+    for i=0,i<8,i++ do
+      if hinput[i]==NULL break
+      s[0]='\0'; Text(hinput[i],s)
+      Sscanf(s,"%i",input+i)
+      sprintf(s,"Channel[%i]",i)
+      setini("System",s,input[i])
+      change hinput[i] text=format(" %i",input[i])
+    enddo
+  endif
+  // Sync master mode.
+  i=Status(hsyncmaster[0])
+  j=Status(hsyncmaster[1])
+  if i==j then
+    setini("System","SyncMaster",i)
+    setini("System","SyncMaster[0]",NULL)
+    setini("System","SyncMaster[1]",NULL)
+  else
+    setini("System","SyncMaster",NULL)
+    setini("System","SyncMaster[0]",i)
+    setini("System","SyncMaster[1]",j)
+  endif
+  // PAL filter mode.
+  i=Status(hpalfilter[0])
+  j=Status(hpalfilter[1])
+  if i==j then
+    setini("System","VideoPALFilter",i)
+    setini("System","VideoPALFilter[0]",NULL)
+    setini("System","VideoPALFilter[1]",NULL)
+  else
+    setini("System","VideoPALFilter",NULL)
+    setini("System","VideoPALFilter[0]",i)
+    setini("System","VideoPALFilter[1]",j)
+  endif
+  // Force RGB mode.
+  setini("System","ForceRGB",forcergb[0])
+  // Camera types.
+  i=Status(hcameratype[0])
+  j=Status(hcameratype[1])
+  if i==j then
+    if i==0 then
+      setini("System","CameraType",NULL)
+    else if i==1 then
+      setini("System","CameraType","MX12P")
+    else if i==2 then
+      setini("System","CameraType","XC-HR70")
+    else if i==3 then
+      setini("System","CameraType","Firewire")
+    else if i==4 then
+      setini("System","CameraType","Fire90")
+    else
+      setini("System","CameraType","FireMirr")
+    endif
+    setini("System","CameraType[0]",NULL)
+    setini("System","CameraType[1]",NULL)
+  else
+    setini("System","CameraType",NULL)
+    if i==0 then
+      setini("System","CameraType[0]",NULL)
+    else if i==1 then
+      setini("System","CameraType[0]","MX12P")
+    else if i==2 then
+      setini("System","CameraType[0]","XC-HR70")
+    else if i==3 then
+      setini("System","CameraType[0]","Firewire")
+    else if i==4 then
+      setini("System","CameraType[0]","Fire90")
+    else
+      setini("System","CameraType[0]","FireMirr")
+    endif
+    if j==0 then
+      setini("System","CameraType[1]",NULL)
+    else if j==1 then
+      setini("System","CameraType[1]","MX12P")
+    else if j==2 then
+      setini("System","CameraType[1]","XC-HR70")
+    else if j==3 then
+      setini("System","CameraType[1]","Firewire")
+    else if j==4 then
+      setini("System","CameraType[1]","Fire90")
+    else
+      setini("System","CameraType[1]","FireMirr")
+    endif
+  endif
+end
+
+// Checks for actions in OllyTest setup card.
+function int Processtestscard()
+  int i,j
+  if Pressed(hslave) then
+    connection=0
+    enable hslaveaddr
+    disable hipaddr
+    disable hipport
+  else if Pressed(htcpip) then
+    connection=1
+    disable hslaveaddr
+    enable hipaddr
+    enable hipport
+  else if Pressed(halone) then
+    connection=-1
+    disable hslaveaddr
+    disable hipaddr
+    disable hipport
+  else if Pressed(hforcergb[0]) then
+    i=Status(hforcergb[0])
+    forcergb[0]=i
+    forcergb[1]=i
+    if Status(hforcergb[1])!=i then
+      change hforcergb[1] mode=(i==0?0:M_CHECKED)
+    endif
+  else if Pressed(hforcergb[1]) then
+    i=Status(hforcergb[1])
+    forcergb[0]=i
+    forcergb[1]=i
+    if Status(hforcergb[0])!=i then
+      change hforcergb[0] mode=(i==0?0:M_CHECKED)
+    endif
+  else if Pressed(hcameratype[0]) || Pressed(hcameratype[1]) then
+    i=Status(hcameratype[0])
+    j=Status(hcameratype[1])
+    if i==3 && j!=3 then
+      change hcameratype[1] select=3
+    else if i==4 && j!=4 then
+      change hcameratype[1] select=4
+    else if i==5 && j!=5 then
+      change hcameratype[1] select=5
+    else if i!=3 && j==3 then
+      change hcameratype[1] select=i
+    else if i!=4 && j==4 then
+      change hcameratype[1] select=i
+    else if i!=5 && j==5 then
+      change hcameratype[1] select=i
+    endif
+    if i!=3 && i!=4 && i!=5 then
+      enable hsyncmaster[0]
+      enable hsyncmaster[1]
+      enable hpalfilter[0]
+      enable hpalfilter[1]
+      disable hforcergb[0]
+      disable hforcergb[1]
+    else
+      disable hsyncmaster[0]
+      disable hsyncmaster[1]
+      disable hpalfilter[0]
+      disable hpalfilter[1]
+      enable hforcergb[0]
+      enable hforcergb[1]
+    endif
+  else if Pressed(hupdate) then
+    Savetestcard()
+  endif
+end
+
+// Creates Versions card.
+function int Createversionscard()
+  int i,j,k,m,y
+  char dir[260],path[260],s[320],version[10],tpversion[10],description[64]
+  handle f
+  clear hchild
+  draw window=hchild color=BLACK bkcolor=WHITE
+  draw at 4,5 fillrect DX-11,DY-85
+  draw color=DARKGRAY
+  draw at 10,23 text="脚本"
+  draw at 105,23 text="版本"
+  draw at 155,23 text="测试版"
+  draw at 215,23 text="描述"
+  draw show
+  hlist=control CHILD
+    window=hchild
+    position=5,25,DX-18,DY-85
+    help="重要OllyTest脚本文件列表"
+    color=BLACK
+    bkcolor=WHITE
+    mode=M_VSCROLL
+    limits=DX-38,(NSCRIPT+1)*LH
+    size=8192
+  endc
+  hsave=control BUTTON
+    window=hchild
+    position=4,DY-55,70,22
+    text="保存"
+    help="按下可将列表内容保存到文件"
+  endc
+  disable hsave
+  SYS.Scriptdir(dir);
+  nprot=0
+  draw window=hlist
+  for i=0,i<NSCRIPT,i++ do
+    sprintf(path,"%s%s.SCR",dir,script[i])
+    f=Fopen(path,"rt")
+    if f==NULL continue                // Unable to open script
+    version[0]='\0'
+    tpversion[0]='\0'
+    description[0]='\0'
+    // Read first 20 lines and extract versions nad description.
+    for j=0,j<20,j++ do
+      s[0]='\0'
+      if Fscanf(f,"%s\n",s)<0 break    // Get next line
+      s[255]='\0';
+      k=0; while s[k]==' ' do k++; enddo
+      if Memicmp(s+k,"#define",7)!=0 continue
+      k=k+7; while s[k]==' ' do k++; enddo
+      if Memicmp(s+k,"VERSION",7)==0 then
+        k=k+7;  while s[k]==' ' do k++; enddo
+        if s[k]=='\"' then
+          k++; if s[k]=='v' k++
+          for m=0,m<9,m++ do
+            if s[k+m]=='\"' || s[k+m]=='\0' break
+            version[m]=s[k+m]
+          enddo
+          version[m]='\0'
+        endif
+      else if Memicmp(s+k,"TPVERS",6)==0 then
+        k=k+6; while s[k]==' ' do k++; enddo
+        if s[k]=='\"' then
+          k++; if s[k]=='v' k++
+          for m=0,m<9,m++ do
+            if s[k+m]=='\"' || s[k+m]=='\0' break
+            tpversion[m]=s[k+m]
+          enddo
+          tpversion[m]='\0'
+        endif
+      else if Memicmp(s+k,"DESCRIPTION",11)==0 then
+        k=k+11
+        while k<256 && s[k]==' ' do k++; enddo
+        if s[k]=='\"' then
+          k++; if s[k]=='v' k++
+          for m=0,m<63,m++ do
+            if s[k+m]=='\"' || s[k+m]=='\0' break
+            description[m]=s[k+m]
+          enddo
+          description[m]='\0'
+        endif
+      endif
+    enddo
+    Fclose(f)
+    y=(nprot+1)*LH
+    if (nprot & 1) then
+      draw at 0,nprot*LH color=WHITEGREEN bkcolor=WHITEGREEN
+      draw fillrect DX,y color=BLACK
+    endif
+    draw at 5,y font=FIXEDSYS text=script[i]
+    draw at 100,y text=version
+    draw at 150,y text=tpversion
+    draw at 210,y font=INFOFONT text=description
+    draw show                          // Display lines as they appear
+    m=sprintf(prot[nprot],"%-10s %-10s %-10s %s",                              \
+      script[i],version,tpversion,description)
+    while m>0 && prot[nprot][m-1]==' ' do
+      prot[nprot][m-1]='\0'; m--
+    enddo
+    nprot++
+  enddo
+  if (nprot & 1) then
+    draw at 0,nprot*LH color=WHITEGREEN bkcolor=WHITEGREEN
+    draw fillrect DX,(nprot+1)*LH color=BLACK
+  endif
+  draw show
+  enable hsave
+end
+
+// Creates OllyTest Parameter server card and fills it with data from the .ini
+// file.
+function int Createpscard()
+  char psname[260],mechname[260],bcodename[260]
+  // Set default commands (A5a).
+  Strcpy(psname,"C:\\Tower\\PS\\startup.bat")
+  if ($LAY.config & LC_LDMASK)==(LC_LMS2|LC_A2LOADER) then
+    Strcpy(mechname,"perl C:\\Tower\\mechs2\\startup.pl")
+  else
+    Strcpy(mechname,"perl C:\\Tower\\mecha5a\\startup.pl")
+  endif
+  Strcpy(bcodename,"C:\\Tower\\a5a-bcode-Bcl8\\startup.bat")
+  // Get actual settings from the initialization file.
+  getini("System","PS 4710","%s",psname)
+  getini("System","MECH","%s",mechname)
+  getini("System","bcode","%s",bcodename)
+  // Create controls.
+  clear hchild
+  draw window=hchild font=INFOFONT color=BLACK
+  draw at 10,24 text="启动参数服务器:"
+  hpsname=control COMBOEDIT
+    window=hchild
+    name="参数服务器"
+    position=30,31,DX-40,150
+    help="启动L&M参数服务器的命令"
+    mode=M_VSCROLL
+    bkcolor=WHITE
+  endc
+  change hpsname text=psname
+  draw at 10,79 text="启动单片机控制:"
+  hmechname=control COMBOEDIT
+    window=hchild
+    name="MECH命令"
+    position=30,86,DX-40,150
+    help="启动MECH客户端的命令"
+    mode=M_VSCROLL
+    bkcolor=WHITE
+  endc
+  change hmechname text=mechname
+  draw at 10,134 text="启动条码读取器:"
+  hbcodename=control COMBOEDIT
+    window=hchild
+    name="BCODE命令"
+    position=30,141,DX-40,150
+    help="启动BCODE客户端的命令"
+    mode=M_VSCROLL
+    bkcolor=WHITE
+  endc
+  change hbcodename text=bcodename
+  hupdateps=control BUTTON
+    window=hchild
+    position=10,287,135,24
+    text="保存"
+    help="按下将命令写ollytest.ini"
+    font=INFOFONT
+    bkcolor=LIGHTGRAY
+  endc
+  draw show
+end
+
+// Checks for actions in Parameter Server card.
+function int Processpscard()
+  char s[260]
+  if Pressed(hupdateps) then
+  confirm(hpsname)
+  Text(hpsname,s)
+  setini("System","PS 4710","%s",s)
+  confirm(hmechname)
+  Text(hmechname,s)
+  setini("System","MECH","%s",s)
+  confirm(hbcodename)
+  Text(hbcodename,s)
+  setini("System","bcode","%s",s)
+  endif
+end
+
+// Displays modal "dialog box" with error message.
+function int Error(char *s1,char *s2)
+  handle herr,hdummy,hok
+  herr=control WINDOW
+    window=hmain
+    position=0,0,250,135
+    name="错误"
+    mode=M_MODAL
+    bkcolor=YELLOW
+  endc
+  hok=control BUTTON
+    window=herr
+    position=85,100,80,24
+    name="确定"
+    help="按下可以确认错误消息"
+  endc
+  hdummy=control ICON
+    window=herr
+    position=5,30,36,36
+    name="EXCLAM"
+    bkcolor=YELLOW
+  endc
+  hdummy=control TEXT
+    window=herr
+    position=41,20,200,24
+    name=s1
+    bkcolor=YELLOW
+    mode=M_CENTERED
+  endc
+  hdummy=control TEXT
+    window=herr
+    position=41,45,200,54
+    name=s2
+    bkcolor=YELLOW
+    mode=M_CENTERED
+  endc
+  while Pressed(hok)==0 do; enddo
+  destroy herr
+end
+
+// Checks for actions in OllyTest Versions card.
+function int Processversioncard()
+  int i
+  char name[260]
+  handle f
+  if Pressed(hsave) then
+    Strcpy(name,"Scripts.txt")
+    if SYS.Browse(hmain,name,"Select protocol file",0)!=0 then
+      f=Fopen(name,"wt")
+      if f==NULL then
+        Error("Unable to create file",name)
+      else
+        for i=0,i<nprot,i++ do
+          fprintf(f,"%s\n",prot[i])
+        enddo
+        Fclose(f)
+      endif
+    endif
+  endif
+end
+
+function int main()
+  int card
+  hmain=control WINDOW
+    window=NULL
+    position=10,10,DX+10,DY+37
+    name=format("调试软件安装实用程序")
+    help=" "
+    bkcolor=GRAY
+  endc
+  hexit=control BUTTON
+    window=hmain
+    position=DX-65,DY+10,70,22
+    name="退出"
+    help="完成设置"
+  endc
+  hcard=control CARD
+    window=hmain
+    position=5,5,DX,DY
+    help="选择要配置的内容"
+    font=INFOFONT
+  endc
+  hchild=control CHILD
+    window=hcard
+    position=4,27,DX-8,DY-31
+    help=" "
+    color=GRAY
+    bkcolor=GRAY
+    size=1024
+  endc
+  add hcard text="版本"
+  add hcard text="设置"
+  add hcard text="参数服务器"
+  card=-1
+  while 1 do
+    if Pressed(hexit) then
+      break
+    else if Pressed(hcard) then
+      card=Status(hcard)
+      if card==0 then
+        Createversionscard()
+      else if card==1 then
+        Createtestcard()
+      else if card==2 then
+        Createpscard()
+      endif
+    endif
+    if card==0 then
+      Processversioncard()
+    else if card==1 then
+      Processtestscard()
+    else if card==2 then
+      Processpscard()
+    endif
+    wait
+  enddo
+end
+

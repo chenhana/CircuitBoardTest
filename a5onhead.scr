@@ -1,0 +1,392 @@
+#include "ls.icl"
+#include "or.icl"
+#cmdbuff 1
+
+#define VERSION        "1.00"
+#define DESCRIPTION    "On-head self-test"
+
+#define TEXTDX         240             // Size of static text area
+#define HEADDY         28              // Height of the header
+#define CELLDX         135             // Width of cell
+#define CELLDY         22              // Height of cell
+#define BORDER         8               // Width of border
+#define NCOL           4               // No. of simultaneously visible columns
+#define NROW           12              // No. of visible rows
+
+#define BFACT          1.25            // Blue zone factor
+
+typedef struct t_ohst                  // On-head self-test results
+  $float4        rcable                // Cable resistance, Ohm
+  $float4        ton                   // On time of on-head relay, ms
+  $float4        toff                  // Off time of on-head relay, ms
+  $float4        iuzero                // Zero of I-U converter at 100 k, volt
+  $float4        iunoise               // Noise of I-U converter, volt
+  $float4        uzero                 // Zero of zeroed U amplifier, volt
+  $float4        inject                // Mean charge injection, volt
+  $float4        injnoise              // Injection noise, volt
+  $float4        leakage               // Leakage of U amplifier, volts/second
+  $float4        unoise                // Noise of U amplifier, volt
+  $float4        r1                    // Output resistance to U/I bus, Ohm
+  $float4        r2                    // Output resistance to GND bus, Ohm
+  $float4        reserved[20]          // Reserved for the future
+ends
+
+handle           hmain                 // Main window
+handle           hallon                // All on/off button
+handle           hchild                // Child window with data
+handle           henable[32]           // Cell enabling data
+handle           hstat                 // Show min/max values
+handle           hmean                 // Show mean values
+handle           hlast                 // Show last data
+handle           hstart                // Start button
+handle           hstop                 // Stop button
+handle           hclear                // Clear button
+handle           hexit                 // Close button
+
+int              nhead                 // Total number of heads
+
+float            data[32][NROW][5]     // On-head statistics
+float            lastdata[32][NROW]    // Last data from on-head
+float            limit[NROW]           // Blue limits extracted from row data
+
+char rows[NROW][48] = {                                                        \
+  "5.0     Loop resistance, Ohm",                                              \
+  "5.0     ON switching time (16 tests), ms",                                  \
+  "2.0     OFF switching time (16 tests), ms",                                 \
+  "50.0    Zero of I/U converter (R=100 k), mV",                               \
+  "20.0    Noise of I/U converter, mV",                                        \
+  "10.0    Output of zeroed U amplifier, mV",                                  \
+  "10.0    Mean charge injection, mV",                                         \
+  "3.0     Injection noise, mV",                                               \
+  "5.0     Leakage, V/second",                                                 \
+  "20.0    Noise of U amplifier, mV",                                          \
+  "110.0   Resistance of optocoupler 1, Ohm",                                  \
+  "110.0   Resistance of optocoupler 2, Ohm" }
+
+// Initializes statistical measurements.
+function int Initsigma(float disp[])
+  disp[0]=0.0
+  disp[1]=0.0
+  disp[2]=0.0
+  disp[3]=0.0
+  disp[4]=0.0
+end
+
+// Function adds next measured value to array disp[5] which accumulates data
+// necessary to calculate normal dispersion, mean, minimal and maximal.
+function int Addsigma(float disp[],float value)
+  if disp[0]<=0.0 then
+    disp[0]=1.0                        // First point, data is still undefined
+    disp[1]=value
+    disp[2]=value*value
+    disp[3]=value
+    disp[4]=value
+  else
+    disp[0]=disp[0]+1.0
+    disp[1]=disp[1]+value
+    disp[2]=disp[2]+value*value
+    disp[3]=Min(disp[3],value)
+    disp[4]=Max(disp[4],value)
+  endif
+end
+
+// Function returns number of data items gathered by Addsigma().
+function int Getcount(float disp[])
+  return disp[0]
+end
+
+// Function calculates mean value based on data gathered by Addsigma().
+function float Getmean(float disp[])
+  if disp[0]<1.0 then
+    return 0.0
+  else
+    return disp[1]/disp[0]
+  endif
+end
+
+// Function calculates minimal value based on data gathered by Addsigma().
+function float Getmin(float disp[])
+  return disp[3]
+end
+
+// Function calculates minimal value based on data gathered by Addsigma().
+function float Getmax(float disp[])
+  return disp[4]
+end
+
+// Function calculates normal dispersion based on data gathered by Addsigma().
+function float Getsigma(float disp[])
+  float r
+  if disp[0]<2.0 then
+    return 0.0
+  else
+    r=(disp[0]*disp[2]-disp[1]*disp[1])/disp[0]/(disp[0]-1.0)
+    if r<=0 then
+      return 0.0
+    else
+      return Sqrt(r)
+    endif
+  endif
+end
+
+// Redraws scrollable data window.
+function int Redraw()
+  int i,j
+  float dmin,dmax
+  draw window=hchild bkcolor=WHITE clear
+  draw color=LIGHTGRAY
+  for j=1,j<NROW,j++ do
+    draw at 0,HEADDY+j*CELLDY to CELLDX*nhead,HEADDY+j*CELLDY
+  enddo
+  draw color=BLACK font=FIXEDSYS
+  draw at 0,HEADDY+NROW*CELLDY to CELLDX*nhead,HEADDY+NROW*CELLDY
+  for i=0,i<nhead,i++ do
+    draw color=BLACK at i*CELLDX-1,0 to i*CELLDX-1,HEADDY+CELLDY*NROW+17
+    for j=0,j<NROW,j++ do
+      if Getcount(data[i,j])==0 continue
+      if Status(hstat)==1 then
+        dmin=Getmin(data[i,j])
+        dmax=Getmax(data[i,j])
+      else if Status(hmean)==1 then
+        dmin=Getmean(data[i,j])
+        dmax=dmin
+      else
+        dmin=lastdata[i,j]
+        dmax=dmin
+      endif
+      if Status(henable[i])==0 then
+        draw color=DARKGRAY
+      else if Abs(dmin)<=limit[j] && Abs(dmax)<=limit[j] then
+        draw color=BLACK
+      else if Abs(dmin)<=limit[j]*BFACT && Abs(dmax)<=limit[j]*BFACT then
+        draw color=BLUE
+      else
+        draw color=LIGHTRED
+      endif
+      draw at i*CELLDX+5,HEADDY+j*CELLDY+21
+      if dmin==dmax then
+        draw text=format("  %.5g",dmin)
+      else
+        draw text=format("%.4g..%.4g",dmin,dmax)
+      endif
+    enddo
+  enddo
+  draw at 0,HEADDY to CELLDX*nhead,HEADDY
+  draw show
+end
+
+function int main()
+  int i,j,x,y,redraw,run,stoptest,waitanswer,lasthead,onoff
+  char buf[64]
+  struct t_ohst ohst
+  nhead=$LAY.nfing*2
+  // Create main window.
+  hmain=control WINDOW
+    window=NULL
+    position=10,10,TEXTDX+CELLDX*NCOL-1+2*BORDER,HEADDY+CELLDY*NROW+2*BORDER+78
+    name=format("测试头自检 v%s",VERSION)
+    help=" "
+    bkcolor=PINK
+    size=1024
+  endc
+  // Draw names of parameters.
+  y=BORDER+HEADDY+22
+  draw window=hmain font=INFOFONT mode=M_RIGHT
+  draw color=BLACK at BORDER+5,y-CELLDY to BORDER+TEXTDX,y-CELLDY
+  for j=0,j<NROW,j++ do
+    draw color=BLACK at TEXTDX,y text=rows[j]+8
+    draw color=GRAY at BORDER+5,y to BORDER+TEXTDX,y
+    sscanf(rows[j],"%8g",limit+j)
+    y=y+CELLDY
+  enddo
+  draw color=BLACK at BORDER+5,BORDER+HEADDY+22-CELLDY
+  draw to BORDER+5,y-CELLDY
+  draw to BORDER+TEXTDX,y-CELLDY
+  draw show
+  // Create All on/off button.
+  hallon=control BUTTON
+    window=hmain
+    position=TEXTDX-100,BORDER+2,100,22
+    text="All on/off -->"
+    help="按下以打开或关闭所有测试头"
+  endc
+  // Create scrollable child and head selection boxes.
+  hchild=control CHILD
+    window=hmain
+    position=BORDER+TEXTDX,BORDER,CELLDX*NCOL-1,HEADDY+CELLDY*NROW+17
+    help="测试结果"
+    bkcolor=WHITE
+    limits=CELLDX*nhead-1,0
+    mode=M_BORDER|M_HSCROLL
+    size=8192
+  endc
+  for i=0,i<nhead,i++ do
+    henable[i]=control CHECKBOX
+      window=hchild
+      position=i*CELLDX+10,5,CELLDX-15,20
+      text=format("Head %i%c",i/2,i & 1?'R':'L')
+      help=format("取消已经屏蔽测试的测试头 %i%c",i/2,i & 1?'R':'L')
+      mode=M_CHECKED
+    endc
+    for j=0,j<NROW,j++ do
+      Initsigma(data[i,j])
+    enddo
+  enddo
+  // Create statistics mode buttons.
+  draw window=hmain color=BLACK font=INFOFONT
+  draw at BORDER+5,HEADDY+CELLDY*NROW+21+2*BORDER text="Show:"
+  draw show
+  hstat=control RADIO
+    window=hmain
+    position=BORDER+50,HEADDY+CELLDY*NROW+4+2*BORDER,130,22
+    text="Min/max"
+    help="检查以显示所有周期的最小值和最大值"
+    font=INFOFONT
+    mode=M_CHECKED
+  endc
+  hmean=control RADIO
+    window=hmain
+    position=BORDER+50,HEADDY+CELLDY*NROW+27+2*BORDER,130,22
+    text="Mean values"
+    help="检查以显示所有周期的平均值"
+    font=INFOFONT
+  endc
+  hlast=control RADIO
+    window=hmain
+    position=BORDER+50,HEADDY+CELLDY*NROW+50+2*BORDER,130,22
+    text="Last values"
+    help="显示上一个周期中测得的值"
+    font=INFOFONT
+  endc
+  // Create Start/Stop/Reset/Close buttons.
+  x=TEXTDX+CELLDX*NCOL+BORDER-4*(90+BORDER)
+  y=HEADDY+CELLDY*NROW+BORDER+54
+  hstart=control BUTTON
+    window=hmain
+    position=x,y,90,24
+    text="开始"
+    help="开始测试"
+    color=BLACK
+    bkcolor=GRAY
+  endc
+  x=x+90+BORDER
+  hstop=control BUTTON
+    window=hmain
+    position=x,y,90,24
+    text="停止"
+    help="停止测试"
+  endc
+  x=x+90+BORDER
+  hclear=control BUTTON
+    window=hmain
+    position=x,y,90,24
+    text="清除"
+    help="清除统计数据"
+  endc
+  x=x+90+2*BORDER
+  hexit=control BUTTON
+    window=hmain
+    position=x,y,90,24
+    text="关闭"
+    help="关闭脚本"
+  endc
+  // Main loop.
+  onoff=M_CHECKED
+  redraw=1
+  run=0; stoptest=0; waitanswer=-1
+  lasthead=nhead
+  while 1 do
+    // Check buttons.
+    if Pressed(hallon) then
+      onoff=onoff^M_CHECKED
+      for i=0,i<nhead,i++ do
+        change henable[i] mode=onoff
+      enddo
+      redraw=1
+    else if Pressed(hstat) then
+      redraw=1
+    else if Pressed(hmean) then
+      redraw=1
+    else if Pressed(hlast) then
+      redraw=1
+    else if Pressed(hstart) then
+      run=1; stoptest=0
+      change hstart color=LIGHTRED
+      change hstart bkcolor=YELLOW
+    else if Pressed(hstop) then
+      stoptest=1
+    else if Pressed(hclear) then
+      SYS.Killimm(0)
+      waitanswer=-1
+      lasthead=nhead
+      for i=0,i<nhead,i++ do
+        for j=0,j<NROW,j++ do
+          Initsigma(data[i,j])
+        enddo
+      enddo
+      redraw=1
+    else if Pressed(hexit) then
+      break
+    endif
+    for i=0,i<nhead,i++ do
+      if Pressed(henable[i]) redraw=1
+    enddo
+    // Stop test if requested (internally or by operator). Pending command is
+    // allowed to come.
+    if stoptest then
+      run=0
+      change hstart color=BLACK
+      change hstart bkcolor=GRAY
+      stoptest=0
+    endif
+    // Run test. Paused test continues from the on-head where it was paused.
+    if waitanswer>=0 then
+      if $A[0].length>0 then
+        if $A[0].answer!=S_DEBUG then
+          stoptest=1                   // Invalid answer
+        else
+          Memcpy(ohst,$A[0]+6,128)
+          lastdata[waitanswer][0]=ohst.rcable
+          lastdata[waitanswer][1]=ohst.ton
+          lastdata[waitanswer][2]=ohst.toff
+          lastdata[waitanswer][3]=ohst.iuzero
+          lastdata[waitanswer][4]=ohst.iunoise
+          lastdata[waitanswer][5]=ohst.uzero
+          lastdata[waitanswer][6]=ohst.inject
+          lastdata[waitanswer][7]=ohst.injnoise
+          lastdata[waitanswer][8]=ohst.leakage
+          lastdata[waitanswer][9]=ohst.unoise
+          lastdata[waitanswer][10]=ohst.r1
+          lastdata[waitanswer][11]=ohst.r2
+          for j=0,j<NROW,j++ do
+            Addsigma(data[waitanswer,j],lastdata[waitanswer,j])
+          enddo
+        endif
+        waitanswer=-1
+        redraw=1
+      endif
+    else if run then
+      for i=0,i<nhead,i++ do           // Find next head
+        lasthead++; if lasthead>=nhead lasthead=0
+        if Status(henable[lasthead])!=0 break
+      enddo
+      if i>=nhead then
+        stoptest=1                     // No on-heads to test
+      else
+        buf[0]=S_DEBUG
+        buf[1]=0x19                    // On-head self-test
+        buf[2]=0                       // Head
+        Memset(buf+3,0,16)
+        SYS.Sendimm(0,19,buf)
+        waitanswer=lasthead
+      endif
+    endif
+    // Redraw table.
+    if redraw then
+      Redraw()
+      redraw=0
+    endif
+    wait
+  enddo
+end
+

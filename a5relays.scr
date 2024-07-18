@@ -1,0 +1,2872 @@
+#include "ls.icl"
+#include "or.icl"
+#zeroid
+#cmdbuff 2
+
+#define VERSION        "1.03"
+#define DESCRIPTION    "在测量卡和多路卡测试继电器"
+
+// 1.00: Derived from a5mplay.scr.
+
+#data a5rly="a5relays.dat"
+
+#define MAINDX         650             // Width of main window
+#define RIGHTDX        100             // Width of right controls
+#define MAINDY         480             // Height of main window
+#define BDR            5               // Distance between controls
+
+#define KEYLEN         32              // Maximal length of identifier
+#define STATLEN        128             // Size of transmittable part of state
+#define TEXTLEN        128             // Maximal length of displayed strings
+#define NSTATE         128             // Maximal number of states
+#define NLABEL         256             // Maximal number of labels
+#define NCMD           2048            // Maximal number of commands
+#define OSCCOUNT       4096            // Length of oscillogramm, must be 2**N!
+#define NMEM           10              // Number of memory slots
+
+#define OP_NOP         0               // No operation
+#define OP_SETOUT      1               // Set out
+#define OP_OHBITS      2               // Set on-head state
+#define OP_SETDAC      3               // Change DAC voltage
+#define OP_SETAMPL     4               // Change ADC amplification
+#define OP_RELAY       5               // Set state of single relay
+#define OP_OUT         6               // Send out to measurement card
+#define OP_VOLT        7               // Measure voltage
+#define OP_NOISE       8               // Measure noise
+#define OP_PHASE       9               // Measure phase
+#define OP_STOPUERR    10              // Check voltage and stop on error
+#define OP_STOPNERR    11              // Check noise and stop on error
+#define OP_STOPFERR    12              // Check phase and stop on error
+#define OP_GOTOUERR    13              // Check voltage and goto on error
+#define OP_GOTONERR    14              // Check noise and goto on error
+#define OP_GOTOFERR    15              // Check phase and goto on error
+#define OP_STOPUSUCC   16              // Check voltage and stop on success
+#define OP_STOPNSUCC   17              // Check noise and stop on success
+#define OP_STOPFSUCC   18              // Check phase and stop on success
+#define OP_GOTOUSUCC   19              // Check voltage and goto on success
+#define OP_GOTONSUCC   20              // Check noise and goto on success
+#define OP_GOTOFSUCC   21              // Check phase and goto on success
+#define OP_WARNUERR    22              // Check voltage and warn on error
+#define OP_WARNNERR    23              // Check noise and warn on error
+#define OP_WARNFERR    24              // Check phase and warn on error
+#define OP_PAUSEUERR   25              // Check voltage and pause on error
+#define OP_PAUSENERR   26              // Check noise and pause on error
+#define OP_PAUSEFERR   27              // Check phase and pause on error
+#define OP_STOPOSUCC   28              // Check U overload and stop if present
+#define OP_STOPOERR    29              // Check U overload and stop if none
+#define OP_GOTOOSUCC   30              // Check U overload and goto if present
+#define OP_GOTOOERR    31              // Check U overload and goto if none
+#define OP_STOPISUCC   32              // Check I overload and stop if present
+#define OP_STOPIPSUCC  33              // Check I+ overload and stop if present
+#define OP_STOPIMSUCC  34              // Check I- overload and stop if present
+#define OP_STOPIERR    35              // Check I overload and stop if none
+#define OP_STOPIPERR   36              // Check I+ overload and stop if none
+#define OP_STOPIMERR   37              // Check I- overload and stop if none
+#define OP_GOTOISUCC   38              // Check I overload and goto if present
+#define OP_GOTOIPSUCC  39              // Check I+ overload and goto if present
+#define OP_GOTOIMSUCC  40              // Check I- overload and goto if present
+#define OP_GOTOIERR    41              // Check I overload and goto if none
+#define OP_GOTOIPERR   42              // Check I+ overload and goto if none
+#define OP_GOTOIMERR   43              // Check I- overload and goto if none
+#define OP_FIXDEF      44              // Set default zero voltage
+#define OP_DEFZERO     45              // Restore default zero voltage
+#define OP_FIXZERO     46              // Set zero voltage
+#define OP_NOZERO      47              // Discard zero voltage
+#define OP_FIXPHASE    48              // Set zero phase
+#define OP_NOPHASE     49              // Discard zero phase
+#define OP_GETOSC      50              // Gather oscillogramm
+#define OP_FFT         51              // Make FFT of oscillogramm
+#define OP_FFTSUM      52              // Get sum of FFT in frequency range
+#define OP_FFTMAX      53              // Get max of FFT in frequency range
+#define OP_FIRSTHEAD   54              // Set head to 0
+#define OP_GOTO        55              // Go to label
+#define OP_REPEAT      56              // Repeat test if Repeat is checked
+#define OP_NEXTHEAD    57              // Increment head & jump if not over
+#define OP_FIRSTANT    58              // Set head to first external antenna
+#define OP_IFEXTANT    59              // Jump if head is external antenna
+#define OP_DELAY       60              // Delay in milliseconds
+#define OP_INFO        61              // Show info
+#define OP_MESSAGE     62              // Show message
+#define OP_WARNING     63              // Show warning
+#define OP_PAUSE       64              // Show error and pause
+#define OP_STOP        65              // Stop execution
+#define OP_SETFLAG     66              // Set flag
+#define OP_CLRFLAG     67              // Reset flag
+#define OP_IF          68              // Jump to label if flag set
+#define OP_IFNOT       69              // Jump to label if flag not set
+#define OP_SOFTRES     70              // Make soft reset
+#define OP_CARDTYPE    71              // Get type of measurement card
+#define OP_DRAW        72              // Drawings
+#define OP_DRAWRLY     73              // Change meas relay state on drawing
+#define OP_DRAWHEAD    74              // Change mux relay state on drawing
+#define OP_MOVEHEAD    75              // Move selected head
+#define OP_MOVEHOME    76              // Move selected head in home pos
+#define OP_MEMZERO     77              // Zero value of memory slot
+#define OP_MEMMAX      78              // Set memory to max(memory,voltage)
+#define OP_MEMMIN      79              // Set memory to min(memory,voltage)
+#define OP_MEMGET      80              // Get memory to voltage
+
+#define RS_UNKNOWN     0               // Relay is not tested
+#define RS_TEST        1               // Relay is being tested
+#define RS_OK          2               // Relay is OK
+#define RS_OPTBAD      3               // Relay is bad but optional
+#define RS_BAD         4               // Relay is damaged
+
+#define HCM_HV1MA      0x00000001      // Force 1 mA during HV measurements
+#define HCM_STRICT     0x00000002      // 20% stricter self-test
+#define HCM_NOCTCHK    0x00000004      // Don't check contacts (except ExactR)
+#define HCM_PARCONT    0x00000008      // Check influence of parallel contacting
+#define HCM_NOACCEL    0x00000010      // Do not accelerate reed relays
+#define HCM_TMEASOFF   0x00000020      // Turn off temperature measurements
+#define HCM_CTOEXT     0x00000040      // Calibrate capacity to shuttle (extant)
+#define HCM_ISOEANT    0x00000080      // External antennas isolated
+#define HCM_FILTMASK   0x00000F00      // Mask to extract signal filtering
+#define   HCM_FNONE    0x00000000      // No signal filtering
+#define   HCM_F500K    0x00000100      // 500 kHz filter
+#define   HCM_F100K    0x00000200      // 100 kHz filter
+#define   HCM_F20K     0x00000300      // 20/50 kHz filter
+#define HCM_FILTERC    0x00001000      // Filter C measurements over 300 pF
+#define HCM_EXRLONG    0x00002000      // Long EXACTR with 300 mA source
+#define HCM_HVTYPE     0x000F0000      // Mask to extract type of HV elecronics
+#define   HCM_HV500    0x00000000      // Card is capable of 500 V HV
+#define   HCM_HV1000   0x00010000      // Card is capable of 1000 V HV
+#define   HCM_HVAUTO   0x00070000      // Autodetect HV capabilities
+
+// Type and layout of multiplexer.
+#define MUX_TYPEMASK   0xF0000000      // Mask to extract type of multiplexer
+#define   MUX_TYPE406  0x00000000      // EL406 (16 outputs)
+#define   MUX_TYPE506  0x10000000      // EL506 (modular)
+#define MUX_MODCOUNT   0x0F000000      // Mask to extract number of modules
+#define MUX_EXTERN5    0x00038000      // Mask for Card2:Ext2, MUXEXT_xxx
+#define MUX_EXTERN4    0x00007000      // Mask for Card2:Ext1, MUXEXT_xxx
+#define MUX_EXTERN3    0x00000E00      // Mask for Card1:Ext2, MUXEXT_xxx
+#define MUX_EXTERN2    0x000001C0      // Mask for Card1:Ext1, MUXEXT_xxx
+#define MUX_EXTERN1    0x00000038      // Mask for Card0:Ext2, MUXEXT_xxx
+#define MUX_EXTERN0    0x00000007      // Mask for Card0:Ext1, MUXEXT_xxx
+
+#define FLAG_HV1000    250             // Flag: HV1000 card
+#define FLAG_EXTANT    251             // Flag: External antennas
+
+// Controls.
+handle           hmain                 // Main window
+handle           hgraph                // Graph windows for meas or mux
+handle           hlist                 // Message list
+handle           hrun                  // Compile and run
+handle           hcont                 // Continue after pause
+handle           hrepeat               // Repeat checkbox
+handle           hexit                 // Close button
+
+// States of measurement card (extended t_measstateex). Only first STATLEN
+// bytes (up to name) can be transmitted to the measurement card.
+typedef struct t_state                 // Extended state of measurement card
+  $float4 uadc;                        // ADC
+  int     udac;                        // DAC; smoo,unp,tgl,frm,frq in E0FF0000
+  int     k0k31;                       // State of relays K0..K31
+  int     k32k63;                      // State of relays K32..K63
+  int     k64k79;                      // 0000FFFF: State of relays K64..K79
+                                       // 000F0000: Overload flags
+                                       // 80000000: Disable temperature
+  int     k111k80;                     // State of relays K111..K80
+  int     h0h7;                        // State of on-heads 0..7
+  int     h8h15;                       // State of on-heads 8..15
+  int     offs;                        // AC DAC offset (1/64th bit) in lo
+  int     pgamux;                      // 00F:+commutator, 0F0:-commutator,
+                                       // 300:PGA, 1C00:filter, 80000000:GND-GND
+  int     dacineg;                     // Negative threshold for I source
+  int     dacipos;                     // Positive threashold for I source
+  int     dacilim;                     // I limit for I source
+  int     dacuhyst;                    // Hysteresis for U threshold
+  int     dachv;                       // HV in lo, 80000000: zeroing
+  int     delays;                      // SHdly-00001F, SHon-000020, Acc-003F00,
+                                       // Aon-004000, ADDAdly-3F0000
+  int     addr9;                       // Bits at FPGA address 9
+  int     rback;                       // Feedback resistor
+  $float4 dbgsin;                      // Sine component of debug sum
+  $float4 dbgcos;                      // Cosine component of debug sum
+  int     la0la31;                     // State of LATEST relays K0..K31
+  int     la32la37;                    // State of LATEST relays K32..K37
+  int     lamux;                       // LaAMPL-0030, LaMUX-000E, LaIOUT-0001
+  int     dummy[9];                    // Reserved for the future, set to 0
+  char    name[KEYLEN]                 // DO NOT TRANSMIT! INTERNAL DATA!
+ends
+struct t_state   state[NSTATE]         // List of states
+int              nstate                // Number of states
+
+// Labels.
+typedef struct t_label                 // Label descriptor
+  char           name[KEYLEN]          // Name of the label
+  int            line                  // Line where label is defined
+  int            offset                // Offset in compiled code (0 - absent)
+ends
+struct t_label   label[NLABEL]         // List of labels
+int              nlabel                // Number of labels
+
+// Compiled program.
+typedef struct t_cmd                   // Command descriptor
+  int            op                    // Operation, one of OP_xxx
+  int            parm                  // Index, delay etc.
+  int            parm2                 // Additional parameter
+  int            parm3                 // Additional parameter
+  int            parm4                 // Additional parameter
+  float          umin,umax             // Limits of measured parameter
+  char           text[TEXTLEN]         // Message
+ends
+struct t_cmd     cmd[NCMD]             // Compiled program
+int              ncmd                  // Number of compiled commands
+
+// Runtime environment.
+struct t_state   out                   // Buffer for card configuration
+int              pending               // Command is pending
+int              timeout               // Start of timeout
+int              head                  // Selected head/extant, tester order
+float            voltage               // Measured voltage
+float            vzero                 // Voltage offset
+float            vdefzero              // Default voltage offset
+int              uovld                 // Voltage source overloaded
+int              iovld                 // Current source overloaded
+float            noise                 // Measured noise (new feature, DC only!)
+float            phase                 // Measured phase
+float            zerophase             // Phase offset
+int              pause                 // Pause
+char             flag[256]             // Flags (0..255, some as FLAG_xxx)
+int              oscactive             // 1: triggered, 2: osc valid, -1: error
+float            osc[OSCCOUNT]         // Gathered oscillogramm (1 us)
+int              nosc                  // Current length of oscillogramm
+float            fft[OSCCOUNT]         // Fast Fourier transform of osc
+int              isnewmeas             // Whether new (BEL407-5) card
+char             rstate[128]           // Relay state, RS_xxx
+int              rtesting              // Relay being tested
+float            mem[NMEM]             // Memory slots
+handle           log                   // Protocol file
+
+
+////////////////////////////////////////////////////////////////////////////////
+///////////////////////////// INTERRUPT PROCESSING /////////////////////////////
+
+function int Answerproc(char *answer,int info)
+  int i
+  if answer[4]==S_TEST && oscactive==1 &&                                      \
+    answer[5]==3 && answer[6]==0x80 && answer[7]==0x00 then
+    if $uint2(answer+10)!=nosc then
+      oscactive=-1                     // Out of sync
+    else if nosc+$uint2(answer+12)>OSCCOUNT then
+      oscactive=-1                     // Invalid length of oscillogramm
+    else
+      for i=0,i<$uint2(answer+12),i++ do
+        osc[nosc]=$float4(answer+14+i*4)-32768.0
+        nosc++
+      enddo
+      if nosc==OSCCOUNT then
+        oscactive=2                    // Data gathered
+      endif
+    endif
+  endif
+end
+
+
+////////////////////////////////////////////////////////////////////////////////
+////////////////////////////// DRAWING FUNCTIONS ///////////////////////////////
+
+#define MUXX0          8               // Offset of multiplexer image
+#define MUXY0          10
+#define MUXSCALE       1.45
+
+float k80k111xy[32][4] = {           \ // X, Y, rotated, index in measstat
+  { 232.00, 30.59, 0, -1 },          \ // K80
+  { 232.00, 58.17, 0, -1 },          \ // K81
+  { 232.00, 44.38, 0, -1 },          \ // K82
+  { 232.00, 71.97, 0, -1 },          \ // K83
+  { 232.00, 23.69, 0, 58 },          \ // K84
+  { 232.00, 16.79, 0, 48 },          \ // K85
+  { 309.00, 19.00, 1, 56 },          \ // K86
+  { 317.00, 22.00, 1, 54 },          \ // K87
+  { 293.00, 53.00, 1, -1 },          \ // K88
+  { 300.00, 53.00, 1, -1 },          \ // K89
+  { 293.00, 22.00, 1, -1 },          \ // K90
+  { 300.00, 22.00, 1, -1 },          \ // K91
+  { 232.00, 37.48, 0, 32 },          \ // K92
+  { 232.00, 65.07, 0, 36 },          \ // K93
+  { 232.00, 51.28, 0, 34 },          \ // K94
+  { 232.00, 78.86, 0, 38 },          \ // K95
+  { 264.00, 30.59, 0, 40 },          \ // K96
+  { 264.00, 58.17, 0, 44 },          \ // K97
+  { 264.00, 44.38, 0, 42 },          \ // K98
+  { 264.00, 71.97, 0, 46 },          \ // K99
+  { 264.00, 23.69, 0, -1 },          \ // K100
+  { 264.00, 16.79, 0, -1 },          \ // K101
+  { 264.00,  9.90, 0, -1 },          \ // K102
+  { 264.00,  3.00, 0, -1 },          \ // K103
+  { 264.00, 37.48, 0, 60 },          \ // K104
+  { 264.00, 51.28, 0, -1 },          \ // K105
+  { 264.00, 65.07, 0, -1 },          \ // K106
+  { 264.00, 78.86, 0, 22 },          \ // K107
+  { 311.00, 86.00, 1, -1 },          \ // K108
+  { 303.00, 86.00, 1, 62 },          \ // K109
+  { 232.00,  3.00, 0, 50 },          \ // K110
+  { 232.00,  9.90, 0, 52 } }         \ // K111
+
+float k80k111xynew[33][4] = {        \ // X, Y, rotated, index in measstat
+  { 250.00, 57.50, 0, -1 },          \ // K80
+  { 250.00, 50.00, 0, -1 },          \ // K81
+  { 250.00, 42.50, 0, -1 },          \ // K82
+  { 250.00, 35.00, 0, -1 },          \ // K83
+  { 250.00, 87.60, 0, 58 },          \ // K84
+  { 250.00, 80.00, 0, 48 },          \ // K85
+  { 250.00, 27.50, 0, 56 },          \ // K86
+  { 277.50, 27.50, 0, 54 },          \ // K87
+  { 277.50, 19.90, 0, -1 },          \ // K88
+  { 250.00, 19.90, 0, -1 },          \ // K89
+  { 305.00, 65.00, 0, -1 },          \ // K90
+  { 305.00, 72.50, 0, -1 },          \ // K91
+  { 277.50, 57.50, 0, 32 },          \ // K92
+  { 277.50, 50.00, 0, 36 },          \ // K93
+  { 277.50, 42.50, 0, 34 },          \ // K94
+  { 277.50, 35.00, 0, 38 },          \ // K95
+  { 305.00, 57.50, 0, 40 },          \ // K96
+  { 305.00, 50.00, 0, 44 },          \ // K97
+  { 305.00, 42.50, 0, 42 },          \ // K98
+  { 305.00, 35.00, 0, 46 },          \ // K99
+  { 305.00, 95.20, 0, -1 },          \ // K100
+  { 277.50, 87.60, 0, -1 },          \ // K101
+  { 277.50, 95.20, 0, -1 },          \ // K102
+  { 305.00, 87.60, 0, -1 },          \ // K103
+  { 277.50, 80.00, 0, 60 },          \ // K104
+  { 305.00, 27.50, 0, -1 },          \ // K105
+  { 305.00, 80.00, 0, -1 },          \ // K106
+  { 277.50, 72.50, 0, 22 },          \ // K107
+  { 250.00, 95.20, 0, -1 },          \ // K108
+  { 277.50, 65.00, 0, 62 },          \ // K109
+  { 250.00, 65.00, 0, 50 },          \ // K110
+  { 250.00, 72.50, 0, 52 },          \ // K111
+  { 305.00, 19.90, 0, -1 } }         \ // K112 (spare)
+
+// Given K-index of the reed relay on the multiplexer card, returns its
+// coordinates in pixels (x0,y0,x1,y1).
+function int Getrelayrect(int kindex,int *xy)
+  int m,nmodule
+  if kindex>=128 then
+    // Pseudoindices for modular multiplexer.
+    nmodule=($int4($EXTLAY+674) & MUX_MODCOUNT)>>24
+    nmodule=Max(1,Min(nmodule,3))
+    kindex=kindex-128
+    m=kindex/80; kindex=kindex-m*80
+    if m>=nmodule || (kindex>=32 && kindex<64) || kindex>=72 then
+      xy[0]=0; xy[1]=0; xy[2]=0; xy[3]=0
+    else
+      if kindex>=64 kindex=(kindex-32)^0x4
+      xy[0]=MUXX0+(175.0*m+(kindex/8)*27.0+22.0)*MUXSCALE
+      xy[1]=MUXY0+(((kindex & 3)*2+(kindex & 4)/4)*7.6+47.0)*MUXSCALE
+      xy[2]=xy[0]+20.0*MUXSCALE
+      xy[3]=xy[1]+6.0*MUXSCALE
+    endif
+  else if kindex<0 || kindex>=(isnewmeas?113:112) then
+    // Invalid index.
+    xy[0]=0; xy[1]=0; xy[2]=0; xy[3]=0
+  else if kindex<64 then
+    // Relays K0..K63, connect on-heads to analog buses.
+    xy[0]=MUXX0+((kindex & 0x20?60.0:28.0)+((kindex & 0x1F)/8)*64.0)*MUXSCALE
+    xy[1]=MUXY0+((kindex & 0x4?54.5:47.0)+(kindex & 0x03)*15.2)*MUXSCALE
+    xy[2]=xy[0]+20.0*MUXSCALE
+    xy[3]=xy[1]+6.0*MUXSCALE
+  else if kindex>=64 && kindex<80 then
+    // Relays K64..K79, connect temperature sensor, ext devices and antennas.
+    xy[0]=MUXX0+(kindex<72?283.0:315.0)*MUXSCALE
+    xy[1]=MUXY0+((kindex & 0x4?47.0:54.5)+(kindex & 0x03)*15.2)*MUXSCALE
+    xy[2]=xy[0]+20.0*MUXSCALE
+    xy[3]=xy[1]+6.0*MUXSCALE
+  else if isnewmeas==0 && kindex>=80 && kindex<112 then
+    // Relays on older measurement card. No obvious order, use table.
+    xy[0]=MUXX0+k80k111xy[kindex-80][0]*MUXSCALE
+    xy[1]=MUXY0+k80k111xy[kindex-80][1]*MUXSCALE
+    if k80k111xy[kindex-80][2]==0 then
+      xy[2]=xy[0]+20.0*MUXSCALE
+      xy[3]=xy[1]+6.0*MUXSCALE
+    else
+      xy[2]=xy[0]+6.5*MUXSCALE         // Better optics
+      xy[3]=xy[1]+19.0*MUXSCALE
+    endif
+  else if isnewmeas==1 && kindex>=80 && kindex<113 then
+    // Relays on new measurement card. No obvious order, use table.
+    xy[0]=MUXX0+k80k111xynew[kindex-80][0]*MUXSCALE
+    xy[1]=MUXY0+k80k111xynew[kindex-80][1]*MUXSCALE
+    if k80k111xynew[kindex-80][2]==0 then
+      xy[2]=xy[0]+20.0*MUXSCALE
+      xy[3]=xy[1]+6.0*MUXSCALE
+    else
+      xy[2]=xy[0]+6.5*MUXSCALE         // Better optics
+      xy[3]=xy[1]+19.0*MUXSCALE
+    endif
+  endif
+end
+
+// Given J-index of the BNC connector on the multiplexer card, returns its
+// coordinates in pixels (x0,y0,x1,y1).
+function int Getbncrect(int jindex,int *xy)
+  int j
+  float ext[16,2] = {                                                          \
+    { 27.0, 281.0 }, {  7.0, 281.0 }, { 17.0, 297.0 }, { 37.0, 297.0 },        \
+    { 37.0, 281.0 }, { 17.0, 281.0 }, {  7.0, 297.0 }, { 27.0, 297.0 },        \
+    { 27.0, 328.5 }, {  7.0, 328.5 }, { 17.0, 313.5 }, { 37.0, 313.5 },        \
+    { 37.0, 328.5 }, { 17.0, 328.5 }, {  7.0, 313.5 }, { 27.0, 313.5 } }
+  float laext[4,2] = {                                                         \
+    { 57.0, 279.0 }, { 47.0, 269.0 }, { 57.0, 269.0 }, { 47.0, 279.0 } }
+  if jindex<1 || jindex>52 then
+    xy[0]=0; xy[1]=0; xy[2]=0; xy[3]=0
+  else if jindex<=32 then
+    // Connectors J1..J32, connect on-heads to analog buses.
+    j=jindex-1                         // 0..31
+    xy[0]=MUXX0+((j & 0x10?57.0:25.0)+(j & 0x0C)*16.0+(j & 0x01)*17.5)*MUXSCALE
+    xy[1]=MUXY0+(j & 0x02?37.0:27.0)*MUXSCALE
+    xy[2]=xy[0]+7.5*MUXSCALE
+    xy[3]=xy[1]+7.5*MUXSCALE
+  else if jindex<=48 then
+    // Connectors J33..J48, connect temp sensor, ext devices and antennas.
+    j=jindex-33
+    xy[0]=MUXX0+ext[j,1]*MUXSCALE
+    xy[1]=MUXY0+ext[j,0]*MUXSCALE
+    xy[2]=xy[0]+7.5*MUXSCALE
+    xy[3]=xy[1]+7.5*MUXSCALE
+  else
+    // Connectors J49..J52 on LATEST card
+    j=jindex-49
+    xy[0]=MUXX0+laext[j,1]*MUXSCALE
+    xy[1]=MUXY0+laext[j,0]*MUXSCALE
+    xy[2]=xy[0]+7.5*MUXSCALE
+    xy[3]=xy[1]+7.5*MUXSCALE
+  endif
+end
+
+// Given JP-index of the connector on the multiplexer card, returns its
+// coordinates in pixels (x0,y0,x1,y1).
+function int Getconnrect(int jpindex,int *xy)
+  if jpindex<0 || jpindex>=16 then
+    xy[0]=0; xy[1]=0; xy[2]=0; xy[3]=0
+  else
+    xy[0]=MUXX0+(41.0+(jpindex & 0x07)*37.5)*MUXSCALE
+    xy[1]=MUXY0+(jpindex & 0x08?147.5:160.5)*MUXSCALE
+    xy[2]=xy[0]+28.0*MUXSCALE
+    xy[3]=xy[1]+9.0*MUXSCALE
+  endif
+end
+
+// Given relay pseudoindex, returns coordinates of the BNC connector on the
+// modular multiplexer card.
+function int Getmodularbncrect(int kindex,int *xy)
+  int m,nmodule
+  nmodule=($int4($EXTLAY+674) & MUX_MODCOUNT)>>24
+  nmodule=Max(1,Min(nmodule,3))
+  kindex=kindex-128
+  m=kindex/80; kindex=kindex-m*80
+  if m<0 || m>=nmodule || (kindex>=32 && kindex<64) || kindex>=72 then
+    xy[0]=0; xy[1]=0; xy[2]=0; xy[3]=0
+  else if kindex<32 then
+    kindex=kindex & 0xFFFFFFFE
+    xy[0]=MUXX0+(175.0*m+(kindex/8)*27.0-(kindex & 2)*6.0+34.0)*MUXSCALE
+    xy[1]=MUXY0+((kindex & 4)*2.2+24.0)*MUXSCALE
+    xy[2]=xy[0]+7.5*MUXSCALE
+    xy[3]=xy[1]+7.5*MUXSCALE
+  else
+    xy[0]=MUXX0+(175.0*m+(kindex & 1)*12.0+138.0)*MUXSCALE
+    xy[1]=MUXY0+((kindex & 6)*4.4+6.4)*MUXSCALE
+    xy[2]=xy[0]+7.5*MUXSCALE
+    xy[3]=xy[1]+7.5*MUXSCALE
+  endif
+end
+
+// Given relay pseudoindex, returns coordinates of the connector on the modular
+// multiplexer card.
+function int Getmodularconnrect(int kindex,int *xy)
+  int m,nmodule
+  nmodule=($int4($EXTLAY+674) & MUX_MODCOUNT)>>24
+  nmodule=Max(1,Min(nmodule,3))
+  kindex=kindex-128
+  m=kindex/80; kindex=kindex-m*80
+  if m<0 || m>=nmodule || kindex>=32 then
+    xy[0]=0; xy[1]=0; xy[2]=0; xy[3]=0
+  else
+    xy[0]=MUXX0+                                                               \
+      (175.0*m+((kindex>>2) & 1)*43.0+((kindex>>4) & 1)*86.0+10.0)*MUXSCALE
+    xy[1]=MUXY0+(kindex & 0x08?149.5:162.5)*MUXSCALE
+    xy[2]=xy[0]+28.0*MUXSCALE
+    xy[3]=xy[1]+9.0*MUXSCALE
+  endif
+end
+
+// Draws multiplexer.
+function int Drawmuxdata(int meas,int relay)
+  int i,j,xy[4],nmodule,module
+  draw window=hgraph color=WHITE bkcolor=WHITE clear
+  if meas then
+    // Measurement card. Draw background.
+    draw color=BLACK bkcolor=WHITEGREEN
+    draw at MUXX0+6.0*MUXSCALE,MUXY0
+    draw fillrect MUXX0+343.0*MUXSCALE,MUXY0+175.0*MUXSCALE
+    draw color=BLACK bkcolor=LIGHTGRAY mode=M_LEFT
+    draw at MUXX0+337.0*MUXSCALE,MUXY0+48.0*MUXSCALE
+    draw fillrect MUXX0+348.0*MUXSCALE,MUXY0+140.0*MUXSCALE
+    if (isnewmeas) then
+      draw at MUXX0+250.0*MUXSCALE,MUXY0+15.0*MUXSCALE
+      draw font=SMALLFONT text="BEL407-5"
+    else
+      draw at MUXX0+30.0*MUXSCALE,MUXY0+15.0*MUXSCALE
+      draw font=SMALLFONT text="BEL407"
+    endif
+    // Draw reed relays.
+    for i=80,i<(isnewmeas?113:112),i++ do
+      Getrelayrect(i,xy)
+      draw color=(i==relay?BLACK:DARKGRAY)
+      if rstate[i]==RS_UNKNOWN then
+        draw bkcolor=LIGHTGRAY
+      else if rstate[i]==RS_OK then
+        draw bkcolor=LIGHTGREEN
+      else if rstate[i]==RS_OPTBAD then
+        draw bkcolor=YELLOW
+      else if rstate[i]==RS_BAD then
+        draw bkcolor=LIGHTRED
+      else
+        draw bkcolor=WHITE
+      endif
+      draw at xy[0],xy[1] fillrect xy[2]+1,xy[3]+1
+      if i==relay draw at xy[0]-1,xy[1]-1 rect xy[2]+2,xy[3]+2
+    enddo
+    // Draw Firewire, processor, FPGA, HV, MUX and supply.
+    if isnewmeas then
+      draw color=BLACK bkcolor=WHITE
+      draw at MUXX0+3*MUXSCALE,MUXY0+120*MUXSCALE
+      draw fillrect MUXX0+18*MUXSCALE,MUXY0+131*MUXSCALE
+      draw at MUXX0+3*MUXSCALE,MUXY0+142*MUXSCALE
+      draw fillrect MUXX0+18*MUXSCALE,MUXY0+153*MUXSCALE
+      draw color=GRAY bkcolor=LIGHTGRAY
+      draw at MUXX0+82*MUXSCALE,MUXY0+105*MUXSCALE
+      draw fillrect MUXX0+110*MUXSCALE,MUXY0+133*MUXSCALE
+      draw at MUXX0+135*MUXSCALE,MUXY0+137*MUXSCALE
+      draw fillrect MUXX0+159*MUXSCALE,MUXY0+161*MUXSCALE
+      draw at MUXX0+8*MUXSCALE,MUXY0+10*MUXSCALE
+      draw fillrect MUXX0+59*MUXSCALE,MUXY0+60*MUXSCALE
+      draw at MUXX0+280*MUXSCALE,MUXY0+147*MUXSCALE
+      draw fillrect MUXX0+315*MUXSCALE,MUXY0+159*MUXSCALE
+      draw at MUXX0+280*MUXSCALE,MUXY0+159*MUXSCALE
+      draw fillrect MUXX0+315*MUXSCALE,MUXY0+171*MUXSCALE
+    else
+      draw color=BLACK bkcolor=WHITE
+      draw at MUXX0+3*MUXSCALE,MUXY0+15*MUXSCALE
+      draw fillrect MUXX0+18*MUXSCALE,MUXY0+27*MUXSCALE
+      draw at MUXX0+3*MUXSCALE,MUXY0+32*MUXSCALE
+      draw fillrect MUXX0+18*MUXSCALE,MUXY0+44*MUXSCALE
+      draw color=GRAY bkcolor=LIGHTGRAY
+      draw at MUXX0+80*MUXSCALE,MUXY0+10*MUXSCALE
+      draw fillrect MUXX0+108*MUXSCALE,MUXY0+38*MUXSCALE
+      draw at MUXX0+81*MUXSCALE,MUXY0+52*MUXSCALE
+      draw fillrect MUXX0+105*MUXSCALE,MUXY0+76*MUXSCALE
+      draw at MUXX0+11*MUXSCALE,MUXY0+120*MUXSCALE
+      draw fillrect MUXX0+61*MUXSCALE,MUXY0+170*MUXSCALE
+      draw at MUXX0+204*MUXSCALE,MUXY0+18*MUXSCALE
+      draw fillrect MUXX0+219*MUXSCALE,MUXY0+55*MUXSCALE
+      draw at MUXX0+204*MUXSCALE,MUXY0+58*MUXSCALE
+      draw fillrect MUXX0+219*MUXSCALE,MUXY0+95*MUXSCALE
+      draw at MUXX0+228*MUXSCALE,MUXY0+157*MUXSCALE
+      draw fillrect MUXX0+248*MUXSCALE,MUXY0+172*MUXSCALE
+      draw at MUXX0+228*MUXSCALE,MUXY0+165*MUXSCALE
+      draw to MUXX0+248*MUXSCALE,MUXY0+165*MUXSCALE
+      draw at MUXX0+252*MUXSCALE,MUXY0+157*MUXSCALE
+      draw fillrect MUXX0+266*MUXSCALE,MUXY0+172*MUXSCALE
+      draw at MUXX0+252*MUXSCALE,MUXY0+165*MUXSCALE
+      draw to MUXX0+266*MUXSCALE,MUXY0+165*MUXSCALE
+    endif
+  else if ($int4($EXTLAY+674) & MUX_TYPEMASK)==MUX_TYPE506 then
+    // Modular multiplexer (EL506).
+    nmodule=($int4($EXTLAY+674) & MUX_MODCOUNT)>>24
+    nmodule=Max(1,Min(nmodule,2))      // Currently only 2 modules supported
+    for module=0,module<nmodule,module++ do
+      // Draw background.
+      draw color=BLACK bkcolor=WHITEGREEN
+      draw at MUXX0+(175.0*module+6.0)*MUXSCALE,MUXY0
+      draw fillrect MUXX0+(175.0*module+170.0)*MUXSCALE,MUXY0+175.0*MUXSCALE
+      draw color=BLACK bkcolor=LIGHTGRAY mode=M_LEFT
+      draw at MUXX0+175.0*module*MUXSCALE,MUXY0+48.0*MUXSCALE
+      draw fillrect MUXX0+(175.0*module+12.0)*MUXSCALE,MUXY0+140.0*MUXSCALE
+      draw at MUXX0+(165+175.0*module)*MUXSCALE,MUXY0+48.0*MUXSCALE
+      draw fillrect MUXX0+(165+175.0*module+12.0)*MUXSCALE,MUXY0+140.0*MUXSCALE
+      draw at MUXX0+(175.0*module+10.0)*MUXSCALE,MUXY0+11.0*MUXSCALE
+      draw font=SMALLFONT text="BEL506"
+      draw at MUXX0+(68+175.0*module)*MUXSCALE,MUXY0+121.0*MUXSCALE
+      draw fillrect MUXX0+(80+175.0*module)*MUXSCALE,MUXY0+133.0*MUXSCALE
+      draw at MUXX0+(71+175.0*module)*MUXSCALE,MUXY0+132.0*MUXSCALE
+      draw font=FIXEDSYS text=format("%i",module)
+      // Draw reed relays.
+      for i=128+module*80,i<128+module*80+80,i++ do
+        Getrelayrect(i,xy)
+        if xy[0]==xy[2] continue
+        // j=corresponding relay on the old card
+        j=i-128-module*80
+        if j>=64 && j<72 then
+          ;
+        else if j>=32 then
+          j=-1
+        else
+          switch j & 0x38
+          case 0x08: j=(j & 0xC7) | 0x20
+          case 0x10: j=(j & 0xC7) | 0x08
+          case 0x18: j=(j & 0xC7) | 0x28
+          endsw
+          j=j+module*16
+        endif
+        draw color=(j==relay?BLACK:DARKGRAY)
+        if j<0 then
+          draw bkcolor=WHITE
+        else if rstate[j]==RS_UNKNOWN then
+          draw bkcolor=LIGHTGRAY
+        else if rstate[j]==RS_OK then
+          draw bkcolor=LIGHTGREEN
+        else if rstate[j]==RS_OPTBAD then
+          draw bkcolor=YELLOW
+        else if rstate[j]==RS_BAD then
+          draw bkcolor=LIGHTRED
+        else
+          draw bkcolor=WHITE
+        endif
+        draw at xy[0],xy[1] fillrect xy[2]+1,xy[3]+1
+        if j>=0 && j==relay draw at xy[0]-1,xy[1]-1 rect xy[2]+2,xy[3]+2
+      enddo
+      // Draw BNC connectors.
+      draw color=DARKGRAY bkcolor=WHITE
+      for i=128+module*80,i<128+module*80+80,i++ do
+        if i<128+module*80+32 && (i & 1)!=0 continue
+        Getmodularbncrect(i,xy)
+        if xy[0]==0 && xy[2]==0 continue
+        draw at xy[0],xy[1] fillrect xy[2]+1,xy[3]+1
+        draw at (xy[0]+xy[2])/2,(xy[1]+xy[3]+1)/2
+        draw fillellipse xy[2]-xy[0]-4,xy[3]-xy[1]-4
+      enddo
+      // Draw on-head control connectors.
+      draw color=DARKGRAY bkcolor=WHITE
+      for i=128+module*80,i<128+module*80+32,i=i+4 do
+        Getmodularconnrect(i,xy)
+        if xy[0]==0 && xy[2]==0 continue
+        draw at xy[0],xy[1] fillrect xy[2]+1,xy[3]+1
+      enddo
+    enddo
+  else
+    // Multiplexer card with 16 outputs (EL406). Draw background.
+    draw color=BLACK bkcolor=WHITEGREEN
+    draw at MUXX0+6.0*MUXSCALE,MUXY0
+    draw fillrect MUXX0+343.0*MUXSCALE,MUXY0+175.0*MUXSCALE
+    draw color=BLACK bkcolor=LIGHTGRAY mode=M_LEFT
+    draw at MUXX0,MUXY0+48.0*MUXSCALE
+    draw fillrect MUXX0+12.0*MUXSCALE,MUXY0+140.0*MUXSCALE
+    draw at MUXX0+30.0*MUXSCALE,MUXY0+15.0*MUXSCALE
+    draw font=SMALLFONT text="BEL406"
+    // Draw reed relays.
+    for i=0,i<80,i++ do
+      Getrelayrect(i,xy)
+      draw color=(i==relay?BLACK:DARKGRAY)
+      if rstate[i]==RS_UNKNOWN then
+        draw bkcolor=LIGHTGRAY
+      else if rstate[i]==RS_OK then
+        draw bkcolor=LIGHTGREEN
+      else if rstate[i]==RS_OPTBAD then
+        draw bkcolor=YELLOW
+      else if rstate[i]==RS_BAD then
+        draw bkcolor=LIGHTRED
+      else
+        draw bkcolor=WHITE
+      endif
+      draw at xy[0],xy[1] fillrect xy[2]+1,xy[3]+1
+      if i==relay draw at xy[0]-1,xy[1]-1 rect xy[2]+2,xy[3]+2
+    enddo
+    // Draw BNC connectors.
+    for i=0,i<48,i++ do
+      Getbncrect(i+1,xy)
+      if relay>=0 && relay<80 &&                                               \
+        ((i<32 && i/2==relay/4) || (i>=32 && i/4==(relay-32)/4)) then
+        draw color=BLACK bkcolor=YELLOW
+      else
+        draw color=DARKGRAY bkcolor=WHITE
+      endif
+      draw at xy[0],xy[1] fillrect xy[2]+1,xy[3]+1
+      draw at (xy[0]+xy[2])/2,(xy[1]+xy[3]+1)/2
+      draw bkcolor=WHITE fillellipse xy[2]-xy[0]-4,xy[3]-xy[1]-4
+    enddo
+    // Draw on-head control connectors.
+    for i=0,i<16,i++ do
+      Getconnrect(i,xy)
+      if i==relay/4 then
+        draw color=BLACK bkcolor=LIGHTGRAY
+      else
+        draw color=DARKGRAY bkcolor=WHITE
+      endif
+      draw at xy[0],xy[1] fillrect xy[2]+1,xy[3]+1
+    enddo
+  endif
+  draw show
+end
+
+
+////////////////////////////////////////////////////////////////////////////////
+////////////////////////////// SERVICE FUNCTIONS ///////////////////////////////
+
+// Given head number, returns connector on the measurement card (0..15), or -1
+// on error. Takes head substitutions into account. External antennas have no
+// associated connector, I report them as pseudoconnectors 32 and 33.
+function int Getconnector(int head)
+  int i,rail,side,nside,ntop,nbot,subst
+  if head==32 return 32                // First external antenna
+  if head==33 return 33                // Second external antenna
+  if head<0 || head>=16 return -1      // Error in input parameters
+  for i=0,i<4,i++ do
+    subst=$uint2($EXTLAY+488+i*2)
+    if (subst & 0x8000)==0 continue
+    if (subst & 0x1F)!=head continue
+    return (subst>>8) & 0x0F           // Substitution found
+  enddo
+  side=0; nside=0
+  for rail=0,rail<$LAY.nfing,rail++ do
+    if $LAY.side[rail]<side return -1  // Rails are not ordered by side
+    if $LAY.side[rail]>side then
+      side=$LAY.side[rail]; nside=0
+    endif
+    if nside>=8 return -1              // Too many heads per side
+    if head/2==rail then
+      if side==0 return nside*2+(head & 1)
+      return 8+nside*2+(head & 1)
+    endif
+    nside++
+  enddo
+  return -1                            // Something unexpected
+end
+
+// Service function, creates relay name.
+function int Relayfromconn(char *out,int conn,int offset)
+  int n,module,base,muxtype
+  muxtype=$int4($EXTLAY+674)
+  if (muxtype & MUX_TYPEMASK)==MUX_TYPE506 then
+    // Modular multiplexer (EL506). Currently only 2 modules are supported.
+    switch conn
+    case 0,1:   module=0; base=conn*4
+    case 2,3:   module=0; base=conn*4+8
+    case 4,5:   module=1; base=conn*4-16
+    case 6,7:   module=1; base=conn*4-8
+    case 8,9:   module=0; base=conn*4-24
+    case 10,11: module=0; base=conn*4-16
+    case 12,13: module=1; base=conn*4-40
+    case 14,15: module=1; base=conn*4-32
+    case 32:                           // First external antenna
+      if (muxtype & MUX_EXTERN0)==0x00000002 then
+        module=0; base=64
+      else if (muxtype & MUX_EXTERN1)==0x00000010 then
+        module=0; base=68
+      else if (muxtype & MUX_EXTERN2)==0x00000080 then
+        module=1; base=64
+      else if (muxtype & MUX_EXTERN3)==0x00000400 then
+        module=1; base=68
+      else
+        return sprintf(out,"K???")
+      endif
+    case 33:                           // Second external antenna
+      if (muxtype & MUX_EXTERN0)==0x00000003 then
+        module=0; base=64
+      else if (muxtype & MUX_EXTERN1)==0x00000018 then
+        module=0; base=68
+      else if (muxtype & MUX_EXTERN2)==0x000000C0 then
+        module=1; base=64
+      else if (muxtype & MUX_EXTERN3)==0x00000600 then
+        module=1; base=68
+      else
+        return sprintf(out,"K???")
+      endif
+    default: return sprintf(out,"K???")
+    endsw
+    return sprintf(out,"Module %i relay K%i",module,base+offset)
+  else
+    // Multiplexer card with 16 outputs (EL406).
+    if conn==32 then
+      return sprintf(out,"K%i",72+offset)
+    else if conn==33 then
+      return sprintf(out,"K%i",76+offset)
+    else
+      return sprintf(out,"K%i",conn*4+offset)
+    endif
+  endif
+end
+
+// Substitutes combinations #H (head), #U (U/I relay), #M (MINUS relay),
+// #P (PLUS relay), #G (GND relay), #V (measured signal), #F (measured phase,
+// radians), #D (measured phase, degrees) by numerical value.
+function int Formatstring(char *inp,char *out)
+  int i,j,n,conn
+  n=Strlen(inp)
+  for i=0,i<n,i++ do
+    if inp[i]=='#' then
+      i++
+      switch inp[i]
+      case 'H':
+        if head==32 then
+          j=j+sprintf(out+j,"Extant0")
+        else if head==33 then
+          j=j+sprintf(out+j,"Extant1")
+        else
+          j=j+sprintf(out+j,"%i%c",head/2,head & 1?'R':'L')
+        endif
+      case 'U':
+        conn=Getconnector(head)
+        if conn<0 then
+          j=j+sprintf(out+j,"K???")
+        else
+          j=j+Relayfromconn(out+j,conn,0)
+        endif
+      case 'M':
+        conn=Getconnector(head)
+        if conn<0 then
+          j=j+sprintf(out+j,"K???")
+        else
+          j=j+Relayfromconn(out+j,conn,1)
+        endif
+      case 'P':
+        conn=Getconnector(head)
+        if conn<0 then
+          j=j+sprintf(out+j,"K???")
+        else
+          j=j+Relayfromconn(out+j,conn,2)
+        endif
+      case 'G':
+        conn=Getconnector(head)
+        if conn<0 then
+          j=j+sprintf(out+j,"K???")
+        else
+          j=j+Relayfromconn(out+j,conn,3)
+        endif
+      case 'V':
+        j=j+sprintf(out+j,"%8.4g",voltage-vzero)
+      case 'F':
+        j=j+sprintf(out+j,"%8.4f",(phase-zerophase)/180.0*3.14159)
+      case 'D':
+        j=j+sprintf(out+j,"%8.2f",phase-zerophase)
+      default:
+        out[j]=inp[i]; j++
+      endsw
+    else
+      out[j]=inp[i]; j++
+    endif
+  enddo
+  out[j]='\0'
+  return j
+end
+
+// Displays formatted system message.
+function int Sysmsg(format s)
+  char out[256]
+  change hlist color=GREEN
+  out[0]=' '
+  Formatstring(s,out+1)
+  add hlist text=out
+  if log!=NULL then
+    fprintf(log,"    %s\n",out+1)
+  endif
+end
+
+// Displays formatted message.
+function int Message(format s)
+  char out[256]
+  change hlist color=BLACK
+  out[0]=' '
+  Formatstring(s,out+1)
+  add hlist text=out
+  if log!=NULL then
+    fprintf(log,"    %s\n",out+1)
+  endif
+end
+
+// Displays formatted error.
+function int Error(format s)
+  char out[256]
+  change hlist color=LIGHTRED
+  out[0]=' '
+  Formatstring(s,out+1)
+  add hlist text=out
+  if log!=NULL then
+    fprintf(log,"*** %s\n",out+1)
+  endif
+end
+
+// Searches for the defined state. If state exists, returns its index.
+// Otherwise, returns -1.
+function int Findstate(char *name)
+  int i
+  for i=0,i<nstate,i++ do
+    if Strcmp(name,state[i].name)==0 return i
+  enddo
+  return -1
+end
+
+// Searches for the defined label. If label exists, returns its index.
+// Otherwise, returns -1.
+function int Findlabel(char *name)
+  int i
+  for i=0,i<nlabel,i++ do
+    if Strcmp(name,label[i].name)==0 return i
+  enddo
+  return -1
+end
+
+
+////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////// COMPILER ///////////////////////////////////
+
+#define IT_EOL         0               // End of line
+#define IT_KEY         1               // Keyword or identifier
+#define IT_LABEL       2               // Label definition
+#define IT_INT         3               // Integer or floating-point number
+#define IT_FLOAT       4               // Floating-point number
+#define IT_OP          5               // Operation
+#define IT_STRING      6               // Text string
+#define IT_ERR         255             // Parsing error
+
+// Parsed line.
+char             line[1024]            // Parsed line
+int              nline                 // Length of the line
+int              offset                // Parse offset
+// Result of scanning.
+int              scantype              // Type of last scan, IT_xxx
+char             scankey[TEXTLEN]      // Scanned keyword, id, label, text
+char             scanerr[256]          // Error message
+int              scanint               // Scanned integer
+float            scanfloat             // Scanned floating-point or integer
+int              scanop                // Scanned delimiter or operation
+
+// Scans item from the line. Returns type of the item as IT_xxx
+function int Scan()
+  int n,sign,exp,expsign,validint,validfloat
+  float factor
+  // Skip leading spaces.
+  while line[offset]==' ' || line[offset]=='\t' do
+    offset++
+  enddo
+  if offset>=nline then
+    // End of line.
+    scantype=IT_EOL; return scantype
+  else if line[offset]=='/' && line[offset+1]=='/' then
+    // Comment.
+    scantype=IT_EOL; return scantype
+  else if Isalpha(line[offset]) || line[offset]=='_' then
+    // Label, keyword or identifier.
+    n=0
+    scankey[n]=Toupper(line[offset])
+    n++; offset++
+    while Isalnum(line[offset]) || line[offset]=='_' do
+      if n>=KEYLEN then
+        Strcpy(scanerr,"Too long identifier")
+        scantype=IT_ERR; return scantype
+      endif
+      scankey[n]=Toupper(line[offset])
+      n++; offset++
+    enddo
+    scankey[n]='\0'
+    while line[offset]==' ' || line[offset]=='\t' do
+      offset++
+    enddo
+    if line[offset]==':' then
+      offset++                         // Label definition
+      scantype=IT_LABEL; return scantype
+    else
+      scantype=IT_KEY; return scantype // Keyword or identifier
+    endif
+  else if Isdigit(line[offset]) ||                                             \
+    (line[offset]=='.' && Isdigit(line[offset+1])) ||                          \
+    ((line[offset]=='-' || line[offset]=='+') &&                               \
+    (Isdigit(line[offset+1]) || line[offset+1]=='.')) then
+    // Integer or floating-point number.
+    scanint=0; scanfloat=0.0; exp=0; validint=0; validfloat=0
+    if line[offset]=='-' then
+      sign=-1; offset++
+    else if line[offset]=='+' then
+      sign=+1; offset++
+    else
+      sign=+1
+    endif
+    while Isdigit(line[offset]) do
+      scanint=scanint*10+line[offset]-'0'; validint=1
+      scanfloat=scanfloat*10.0+line[offset]-'0'; validfloat=1
+      offset++
+    enddo
+    if line[offset]=='.' then
+      validint=0
+      factor=0.1
+      offset++
+      while Isdigit(line[offset]) do
+        scanfloat=scanfloat+(line[offset]-'0')*factor; validfloat=1
+        factor=factor*0.1
+        offset++
+      enddo
+    endif
+    if line[offset]=='E' || line[offset]=='e' then
+      validint=0
+      exp=0;
+      offset++
+      if line[offset]=='-' then
+        expsign=-1; offset++
+      else if line[offset]=='+' then
+        expsign=+1; offset++
+      else
+        expsign=+1
+      endif
+      while Isdigit(line[offset]) do
+        exp=exp*10+line[offset]-'0'
+      enddo
+      if exp>300 then
+        Strcpy(scanerr,"Invalid floating-point exponent")
+        scantype=IT_ERR; return scantype
+      endif
+      exp=exp*expsign
+      scanfloat=scanfloat*Pow10(exp)
+    endif
+    scanint=scanint*sign
+    scanfloat=scanfloat*sign
+    if validint then
+      scantype=IT_INT; return scantype
+    else if validfloat then
+      scantype=IT_FLOAT; return scantype
+    else
+      Strcpy(scanerr,"Syntax error")
+      scantype=IT_ERR; return scantype
+    endif
+  else if line[offset]=='\'' || line[offset]=='\"' then
+    sign=line[offset]
+    offset++; n=0
+    while n<TEXTLEN && offset<nline && line[offset]!=sign do
+      if line[offset]=='\\' && line[offset+1]=='n' then
+        scankey[n]='\n'; n++
+        offset=offset+2
+      else
+        scankey[n]=line[offset]; n++
+        offset++
+      endif
+    enddo
+    if n>=TEXTLEN-1 then
+      Strcpy(scanerr,"String is too long")
+      scantype=IT_ERR; return scantype
+    else if line[offset]!=sign then
+      Strcpy(scanerr,"Unterminated string")
+      scantype=IT_ERR; return scantype
+    endif
+    offset++
+    scankey[n]='\0'
+    scantype=IT_STRING; return scantype
+  else if line[offset]=='=' || line[offset]==',' || line[offset]=='.' then
+    // Operation. I skip all trailing spaces.
+    scanop=line[offset]; offset++
+    while line[offset]==' ' || line[offset]=='\t' do
+      offset++
+    enddo
+    scantype=IT_OP; return scantype
+  else
+    // Unknown element.
+    Strcpy(scanerr,"Syntax error")
+    scantype=IT_ERR; return scantype
+  endif
+end
+
+// Service function, scans flag as a number or predefined symbolic constant.
+// On error, reports error and returns -1.
+function int Scanflag(char *s,int linecount)
+  char copy[64]
+  Strcpy(copy,s)
+  Scan()
+  if scantype==IT_ERR then
+    Error("Line %i: %s",linecount,scanerr); return -1
+  else if scantype==IT_KEY && Strcmp(scankey,"HV1000")==0 then
+    scanint=FLAG_HV1000
+  else if scantype==IT_KEY && Strcmp(scankey,"EXTANT")==0 then
+    scanint=FLAG_EXTANT
+  else if scantype!=IT_INT then
+    Error("Line %i: %s must be followed by integer index",linecount,copy)
+    return -1
+  else if scanint<0 || scanint>=Sizeof(flag) then
+    Error("Line %i: Flag out of limits 0..%i",linecount,Sizeof(flag))
+    return -1
+  endif
+  return scanint
+end
+
+// Parses play data.
+function int Compiledata()
+  int i,n,comma,relay,p,q,length,offs,linecount
+  int mode,ohbits,rlbits,labits,onerror
+  char s[1024],buf[STATLEN]
+  // Initialize program.
+  Sysmsg("")
+  Sysmsg("Compiling test sequence...")
+  Memset(state,0,Sizeof(state)); nstate=0
+  Memset(label,0,Sizeof(label)); nlabel=0
+  Memset(cmd,0,Sizeof(cmd)); ncmd=0
+  cmd[ncmd].op=OP_NOP; ncmd++          // Avoid zero label offsets
+  cmd[ncmd].op=OP_DRAW; cmd[ncmd].parm=0; ncmd++
+  linecount=0
+  length=Sizeof(a5rly)
+  offs=0
+  // Compile data.
+  while offs<length do
+    if ncmd+4>NCMD then                // At most 4 commands written at once
+      Error("Too long code. Please increase NCMD"); goto error
+    endif
+    // Get next line.
+    nline=0
+    while offs<length && a5rly[offs]!='\n' && a5rly[offs]!='\r'do
+      line[nline]=a5rly[offs]
+      nline++; offs++
+    enddo
+    line[nline]='\0'
+    while offs<length && (a5rly[offs]=='\n' || a5rly[offs]=='\r') do
+      offs++
+    enddo
+    linecount++
+    offset=0
+    // Process line.
+    Scan()
+    if scantype==IT_ERR then
+      Error("Line %i: %s",linecount,scanerr); goto error
+    endif
+    // There may be several labels on the line.
+    while scantype==IT_LABEL do
+      // Label, check if defined.
+      i=Findlabel(scankey)
+      if i>=0 then
+        if label[i].offset==0 then
+          label[i].offset=ncmd
+        else
+          Error("Line %i: Repeating label '%s' from line %i",                  \
+            linecount,scankey,label[i].line)
+          goto error
+        endif
+      else if nlabel>=NLABEL then
+        // Too many labels.
+        Error("Too many labels. Please increase NLABEL"); goto error
+      else
+        // New label.
+        Strcpy(label[nlabel].name,scankey)
+        label[nlabel].line=linecount
+        label[nlabel].offset=ncmd
+        nlabel++
+      endif
+      Scan()
+      if scantype==IT_ERR then
+        Error("Line %i: %s",linecount,scanerr); goto error
+      endif
+    enddo
+    if scantype==IT_EOL continue
+    if scantype!=IT_KEY then
+      Error("Line %i: Keyword expected",linecount); goto error
+    endif
+    // Process keyword.
+    if Strcmp(scankey,"NOP")==0 then
+      // No operation.
+      continue
+    else if Strcmp(scankey,"STATE")==0 then
+      // Definition of measurement card state.
+      Scan()
+      if scantype==IT_ERR then
+        Error("Line %i: %s",linecount,scanerr); goto error
+      else if scantype!=IT_KEY then
+        Error("Line %i: STATE name expected",linecount); goto error
+      else if Findstate(scankey)>=0 then
+        Error("Line %i: Duplicated STATE name '%s'",linecount,scankey)
+        goto error
+      else if nstate>=NSTATE then
+        Error("Too many STATEs. Please increase NSTATE"); goto error
+      endif
+      Strcpy(state[nstate].name,scankey)
+      Scan()
+      if scantype==IT_ERR then
+        Error("Line %i: %s",linecount,scanerr); goto error
+      else if scantype!=IT_OP || scanop!='=' then
+        Error("Line %i: Missing assignment '='",linecount); goto error
+      endif
+      // Note that spaces are already removed by Scan().
+      for i=0,i<STATLEN,i++ do
+        if Isxdigit(line[offset])==0 break
+        p=Toupper(line[offset])-'0'; if p>9 p=p+10+'0'-'A'
+        if p<0 || p>15 break
+        offset++
+        if Isxdigit(line[offset])==0 break
+        q=Toupper(line[offset])-'0'; if q>9 q=q+10+'0'-'A'
+        if q<0 || q>15 break
+        offset++
+        buf[i]=p*16+q
+      enddo
+      if i<STATLEN then
+        Error("Line %i: too short STATE data",linecount); goto error
+      endif
+      Memcpy(state[nstate],buf,STATLEN)
+      nstate++
+    else if Strcmp(scankey,"SET")==0 then
+      // Set state of measurement card.
+      Scan()
+      if scantype==IT_ERR then
+        Error("Line %i: %s",linecount,scanerr); goto error
+      else if scantype!=IT_KEY then
+        Error("Line %i: SET name expected",linecount); goto error
+      endif
+      i=Findstate(scankey)
+      if i<0 then
+        Error("Line %i: Undefined SET name '%s'",linecount,scankey)
+        goto error
+      endif
+      cmd[ncmd].op=OP_SETOUT
+      cmd[ncmd].parm=i
+      ncmd++
+      Scan()
+      if scantype==IT_ERR then
+        Error("Line %i: %s",linecount,scanerr); goto error
+      else if scantype!=IT_EOL && scantype!=IT_KEY then
+        Error("Line %i: Set can only be followed by HEAD",linecount)
+        goto error
+      else if scantype==IT_KEY && Strcmp(scankey,"HEAD")!=0 then
+        Error("Line %i: SET may only be followed by HEAD",linecount)
+        goto error
+      endif
+      if scantype==IT_KEY then
+        Scan()
+        if scantype==IT_ERR then
+          Error("Line %i: %s",linecount,scanerr); goto error
+        else if scantype!=IT_OP || scanop!='=' then
+          Error("Line %i: Missing assignment ('=') after HEAD",linecount)
+          goto error
+        endif
+        ohbits=0; rlbits=0; labits=0
+        // Scan HEAD parameters, one by one. Not very strict.
+        while 1 do
+          Scan()
+          if scantype==IT_ERR then
+            Error("Line %i: %s",linecount,scanerr); goto error
+          else if scantype==IT_EOL then
+            break
+          else if scantype==IT_OP && scanop==',' then
+            continue
+          else if scantype!=IT_KEY then
+            Error("Line %i: Not a keyword after HEAD",linecount); goto error
+          else if Strcmp(scankey,"DIR")==0 then
+            ohbits=(ohbits & 0x8) | 0x5
+          else if Strcmp(scankey,"CRT")==0 then
+            ohbits=(ohbits & 0xC) | 0x3
+          else if Strcmp(scankey,"U")==0 then
+            ohbits=(ohbits & 0xC) | 0x2
+          else if Strcmp(scankey,"I")==0 then
+            ohbits=(ohbits & 0x8)
+          else if Strcmp(scankey,"ZERO")==0 then
+            ohbits=ohbits | 0x4
+          else if Strcmp(scankey,"S")==0 then
+            ohbits=ohbits | 0x8
+          else if Strcmp(scankey,"UI")==0 then
+            rlbits=rlbits | 0x1
+          else if Strcmp(scankey,"MINUS")==0 then
+            rlbits=rlbits | 0x2
+          else if Strcmp(scankey,"PLUS")==0 then
+            rlbits=rlbits | 0x4
+          else if Strcmp(scankey,"GND")==0 then
+            rlbits=rlbits | 0x8
+          else if Strcmp(scankey,"IOUT")==0 then
+            labits=labits | 0x1
+          else if Strcmp(scankey,"AGND")==0 then
+            labits=labits | 0x2
+          else
+            Error("Line %i: Unknown HEAD option '%s'",linecount,scankey)
+            goto error
+          endif
+        enddo
+        cmd[ncmd].op=OP_OHBITS
+        cmd[ncmd].parm=ohbits
+        cmd[ncmd].parm2=rlbits
+        cmd[ncmd].parm3=labits
+        ncmd++
+      endif
+      cmd[ncmd].op=OP_OUT
+      ncmd++
+    else if Strcmp(scankey,"SETDAC")==0 then
+      // Change DAC voltage.
+      Scan()
+      if scantype==IT_ERR then
+        Error("Line %i: %s",linecount,scanerr); goto error
+      else if scantype!=IT_INT && scantype!=IT_FLOAT then
+        Error("Line %i: Missing DAC voltage",linecount); goto error
+      else if scanfloat<(-10.0) || scanfloat>10.0 then
+        Error("Line %i: DAC voltage out of range -10..+10 V",linecount)
+        goto error
+      endif
+      cmd[ncmd].op=OP_SETDAC
+      cmd[ncmd].umin=scanfloat
+      cmd[ncmd].umax=scanfloat
+      ncmd++
+      cmd[ncmd].op=OP_OUT
+      ncmd++
+    else if Strcmp(scankey,"SETADC")==0 then
+      // Change ADC settings.
+      Scan()
+      if scantype==IT_ERR then
+        Error("Line %i: %s",linecount,scanerr); goto error
+      else if scantype!=IT_KEY then
+        Error("Line %i: SETADC expects AMPL",linecount); goto error
+      else if Strcmp(scankey,"AMPL")==0 then
+        Scan()
+        if scantype==IT_ERR then
+          Error("Line %i: %s",linecount,scanerr); goto error
+        else if scantype!=IT_OP || scanop!='=' then
+          Error("Line %i: Missing assignment '='",linecount); goto error
+        endif
+        Scan()
+        if scantype==IT_ERR then
+          Error("Line %i: %s",linecount,scanerr); goto error
+        else if scantype!=IT_INT ||                                            \
+          (scanint!=1 && scanint!=2 && scanint!=5 && scanint!=10) then
+          Error("Line %i: Invalid or missing amplification",linecount)
+          goto error
+        endif
+        cmd[ncmd].op=OP_SETAMPL
+        cmd[ncmd].parm=scanint
+        ncmd++
+        cmd[ncmd].op=OP_OUT
+        ncmd++
+      else
+        Error("Line %i: SETADC expects AMPL",linecount); goto error
+      endif
+    else if Strcmp(scankey,"RELAY")==0 then
+      // Turn relays on or off.
+      n=0; comma=0
+      while 1 do
+        Scan()
+        if scantype==IT_ERR then
+          Error("Line %i: %s",linecount,scanerr); goto error
+        else if scantype==IT_OP && scanop==',' && comma==0 && n>0 then
+          comma=1; continue
+        else if scantype==IT_EOL && n>0 && comma==0 then
+          break
+        else if scantype!=IT_KEY || scankey[0]!='K' then
+          Error("Line %i: Invalid or missing relay name (Kxxx)",linecount)
+          goto error
+        endif
+        comma=0
+        n++
+        relay=0
+        for i=1,scankey[i]!='\0',i++ do
+          if Isdigit(scankey[i])==0 then
+            Error("Line %i: Invalid or missing relay name (Kxxx)",linecount)
+            goto error
+          endif
+          relay=relay*10+scankey[i]-'0'
+        enddo
+        if relay>111 then
+          Error("Line %i: Nonexisting relay '%s'",linecount,scankey)
+          goto error
+        endif
+        cmd[ncmd].parm=relay
+        Scan()
+        if scantype==IT_ERR then
+          Error("Line %i: %s",linecount,scanerr); goto error
+        else if scantype!=IT_OP || scanop!='=' then
+          Error("Line %i: Missing assignment '=' after relay",linecount)
+          goto error
+        endif
+        Scan()
+        if scantype==IT_ERR then
+          Error("Line %i: %s",linecount,scanerr); goto error
+        else if scantype!=IT_KEY then
+          Error("Line %i: Relay should be ON or OFF",linecount); goto error
+        else if Strcmp(scankey,"ON")==0 then
+          cmd[ncmd].parm2=1
+        else if Strcmp(scankey,"OFF")==0 then
+          cmd[ncmd].parm2=0
+        else
+          Error("Line %i: Relay should be ON or OFF",linecount); goto error
+        endif
+        cmd[ncmd].op=OP_RELAY
+        ncmd++
+      enddo
+      cmd[ncmd].op=OP_OUT
+      ncmd++
+    else if Strcmp(scankey,"VOLTAGE")==0 || Strcmp(scankey,"NOISE")==0 ||      \
+      Strcmp(scankey,"LIMITS")==0 || Strcmp(scankey,"PHASE")==0                \
+    then
+      // Measure (VOLTAGE, NOISE or PHASE) and analyse (VOLTAGE, NOISE, LIMITS,
+      // PHASE).
+      if Strcmp(scankey,"VOLTAGE")==0 then
+        mode=0
+      else if Strcmp(scankey,"NOISE")==0 then
+        mode=1
+      else if Strcmp(scankey,"LIMITS")==0 then
+        mode=2
+      else
+        mode=3
+      endif
+      if mode==0 then
+        cmd[ncmd].op=OP_VOLT
+        ncmd++
+      else if mode==1 then
+        cmd[ncmd].op=OP_NOISE
+        ncmd++
+      else if mode==3 then
+        cmd[ncmd].op=OP_DELAY
+        cmd[ncmd].parm=30
+        ncmd++
+        cmd[ncmd].op=OP_PHASE
+        ncmd++
+      endif
+      Scan()
+      if scantype==IT_ERR then
+        Error("Line %i: %s",linecount,scanerr); goto error
+      else if scantype!=IT_INT && scantype!=IT_FLOAT then
+        Error("Line %i: No low voltage limit",linecount); goto error
+      endif
+      cmd[ncmd].umin=scanfloat
+      Scan()
+      if scantype==IT_ERR then
+        Error("Line %i: %s",linecount,scanerr); goto error
+      else if scantype!=IT_INT && scantype!=IT_FLOAT then
+        Error("Line %i: No high voltage limit",linecount); goto error
+      endif
+      cmd[ncmd].umax=scanfloat
+      if cmd[ncmd].umin>=cmd[ncmd].umax then
+        Error("Line %i: High limit is same or lower than low limit",linecount)
+        goto error
+      endif
+      Scan()
+      if scantype==IT_ERR then
+        Error("Line %i: %s",linecount,scanerr); goto error
+      else if scantype!=IT_KEY then
+        Error("Line %i: Missing ERROR, SUCCESS or PAUSE",linecount); goto error
+      endif
+      if Strcmp(scankey,"ERROR")==0 then
+        onerror=1
+      else if Strcmp(scankey,"SUCCESS")==0 then
+        onerror=0
+      else if Strcmp(scankey,"WARNING")==0 then
+        onerror=2
+      else if Strcmp(scankey,"PAUSE")==0 then
+        onerror=3
+      else
+        Error("Line %i: Missing ERROR, SUCCESS, WARNING or PAUSE",linecount)
+        goto error
+      endif
+      Scan()
+      if scantype==IT_ERR then
+        Error("Line %i: %s",linecount,scanerr); goto error
+      else if scantype==IT_STRING then
+        if onerror==0 then
+          if mode==3 then cmd[ncmd].op=OP_STOPFSUCC
+          else if mode==1 then cmd[ncmd].op=OP_STOPNSUCC
+          else cmd[ncmd].op=OP_STOPUSUCC; endif
+        else if onerror==1 then
+          if mode==3 then cmd[ncmd].op=OP_STOPFERR
+          else if mode==1 then cmd[ncmd].op=OP_STOPNERR
+          else cmd[ncmd].op=OP_STOPUERR; endif
+        else if onerror==2 then
+          if mode==3 then cmd[ncmd].op=OP_WARNFERR
+          else if mode==1 then cmd[ncmd].op=OP_WARNNERR
+          else cmd[ncmd].op=OP_WARNUERR; endif
+        else
+          if mode==3 then cmd[ncmd].op=OP_PAUSEFERR
+          else if mode==1 then cmd[ncmd].op=OP_PAUSENERR
+          else cmd[ncmd].op=OP_PAUSEUERR; endif
+        endif
+        Strcpy(cmd[ncmd].text,scankey)
+      else if scantype==IT_KEY then
+        if onerror==0 then
+          if mode==3 then cmd[ncmd].op=OP_GOTOFSUCC
+          else if mode==1 then cmd[ncmd].op=OP_GOTONSUCC
+          else cmd[ncmd].op=OP_GOTOUSUCC; endif
+        else if onerror==1 then
+          if mode==3 then cmd[ncmd].op=OP_GOTOFERR
+          else if mode==1 then cmd[ncmd].op=OP_GOTONERR
+          else cmd[ncmd].op=OP_GOTOUERR; endif
+        else
+          Error("Line %i: PAUSE requires text string",linecount); goto error
+        endif
+        i=Findlabel(scankey)
+        if i>=0 then
+          cmd[ncmd].parm=i
+        else if nlabel>=NLABEL then
+          Error("Too many labels. Please increase NLABEL"); goto error
+        else
+          Strcpy(label[nlabel].name,scankey)
+          label[nlabel].line=linecount
+          label[nlabel].offset=0
+          cmd[ncmd].parm=nlabel
+          nlabel++
+        endif
+      else
+        Error("Line %i: Missing label or text string",linecount); goto error
+      endif
+      ncmd++
+    else if Strcmp(scankey,"UOVLD")==0 || Strcmp(scankey,"IOVLD")==0 ||        \
+      Strcmp(scankey,"IOVLDP")==0 || Strcmp(scankey,"IOVLDM")==0 then
+      if Strcmp(scankey,"UOVLD")==0 then
+        mode=0
+      else if Strcmp(scankey,"IOVLDP")==0 then
+        mode=2
+      else if Strcmp(scankey,"IOVLDM")==0 then
+        mode=3
+      else
+        mode=1
+      endif
+      cmd[ncmd].op=OP_VOLT
+      ncmd++
+      Scan()
+      if scantype==IT_ERR then
+        Error("Line %i: %s",linecount,scanerr); goto error
+      else if scantype!=IT_KEY then
+        Error("Line %i: Missing ERROR or SUCCESS",linecount); goto error
+      endif
+      if Strcmp(scankey,"ERROR")==0 then
+        onerror=1
+      else if Strcmp(scankey,"SUCCESS")==0 then
+        onerror=0
+      else
+        Error("Line %i: Missing ERROR or SUCCESS",linecount); goto error
+      endif
+      Scan()
+      if scantype==IT_ERR then
+        Error("Line %i: %s",linecount,scanerr); goto error
+      else if scantype==IT_STRING then
+        if onerror==0 then
+          if mode==1 then cmd[ncmd].op=OP_STOPISUCC
+          else if mode==2 then cmd[ncmd].op=OP_STOPIPSUCC
+          else if mode==3 then cmd[ncmd].op=OP_STOPIMSUCC
+          else cmd[ncmd].op=OP_STOPOSUCC; endif
+        else
+          if mode==1 then cmd[ncmd].op=OP_STOPIERR
+          else if mode==2 then cmd[ncmd].op=OP_STOPIPERR
+          else if mode==3 then cmd[ncmd].op=OP_STOPIMERR
+          else cmd[ncmd].op=OP_STOPOERR; endif
+        endif
+        Strcpy(cmd[ncmd].text,scankey)
+      else if scantype==IT_KEY then
+        if onerror==0 then
+          if mode==1 then cmd[ncmd].op=OP_GOTOISUCC
+          else if mode==2 then cmd[ncmd].op=OP_GOTOIPSUCC
+          else if mode==3 then cmd[ncmd].op=OP_GOTOIMSUCC
+          else cmd[ncmd].op=OP_GOTOOSUCC; endif
+        else
+          if mode==1 then cmd[ncmd].op=OP_GOTOIERR
+          else if mode==2 then cmd[ncmd].op=OP_GOTOIPERR
+          else if mode==3 then cmd[ncmd].op=OP_GOTOIMERR
+          else cmd[ncmd].op=OP_GOTOOERR; endif
+        endif
+        i=Findlabel(scankey)
+        if i>=0 then
+          cmd[ncmd].parm=i
+        else if nlabel>=NLABEL then
+          Error("Too many labels. Please increase NLABEL"); goto error
+        else
+          Strcpy(label[nlabel].name,scankey)
+          label[nlabel].line=linecount
+          label[nlabel].offset=0
+          cmd[ncmd].parm=nlabel
+          nlabel++
+        endif
+      else
+        Error("Line %i: Missing label or text string",linecount); goto error
+      endif
+      ncmd++
+    else if Strcmp(scankey,"FIXDEF")==0 then
+      // Set and remember default zero voltage.
+      cmd[ncmd].op=OP_FIXDEF
+      ncmd++
+    else if Strcmp(scankey,"DEFZERO")==0 then
+      // Restore default zero voltage.
+      cmd[ncmd].op=OP_DEFZERO
+      ncmd++
+    else if Strcmp(scankey,"FIXZERO")==0 then
+      // Set zero voltage.
+      cmd[ncmd].op=OP_FIXZERO
+      ncmd++
+    else if Strcmp(scankey,"NOZERO")==0 then
+      // Discard zero voltage.
+      cmd[ncmd].op=OP_NOZERO
+      ncmd++
+    else if Strcmp(scankey,"FIXPHASE")==0 then
+      // Set zero phase.
+      cmd[ncmd].op=OP_DELAY
+      cmd[ncmd].parm=30
+      ncmd++
+      cmd[ncmd].op=OP_FIXPHASE
+      ncmd++
+    else if Strcmp(scankey,"NOPHASE")==0 then
+      // Discard zero phase.
+      cmd[ncmd].op=OP_NOPHASE
+      ncmd++
+    else if Strcmp(scankey,"FFT")==0 then
+      // Gather DAC data and make fast Fourier transformation.
+      cmd[ncmd].op=OP_GETOSC
+      ncmd++
+      cmd[ncmd].op=OP_FFT
+      ncmd++
+    else if Strcmp(scankey,"FFTSUM")==0 || Strcmp(scankey,"FFTMAX")==0 then
+      // Get FFT components in the specified frequency range as voltage.
+      if Strcmp(scankey,"FFTSUM")==0 then
+        cmd[ncmd].op=OP_FFTSUM
+      else
+        cmd[ncmd].op=OP_FFTMAX
+      endif
+      Scan()
+      if scantype==IT_ERR then
+        Error("Line %i: %s",linecount,scanerr); goto error
+      else if scantype!=IT_INT && scantype!=IT_FLOAT then
+        Error("Line %i: No low frequency limit",linecount); goto error
+      endif
+      cmd[ncmd].umin=scanfloat
+      Scan()
+      if scantype==IT_ERR then
+        Error("Line %i: %s",linecount,scanerr); goto error
+      else if scantype!=IT_INT && scantype!=IT_FLOAT then
+        Error("Line %i: No high frequency limit",linecount); goto error
+      endif
+      cmd[ncmd].umax=scanfloat
+      if cmd[ncmd].umin>=cmd[ncmd].umax then
+        Error("Line %i: High limit is same or lower than low limit",linecount)
+        goto error
+      endif
+      ncmd++
+    else if Strcmp(scankey,"FIRSTHEAD")==0 then
+      // Set head to 0.
+      cmd[ncmd].op=OP_FIRSTHEAD
+      ncmd++
+    else if Strcmp(scankey,"FIRSTANT")==0 then
+      // Set head to first external antenna.
+      cmd[ncmd].op=OP_FIRSTANT
+      ncmd++
+    else if Strcmp(scankey,"GOTO")==0 || Strcmp(scankey,"REPEAT")==0 ||        \
+      Strcmp(scankey,"NEXTHEAD")==0 || Strcmp(scankey,"IFEXTANT")==0 then
+      if Strcmp(scankey,"GOTO")==0 then
+        cmd[ncmd].op=OP_GOTO
+      else if Strcmp(scankey,"REPEAT")==0 then
+        cmd[ncmd].op=OP_REPEAT
+      else if Strcmp(scankey,"NEXTHEAD")==0 then
+        cmd[ncmd].op=OP_NEXTHEAD
+      else
+        cmd[ncmd].op=OP_IFEXTANT
+      endif
+      Scan()
+      if scantype==IT_ERR then
+        Error("Line %i: %s",linecount,scanerr); goto error
+      else if scantype!=IT_KEY then
+        Error("Line %i: Missing label",linecount); goto error
+      endif
+      i=Findlabel(scankey)
+      if i>=0 then
+        cmd[ncmd].parm=i
+      else if nlabel>=NLABEL then
+        Error("Too many labels. Please increase NLABEL"); goto error
+      else
+        Strcpy(label[nlabel].name,scankey)
+        label[nlabel].line=linecount
+        label[nlabel].offset=0
+        cmd[ncmd].parm=nlabel
+        nlabel++
+      endif
+      ncmd++
+    else if Strcmp(scankey,"DELAY")==0 then
+      // Delay execution.
+      Scan()
+      if scantype==IT_ERR then
+        Error("Line %i: %s",linecount,scanerr); goto error
+      else if scantype!=IT_INT then
+        Error("Line %i: DELAY must be followed by integer constant",linecount)
+        goto error
+      else if scanint<0 || scanint>60000 then
+        Error("Line %i: DELAY out of range 0..60000 ms",linecount)
+        goto error
+      endif
+      cmd[ncmd].op=OP_DELAY
+      cmd[ncmd].parm=scanint
+      ncmd++
+    else if Strcmp(scankey,"INFO")==0 || Strcmp(scankey,"MESSAGE")==0 ||       \
+      Strcmp(scankey,"WARNING")==0 then
+      // Display message.
+      if Strcmp(scankey,"INFO")==0 then
+        cmd[ncmd].op=OP_INFO
+      else if Strcmp(scankey,"MESSAGE")==0 then
+        cmd[ncmd].op=OP_MESSAGE
+      else
+        cmd[ncmd].op=OP_WARNING
+      endif
+      Scan()
+      if scantype==IT_ERR then
+        Error("Line %i: %s",linecount,scanerr); goto error
+      else if scantype!=IT_STRING then
+        Error("Line %i: Missing text string",linecount)
+        goto error
+      endif
+      Strcpy(cmd[ncmd].text,scankey)
+      ncmd++
+    else if Strcmp(scankey,"PAUSE")==0 then
+      // Display error and pause.
+      Scan()
+      if scantype==IT_ERR then
+        Error("Line %i: %s",linecount,scanerr); goto error
+      else if scantype!=IT_EOL && scantype!=IT_STRING then
+        Error("Line %i: Only text string may follow PAUSE",linecount)
+        goto error
+      endif
+      cmd[ncmd].op=OP_PAUSE
+      if scantype==IT_EOL then
+        Strcpy(cmd[ncmd].text,"")
+      else
+        Strcpy(cmd[ncmd].text,scankey)
+      endif
+      ncmd++
+    else if Strcmp(scankey,"STOP")==0 then
+      // Stop test.
+      Scan()
+      if scantype==IT_ERR then
+        Error("Line %i: %s",linecount,scanerr); goto error
+      else if scantype!=IT_EOL && scantype!=IT_STRING then
+        Error("Line %i: Only text string may follow STOP",linecount)
+        goto error
+      endif
+      cmd[ncmd].op=OP_STOP
+      if scantype==IT_EOL then
+        Strcpy(cmd[ncmd].text,"")
+      else
+        Strcpy(cmd[ncmd].text,scankey)
+      endif
+      ncmd++
+    else if Strcmp(scankey,"SETFLAG")==0 then
+      // Set flag.
+      cmd[ncmd].op=OP_SETFLAG
+      cmd[ncmd].parm2=Scanflag(scankey,linecount)
+      if cmd[ncmd].parm2<0 goto error
+      ncmd++
+    else if Strcmp(scankey,"CLRFLAG")==0 then
+      // Reset flag.
+      cmd[ncmd].op=OP_CLRFLAG
+      cmd[ncmd].parm2=Scanflag(scankey,linecount)
+      if cmd[ncmd].parm2<0 goto error
+      ncmd++
+    else if Strcmp(scankey,"IF")==0 || Strcmp(scankey,"IFNOT")==0 then
+      // Jump to label if flag or special feature is set or reset.
+      if Strcmp(scankey,"IFNOT")==0 then
+        cmd[ncmd].op=OP_IFNOT
+      else
+        cmd[ncmd].op=OP_IF
+      endif
+      cmd[ncmd].parm2=Scanflag(scankey,linecount)
+      if cmd[ncmd].parm2<0 goto error
+      Scan()
+      if scantype==IT_ERR then
+        Error("Line %i: %s",linecount,scanerr); goto error
+      else if scantype!=IT_KEY || Strcmp(scankey,"GOTO")!=0 then
+        Error("Line %i: Missing GOTO",linecount)
+        goto error
+      endif
+      Scan()
+      if scantype==IT_ERR then
+        Error("Line %i: %s",linecount,scanerr); goto error
+      else if scantype!=IT_KEY then
+        Error("Line %i: Label must follow GOTO",linecount); goto error
+      endif
+      i=Findlabel(scankey)
+      if i>=0 then
+        cmd[ncmd].parm=i
+      else if nlabel>=NLABEL then
+        Error("Too many labels. Please increase NLABEL"); goto error
+      else
+        Strcpy(label[nlabel].name,scankey)
+        label[nlabel].line=linecount
+        label[nlabel].offset=0
+        cmd[ncmd].parm=nlabel
+        nlabel++
+      endif
+      ncmd++
+    else if Strcmp(scankey,"SOFTRESET")==0 then
+      // Make soft reset.
+      cmd[ncmd].op=OP_SOFTRES
+      ncmd++
+    else if Strcmp(scankey,"CARDTYPE")==0 then
+      // Get type of measurement card.
+      cmd[ncmd].op=OP_CARDTYPE
+      ncmd++
+    else if Strcmp(scankey,"DRAWNONE")==0 then
+      // Remove drawing.
+      cmd[ncmd].op=OP_DRAW
+      cmd[ncmd].parm=0
+      ncmd++
+    else if Strcmp(scankey,"DRAWMEAS")==0 then
+      // Display measurement card.
+      cmd[ncmd].op=OP_DRAW
+      cmd[ncmd].parm=1
+      ncmd++
+    else if Strcmp(scankey,"DRAWMUX")==0 then
+      // Display multiplexer card.
+      cmd[ncmd].op=OP_DRAW
+      cmd[ncmd].parm=2
+      ncmd++
+    else if Strcmp(scankey,"DRAWRLY")==0 then
+      // Change state of relay on the display.
+      n=0; comma=0
+      while 1 do
+        Scan()
+        if scantype==IT_ERR then
+          Error("Line %i: %s",linecount,scanerr); goto error
+        else if scantype==IT_OP && scanop==',' && comma==0 && n>0 then
+          comma=1; continue
+        else if scantype==IT_EOL && n>0 && comma==0 then
+          break
+        else if scantype!=IT_KEY then
+          Error("Line %i: Invalid or missing relay name (Kxxx or HEAD)",linecount)
+          goto error
+        else if Strcmp(scankey,"HEAD")==0 then
+          cmd[ncmd].op=OP_DRAWHEAD
+          comma=0
+          n++
+          Scan()
+          if scantype==IT_ERR then
+            Error("Line %i: %s",linecount,scanerr); goto error
+          else if scantype!=IT_OP || scanop!='.' then
+            Error("Line %i: Missing point ('.') after HEAD",linecount)
+            goto error
+          endif
+          Scan()
+          if scantype==IT_ERR then
+            Error("Line %i: %s",linecount,scanerr); goto error
+          else if scantype!=IT_KEY then
+            Error("Line %i: Not a keyword after HEAD",linecount); goto error
+          else if Strcmp(scankey,"UI")==0 then
+            relay=0
+          else if Strcmp(scankey,"MINUS")==0 then
+            relay=1
+          else if Strcmp(scankey,"PLUS")==0 then
+            relay=2
+          else if Strcmp(scankey,"GND")==0 then
+            relay=3
+          else
+            Error("Line %i: Unknown HEAD option '%s'",linecount,scankey)
+            goto error
+          endif
+          cmd[ncmd].parm=relay
+        else if scankey[0]=='K' then
+          cmd[ncmd].op=OP_DRAWRLY
+          comma=0
+          n++
+          relay=0
+          for i=1,scankey[i]!='\0',i++ do
+            if Isdigit(scankey[i])==0 then
+              Error("Line %i: Invalid or missing relay name (Kxxx)",linecount)
+              goto error
+            endif
+            relay=relay*10+scankey[i]-'0'
+          enddo
+          if relay>111 then
+            Error("Line %i: Nonexisting relay '%s'",linecount,scankey)
+            goto error
+          endif
+          cmd[ncmd].parm=relay
+        else
+          Error("Line %i: Invalid or missing relay name (Kxxx)",linecount)
+          goto error
+        endif
+        Scan()
+        if scantype==IT_ERR then
+          Error("Line %i: %s",linecount,scanerr); goto error
+        else if scantype!=IT_OP || scanop!='=' then
+          Error("Line %i: Missing assignment '=' after relay",linecount)
+          goto error
+        endif
+        Scan()
+        if scantype==IT_ERR then
+          Error("Line %i: %s",linecount,scanerr); goto error
+        else if scantype!=IT_KEY then
+          Error("Line %i: Relay should be ON or OFF",linecount); goto error
+        else if Strcmp(scankey,"UNKNOWN")==0 then
+          cmd[ncmd].parm2=RS_UNKNOWN
+        else if Strcmp(scankey,"TEST")==0 then
+          cmd[ncmd].parm2=RS_TEST
+        else if Strcmp(scankey,"OK")==0 then
+          cmd[ncmd].parm2=RS_OK
+        else if Strcmp(scankey,"OPTBAD")==0 then
+          cmd[ncmd].parm2=RS_OPTBAD
+        else if Strcmp(scankey,"BAD")==0 then
+          cmd[ncmd].parm2=RS_BAD
+        else
+          Error("Line %i: Invalid relay state",linecount); goto error
+        endif
+        ncmd++
+      enddo
+      cmd[ncmd].op=OP_DRAW
+      cmd[ncmd].parm=(relay<80?2:1)
+      ncmd++
+    else if Strcmp(scankey,"MOVEHEAD")==0 then
+      Scan()
+      if scantype==IT_ERR then
+        Error("Line %i: %s",linecount,scanerr); goto error
+      else if scantype==IT_KEY && Strcmp(scankey,"HOME")==0 then
+        cmd[ncmd].op=OP_MOVEHOME
+      else
+        cmd[ncmd].op=OP_MOVEHEAD
+        if scantype!=IT_INT && scantype!=IT_FLOAT then
+          Error("Line %i: Invalid X shift",linecount); goto error
+        endif
+        cmd[ncmd].umin=scanfloat
+        Scan()
+        if scantype==IT_OP && scanop==',' then
+          Scan()
+        endif
+        if scantype==IT_ERR then
+          Error("Line %i: %s",linecount,scanerr); goto error
+        else if scantype!=IT_INT && scantype!=IT_FLOAT then
+          Error("Line %i: Invalid Y shift",linecount); goto error
+        endif
+        cmd[ncmd].umax=scanfloat
+      endif
+      ncmd++
+    else if Strcmp(scankey,"MEMZERO")==0 || Strcmp(scankey,"MEMMAX")==0 ||     \
+      Strcmp(scankey,"MEMMIN")==0 || Strcmp(scankey,"MEMGET")==0 then
+      if Strcmp(scankey,"MEMZERO")==0 then
+        cmd[ncmd].op=OP_MEMZERO
+      else if Strcmp(scankey,"MEMMAX")==0 then
+        cmd[ncmd].op=OP_MEMMAX
+      else if Strcmp(scankey,"MEMMIN")==0 then
+        cmd[ncmd].op=OP_MEMMIN
+      else
+        cmd[ncmd].op=OP_MEMGET
+      endif
+      Scan()
+      if scantype==IT_ERR then
+        Error("Line %i: %s",linecount,scanerr); goto error
+      else if scantype!=IT_INT then
+        Error("Line %i: Missing memory slot index",linecount); goto error
+      else if scanint<0 || scanint>=NMEM then
+        Error("Line %i: Invalid memory slot index",linecount); goto error
+      endif
+      cmd[ncmd].parm=scanint
+      ncmd++
+    else
+      Error("Line %i: Unknown keyword '%s'",linecount,scankey); goto error
+    endif
+    // Check whether line is complete.
+    Scan()
+    if scantype!=IT_EOL then
+      Error("Line %i: Extra characters on line",linecount); goto error
+    endif
+  enddo
+  // Check whether all labels are defined.
+  for i=0,i<nlabel,i++ do
+    if label[i].offset==0 then
+      Error("Undefined label '%s'",label[i].name)
+      goto error
+    endif
+  enddo
+  // Report success.
+  return 0
+error:
+  // Report error.
+  return -1
+end
+
+
+////////////////////////////////////////////////////////////////////////////////
+//////////////////////////////////// TESTER ////////////////////////////////////
+
+// If string s begins with valid relay name ("Knnn"), marks relay as bad.
+function int Markrelay(char *s)
+  int i,relay
+  if hgraph==NULL || Toupper(s[0])!='K' return
+  relay=0
+  for i=1,s[i]!='\0',i++ do
+    if Isdigit(s[i])==0 break
+    relay=relay*10+s[i]-'0'
+  enddo
+  if i==1 || relay>111 return
+  rstate[relay]=RS_BAD
+  Drawmuxdata(relay<80?2:1,-1)
+end
+
+// Executes next command of compiled play file. Returns 0 if test is stopped,
+// -1 on error and next ip otherwise.
+function int Step(int ip)
+  int i,conn,k,p,mask,muxtype
+  char buf[1024]
+  float imin[OSCCOUNT],reout[OSCCOUNT],imout[OSCCOUNT],x,y
+  if ip<=0 || ip>=ncmd return 0
+  switch cmd[ip].op
+  case OP_NOP:                         // No operation
+    ip++
+  case OP_SETOUT:                      // Set out
+    Memcpy(out,state[cmd[ip].parm],STATLEN)
+    ip++
+  case OP_OHBITS:                      // Set on-head state
+    // Get connector.
+    conn=Getconnector(head)
+    if (conn<0 || conn>=16) && (conn<32 || conn>33) then
+      Error("Invalid head %i",head); return -1
+    endif
+    if conn<8 then
+      k=conn*4
+      mask=~(0x0000000F<<k)
+      out.k0k31=(out.k0k31 & mask) | (cmd[ip].parm2<<k)
+      out.h0h7=(out.h0h7 & mask) | (cmd[ip].parm<<k)
+    else if conn<16 then
+      k=(conn-8)*4
+      mask=~(0x0000000F<<k)
+      out.k32k63=(out.k32k63 & mask) | (cmd[ip].parm2<<k)
+      out.h8h15=(out.h8h15 & mask) | (cmd[ip].parm<<k)
+    else if conn==32 then
+      // First external antenna.
+      muxtype=$int4($EXTLAY+674)
+      if (muxtype & MUX_TYPEMASK)==MUX_TYPE506 then
+        if (muxtype & MUX_EXTERN0)==0x00000002 then
+          out.k64k79=(out.k64k79 & 0xFFFFFFF0) | (cmd[ip].parm2)
+        else if (muxtype & MUX_EXTERN1)==0x00000010 then
+          out.k64k79=(out.k64k79 & 0xFFFFFF0F) | (cmd[ip].parm2<<4)
+        else if (muxtype & MUX_EXTERN2)==0x00000080 then
+          out.k64k79=(out.k64k79 & 0xFFFFF0FF) | (cmd[ip].parm2<<8)
+        else if (muxtype & MUX_EXTERN3)==0x00000400 then
+          out.k64k79=(out.k64k79 & 0xFFFF0FFF) | (cmd[ip].parm2<<12)
+        else
+          Error("Internal error: modular mux 2 is not supported")
+        endif
+      else
+        out.k64k79=(out.k64k79 & 0xFFFFF0FF) | (cmd[ip].parm2<<8)
+      endif
+    else
+      // Second external antenna.
+      muxtype=$int4($EXTLAY+674)
+      if (muxtype & MUX_TYPEMASK)==MUX_TYPE506 then
+        if (muxtype & MUX_EXTERN0)==0x00000003 then
+          out.k64k79=(out.k64k79 & 0xFFFFFFF0) | (cmd[ip].parm2)
+        else if (muxtype & MUX_EXTERN1)==0x00000018 then
+          out.k64k79=(out.k64k79 & 0xFFFFFF0F) | (cmd[ip].parm2<<4)
+        else if (muxtype & MUX_EXTERN2)==0x000000C0 then
+          out.k64k79=(out.k64k79 & 0xFFFFF0FF) | (cmd[ip].parm2<<8)
+        else if (muxtype & MUX_EXTERN3)==0x00000600 then
+          out.k64k79=(out.k64k79 & 0xFFFF0FFF) | (cmd[ip].parm2<<12)
+        else
+          Error("Internal error: modular mux 2 is not supported")
+        endif
+      else
+        out.k64k79=(out.k64k79 & 0xFFFF0FFF) | (cmd[ip].parm2<<12)
+      endif
+    endif
+    mask=~(0x3<<(2*conn))
+    out.la0la31=(out.la0la31 & mask) | (cmd[ip].parm3<<(2*conn))
+    ip++
+  case OP_SETDAC:                      // Set DAC voltage
+    k=cmd[ip].umin/10.0*32768.0+32768.0
+    if k<0 k=0
+    if k>65535 k=65535
+    out.udac=(out.udac & 0xFFFF0000)|k
+    ip++
+  case OP_SETAMPL:                     // Change ADC amplification
+    k=cmd[ip].parm
+    if k==2 then
+      out.pgamux=(out.pgamux & 0xFFFFFCFF) | 0x00000100
+    else if k==5 then
+      out.pgamux=(out.pgamux & 0xFFFFFCFF) | 0x00000200
+    else if k==10 then
+      out.pgamux=(out.pgamux & 0xFFFFFCFF) | 0x00000300
+    else
+      out.pgamux=(out.pgamux & 0xFFFFFCFF) | 0x00000000
+    endif
+    ip++
+  case OP_RELAY:                       // Set state of single relay
+    k=cmd[ip].parm
+    p=cmd[ip].parm2
+    if k<32 then
+      if p==0 then
+        out.k0k31=out.k0k31 & (~(1<<k))
+      else
+        out.k0k31=out.k0k31 | (1<<k)
+      endif
+    else if k<64 then
+      k=k-32
+      if p==0 then
+        out.k32k63=out.k32k63 & (~(1<<k))
+      else
+        out.k32k63=out.k32k63 | (1<<k)
+      endif
+    else if k<80 then
+      k=k-64
+      if p==0 then
+        out.k64k79=out.k64k79 & (~(1<<k))
+      else
+        out.k64k79=out.k64k79 | (1<<k)
+      endif
+    else if k<112 then
+      k=111-k
+      if p==0 then
+        out.k111k80=out.k111k80 & (~(1<<k))
+      else
+        out.k111k80=out.k111k80 | (1<<k)
+      endif
+    endif
+    ip++
+  case OP_OUT:                         // Send out to measurement card
+    buf[0]=S_DEBUG
+    buf[1]=0x17                        // Set state of A5 measurement card
+    buf[2]=0                           // Measurement card, currently master
+    Memcpy(buf+3,out,STATLEN)
+    SYS.Sendimm(0,3+STATLEN,buf)
+    pending=OP_OUT
+    timeout=Time()
+    ip++
+  case OP_VOLT,OP_NOISE,OP_PHASE,OP_FIXDEF,OP_FIXZERO,OP_FIXPHASE:
+    // Measurements.
+    buf[0]=S_DEBUG
+    buf[1]=0x18                        // Query state of A5 measurement card
+    buf[2]=0                           // Measurement card, currently master
+    SYS.Sendimm(0,3,buf)
+    pending=cmd[ip].op
+    timeout=Time()
+    ip++
+  case OP_STOPUERR:                    // Check voltage and stop on error
+    if log!=NULL fprintf(log,"Voltage %7.3f, limits %7.3f .. %7.3f V\n",       \
+      voltage-vzero,cmd[ip].umin,cmd[ip].umax)
+    if voltage-vzero<cmd[ip].umin || voltage-vzero>cmd[ip].umax then
+      Markrelay(cmd[ip].text)
+      Error("%s",cmd[ip].text)
+      ip=-1
+    else
+      ip++
+    endif
+  case OP_STOPNERR:                    // Check noise and stop on error
+    if log!=NULL fprintf(log,"Noise   %7.1f, limits %7.1f .. %7.1f bit\n",     \
+      noise,cmd[ip].umin,cmd[ip].umax)
+    if noise<cmd[ip].umin || noise>cmd[ip].umax then
+      Markrelay(cmd[ip].text)
+      Error("%s",cmd[ip].text)
+      ip=-1
+    else
+      ip++
+    endif
+  case OP_STOPFERR:                    // Check phase and stop on error
+    if log!=NULL fprintf(log,"Phase   %7.3f, limits %7.3f .. %7.3f deg\n",     \
+      phase-zerophase,cmd[ip].umin,cmd[ip].umax)
+    if phase-zerophase<cmd[ip].umin || phase-zerophase>cmd[ip].umax then
+      Markrelay(cmd[ip].text)
+      Error("%s",cmd[ip].text)
+      ip=-1
+    else
+      ip++
+    endif
+  case OP_GOTOUERR:                    // Check voltage and goto on error
+    if log!=NULL fprintf(log,"Voltage %7.3f, limits %7.3f .. %7.3f V\n",       \
+      voltage-vzero,cmd[ip].umin,cmd[ip].umax)
+    if voltage-vzero<cmd[ip].umin || voltage-vzero>cmd[ip].umax then
+      k=cmd[ip].parm
+      if k<0 || k>=nlabel then
+        Error("Internal error: invalid label index (%i)",k)
+        ip=-1
+      else if label[k].offset<=0 || label[k].offset>=ncmd then
+        Error("Internal error: undefined label %s",label[k].name)
+        ip=-1
+      else
+        ip=label[k].offset
+      endif
+    else
+      ip++
+    endif
+  case OP_GOTONERR:                    // Check noise and goto on error
+    if log!=NULL fprintf(log,"Noise   %7.1f, limits %7.1f .. %7.1f bit\n",     \
+      noise,cmd[ip].umin,cmd[ip].umax)
+    if noise<cmd[ip].umin || noise>cmd[ip].umax then
+      k=cmd[ip].parm
+      if k<0 || k>=nlabel then
+        Error("Internal error: invalid label index (%i)",k)
+        ip=-1
+      else if label[k].offset<=0 || label[k].offset>=ncmd then
+        Error("Internal error: undefined label %s",label[k].name)
+        ip=-1
+      else
+        ip=label[k].offset
+      endif
+    else
+      ip++
+    endif
+  case OP_GOTOFERR:                    // Check phase and goto on error
+    if log!=NULL fprintf(log,"Phase   %7.3f, limits %7.3f .. %7.3f deg\n",     \
+      phase-zerophase,cmd[ip].umin,cmd[ip].umax)
+    if phase-zerophase<cmd[ip].umin || phase-zerophase>cmd[ip].umax then
+      k=cmd[ip].parm
+      if k<0 || k>=nlabel then
+        Error("Internal error: invalid label index (%i)",k)
+        ip=-1
+      else if label[k].offset<=0 || label[k].offset>=ncmd then
+        Error("Internal error: undefined label %s",label[k].name)
+        ip=-1
+      else
+        ip=label[k].offset
+      endif
+    else
+      ip++
+    endif
+  case OP_STOPUSUCC:                   // Check voltage and stop on success
+    if log!=NULL fprintf(log,"Voltage %7.3f, limits %7.3f .. %7.3f V\n",       \
+      voltage-vzero,cmd[ip].umin,cmd[ip].umax)
+    if voltage-vzero>=cmd[ip].umin && voltage-vzero<=cmd[ip].umax then
+      Markrelay(cmd[ip].text)
+      Error("%s",cmd[ip].text)
+      ip=-1
+    else
+      ip++
+    endif
+  case OP_STOPNSUCC:                   // Check noise and stop on success
+    if log!=NULL fprintf(log,"Noise   %7.1f, limits %7.1f .. %7.1f bit\n",     \
+      noise,cmd[ip].umin,cmd[ip].umax)
+    if noise>=cmd[ip].umin && noise<=cmd[ip].umax then
+      Markrelay(cmd[ip].text)
+      Error("%s",cmd[ip].text)
+      ip=-1
+    else
+      ip++
+    endif
+  case OP_STOPFSUCC:                   // Check phase and stop on success
+    if log!=NULL fprintf(log,"Phase   %7.3f, limits %7.3f .. %7.3f deg\n",     \
+      phase-zerophase,cmd[ip].umin,cmd[ip].umax)
+    if phase-zerophase>=cmd[ip].umin && phase-zerophase<=cmd[ip].umax then
+      Markrelay(cmd[ip].text)
+      Error("%s",cmd[ip].text)
+      ip=-1
+    else
+      ip++
+    endif
+  case OP_GOTOUSUCC:                   // Check voltage and goto on success
+    if log!=NULL fprintf(log,"Voltage %7.3f, limits %7.3f .. %7.3f V\n",       \
+      voltage-vzero,cmd[ip].umin,cmd[ip].umax)
+    if voltage-vzero>=cmd[ip].umin && voltage-vzero<=cmd[ip].umax then
+      k=cmd[ip].parm
+      if k<0 || k>=nlabel then
+        Error("Internal error: invalid label index (%i)",k)
+        ip=-1
+      else if label[k].offset<=0 || label[k].offset>=ncmd then
+        Error("Internal error: undefined label %s",label[k].name)
+        ip=-1
+      else
+        ip=label[k].offset
+      endif
+    else
+      ip++
+    endif
+  case OP_GOTONSUCC:                   // Check noise and goto on success
+    if log!=NULL fprintf(log,"Noise   %7.1f, limits %7.1f .. %7.1f bit\n",     \
+      noise,cmd[ip].umin,cmd[ip].umax)
+    if noise>=cmd[ip].umin && noise<=cmd[ip].umax then
+      k=cmd[ip].parm
+      if k<0 || k>=nlabel then
+        Error("Internal error: invalid label index (%i)",k)
+        ip=-1
+      else if label[k].offset<=0 || label[k].offset>=ncmd then
+        Error("Internal error: undefined label %s",label[k].name)
+        ip=-1
+      else
+        ip=label[k].offset
+      endif
+    else
+      ip++
+    endif
+  case OP_GOTOFSUCC:                   // Check phase and goto on success
+    if log!=NULL fprintf(log,"Phase   %7.3f, limits %7.3f .. %7.3f deg\n",     \
+      phase-zerophase,cmd[ip].umin,cmd[ip].umax)
+    if phase-zerophase>=cmd[ip].umin && phase-zerophase<=cmd[ip].umax then
+      k=cmd[ip].parm
+      if k<0 || k>=nlabel then
+        Error("Internal error: invalid label index (%i)",k)
+        ip=-1
+      else if label[k].offset<=0 || label[k].offset>=ncmd then
+        Error("Internal error: undefined label %s",label[k].name)
+        ip=-1
+      else
+        ip=label[k].offset
+      endif
+    else
+      ip++
+    endif
+  case OP_WARNUERR:                    // Check voltage and warn on error
+    if log!=NULL fprintf(log,"Voltage %7.3f, limits %7.3f .. %7.3f V\n",       \
+      voltage-vzero,cmd[ip].umin,cmd[ip].umax)
+    if voltage-vzero<cmd[ip].umin || voltage-vzero>cmd[ip].umax then
+      Markrelay(cmd[ip].text)
+      Error("%s",cmd[ip].text)
+    endif
+    ip++
+  case OP_WARNNERR:                    // Check noise and warn on error
+    if log!=NULL fprintf(log,"Noise   %7.1f, limits %7.1f .. %7.1f bit\n",     \
+      noise,cmd[ip].umin,cmd[ip].umax)
+    if noise<cmd[ip].umin || noise>cmd[ip].umax then
+      Markrelay(cmd[ip].text)
+      Error("%s",cmd[ip].text)
+    endif
+    ip++
+  case OP_WARNFERR:                    // Check phase and warn on error
+    if log!=NULL fprintf(log,"Phase   %7.3f, limits %7.3f .. %7.3f deg\n",     \
+      phase-zerophase,cmd[ip].umin,cmd[ip].umax)
+    if phase-zerophase<cmd[ip].umin || phase-zerophase>cmd[ip].umax then
+      Markrelay(cmd[ip].text)
+      Error("%s",cmd[ip].text)
+    endif
+    ip++
+  case OP_PAUSEUERR:                   // Check voltage and pause on error
+    if log!=NULL fprintf(log,"Voltage %7.3f, limits %7.3f .. %7.3f V\n",       \
+      voltage-vzero,cmd[ip].umin,cmd[ip].umax)
+    if voltage-vzero<cmd[ip].umin || voltage-vzero>cmd[ip].umax then
+      Markrelay(cmd[ip].text)
+      Error("%s",cmd[ip].text)
+      pause=1
+    endif
+    ip++
+  case OP_PAUSENERR:                   // Check noise and pause on error
+    if log!=NULL fprintf(log,"Noise   %7.1f, limits %7.1f .. %7.1f bit\n",     \
+      noise,cmd[ip].umin,cmd[ip].umax)
+    if noise<cmd[ip].umin || noise>cmd[ip].umax then
+      Markrelay(cmd[ip].text)
+      Error("%s",cmd[ip].text)
+      pause=1
+    endif
+    ip++
+  case OP_PAUSEFERR:                   // Check phase and pause on error
+    if log!=NULL fprintf(log,"Phase   %7.3f, limits %7.3f .. %7.3f deg\n",     \
+      phase-zerophase,cmd[ip].umin,cmd[ip].umax)
+    if phase-zerophase<cmd[ip].umin || phase-zerophase>cmd[ip].umax then
+      Markrelay(cmd[ip].text)
+      Error("%s",cmd[ip].text)
+      pause=1
+    endif
+    ip++
+  case OP_STOPOSUCC,OP_STOPOERR,                                               \
+    OP_STOPISUCC,OP_STOPIPSUCC,OP_STOPIMSUCC,                                  \
+    OP_STOPIERR,OP_STOPIPERR,OP_STOPIMERR:
+    if log!=NULL fprintf(log,"Overloads: U=%i, I=%i\n",uovld,iovld)
+    if (cmd[ip].op==OP_STOPOSUCC && uovld!=0) ||                               \
+      (cmd[ip].op==OP_STOPOERR && uovld==0) ||                                 \
+      (cmd[ip].op==OP_STOPISUCC && iovld!=0) ||                                \
+      (cmd[ip].op==OP_STOPIPSUCC && (iovld & 2)!=0) ||                         \
+      (cmd[ip].op==OP_STOPIMSUCC && (iovld & 1)!=0) ||                         \
+      (cmd[ip].op==OP_STOPIERR && iovld==0) ||                                 \
+      (cmd[ip].op==OP_STOPIPERR && (iovld & 2)==0) ||                          \
+      (cmd[ip].op==OP_STOPIMERR && (iovld & 1)==0) then
+      Markrelay(cmd[ip].text)
+      Error("%s",cmd[ip].text)
+      ip=-1
+    else
+      ip++
+    endif
+  case OP_GOTOOSUCC,OP_GOTOOERR,                                               \
+    OP_GOTOISUCC,OP_GOTOIPSUCC,OP_GOTOIMSUCC,                                  \
+    OP_GOTOIERR,OP_GOTOIPERR,OP_GOTOIMERR:
+    if log!=NULL fprintf(log,"Overloads: U=%i, I=%i\n",uovld,iovld)
+    if (cmd[ip].op==OP_GOTOOSUCC && uovld!=0) ||                               \
+      (cmd[ip].op==OP_GOTOOERR && uovld==0) ||                                 \
+      (cmd[ip].op==OP_GOTOISUCC && iovld!=0) ||                                \
+      (cmd[ip].op==OP_GOTOIPSUCC && (iovld & 2)!=0) ||                         \
+      (cmd[ip].op==OP_GOTOIMSUCC && (iovld & 1)!=0) ||                         \
+      (cmd[ip].op==OP_GOTOIERR && iovld==0) ||                                 \
+      (cmd[ip].op==OP_GOTOIPERR && (iovld & 2)==0) ||                          \
+      (cmd[ip].op==OP_GOTOIMERR && (iovld & 1)==0) then
+      k=cmd[ip].parm
+      if k<0 || k>=nlabel then
+        Error("Internal error: invalid label index (%i)",k)
+        ip=-1
+      else if label[k].offset<=0 || label[k].offset>=ncmd then
+        Error("Internal error: undefined label %s",label[k].name)
+        ip=-1
+      else
+        ip=label[k].offset
+      endif
+    else
+      ip++
+    endif
+  case OP_DEFZERO:                     // Restore default zero voltage
+    vzero=vdefzero
+    ip++
+  case OP_NOZERO:                      // Discard zero voltage
+    vzero=0.0
+    ip++
+  case OP_NOPHASE:                     // Discard zero phase
+    zerophase=0.0
+    ip++
+  case OP_GETOSC:                      // Gather oscillogramm
+    oscactive=1
+    buf[0]=S_TEST
+    buf[1]=0x03                        // Setup A5 oscilloscope
+    buf[2]=0x80                        // Master measurement card
+    buf[3]=1                           // Trigger immediately
+    $uint2(buf+4)=1                    // No compression
+    $uint2(buf+6)=OSCCOUNT             // Length of protocol
+    buf[8]=0                           // Channels (ignored)
+    buf[9]=0
+    buf[10]=0
+    buf[11]=0
+    SYS.Sendimm(0,12,buf)
+    nosc=0
+    pending=OP_GETOSC
+    timeout=Time()
+    ip++
+  case OP_FFT:                         // Make FFT of oscillogramm
+    if oscactive==0 then
+      Error("Internal error: FFT without GETOSC")
+      ip=-1
+    else if oscactive<0 then
+      Error("Unable to get oscillogramm from measurement card")
+      ip=-1
+    else if oscactive==2 then
+      Memset(imin,0,Sizeof(imin))
+      SYS.Fft(OSCCOUNT,osc,imin,reout,imout)
+      for i=0,i<OSCCOUNT,i++ do
+        fft[i]=Sqrt(reout[i]*reout[i]+imout[i]*imout[i])/1000.0
+      enddo
+      oscactive=0
+      ip++
+    endif
+  case OP_FFTSUM:                      // Get sum of FFT in frequency range
+    k=Max(0.0,cmd[ip].umin*OSCCOUNT/1.0e6)
+    p=Max(0.0,cmd[ip].umax*OSCCOUNT/1.0e6)
+    voltage=vzero
+    for i=k,i<=p && i<OSCCOUNT/2,i++ do
+      voltage=voltage+fft[i]
+    enddo
+    if log!=NULL fprintf(log,"FFT sum %7.3f between %7.3f and %7.3f kHz\n",    \
+      voltage-vzero,cmd[ip].umin/1000.0,cmd[ip].umax/1000.0)
+    ip++
+  case OP_FFTMAX:                      // Get max of FFT in frequency range
+    k=Max(0.0,cmd[ip].umin*OSCCOUNT/1.0e6)
+    p=Max(0.0,cmd[ip].umax*OSCCOUNT/1.0e6)
+    voltage=0.0
+    for i=k,i<=p && i<OSCCOUNT/2,i++ do
+      voltage=Max(voltage,fft[i])
+    enddo
+    voltage=voltage+vzero
+    if log!=NULL fprintf(log,"FFT max %7.3f between %7.3f and %7.3f kHz\n",    \
+      voltage-vzero,cmd[ip].umin/1000.0,cmd[ip].umax/1000.0)
+    ip++
+  case OP_FIRSTHEAD:                   // Set head to 0
+    head=0
+    ip++
+  case OP_GOTO:                        // Go to label
+    k=cmd[ip].parm
+    if k<0 || k>=nlabel then
+      Error("Internal error: invalid label index (%i)",k)
+      ip=-1
+    else if label[k].offset<=0 || label[k].offset>=ncmd then
+      Error("Internal error: undefined label %s",label[k].name)
+      ip=-1
+    else
+      ip=label[k].offset
+    endif
+  case OP_REPEAT:                      // Repeat test if Repeat is checked
+    if Status(hrepeat)==0 then
+      ip++
+    else
+      k=cmd[ip].parm
+      if k<0 || k>=nlabel then
+        Error("Internal error: invalid label index (%i)",k)
+        ip=-1
+      else if label[k].offset<=0 || label[k].offset>=ncmd then
+        Error("Internal error: undefined label %s",label[k].name)
+        ip=-1
+      else
+        ip=label[k].offset
+      endif
+    endif
+  case OP_NEXTHEAD:                    // Increment head & jump if not over
+    if head<2*$LAY.nfing-1 then
+      head++
+    else if head<32 && ($EXTLAY.extant & 1)!=0 then
+      head=32
+    else if head<33 && ($EXTLAY.extant & 2)!=0 then
+      head=33
+    else
+      head=99
+    endif
+    if head>=99 then
+      ip++
+    else
+      k=cmd[ip].parm
+      if k<0 || k>=nlabel then
+        Error("Internal error: invalid label index (%i)",k)
+        ip=-1
+      else if label[k].offset<=0 || label[k].offset>=ncmd then
+        Error("Internal error: undefined label %s",label[k].name)
+        ip=-1
+      else
+        ip=label[k].offset
+      endif
+    endif
+  case OP_FIRSTANT:                    // Set head to first external antenna
+    head=32
+    ip++
+  case OP_IFEXTANT:                    // Jump if head is external antenna
+    if head!=32 && head!=33 then
+      ip++
+    else
+      k=cmd[ip].parm
+      if k<0 || k>=nlabel then
+        Error("Internal error: invalid label index (%i)",k)
+        ip=-1
+      else if label[k].offset<=0 || label[k].offset>=ncmd then
+        Error("Internal error: undefined label %s",label[k].name)
+        ip=-1
+      else
+        ip=label[k].offset
+      endif
+    endif
+  case OP_DELAY:                       // Delay in milliseconds
+    Delay(cmd[ip].parm)
+    ip++
+  case OP_INFO:                        // Show info
+    Message("%s",cmd[ip].text)
+    ip++
+  case OP_MESSAGE:                     // Show message
+    Message("%s",cmd[ip].text)
+    ip++
+  case OP_WARNING:                     // Show warning
+    Error("%s",cmd[ip].text)
+    ip++
+  case OP_PAUSE:                       // Show error and pause
+    if cmd[ip].text[0]!='\0' then
+      Error("%s",cmd[ip].text)
+      Error("Test paused, please press Continue or Stop")
+    endif
+    pause=1
+    ip++
+  case OP_STOP:                        // Stop execution
+    if cmd[ip].text[0]!='\0' Error("%s",cmd[ip].text)
+    ip=-1
+  case OP_SETFLAG:                     // Set flag
+    flag[cmd[ip].parm2]=1
+    ip++
+  case OP_CLRFLAG:                     // Reset flag
+    flag[cmd[ip].parm2]=0
+    ip++
+  case OP_IF:                          // Jump to label if flag set
+    if flag[cmd[ip].parm2]==0 then
+      ip++
+    else
+      k=cmd[ip].parm
+      if k<0 || k>=nlabel then
+        Error("Internal error: invalid label index (%i)",k)
+        ip=-1
+      else if label[k].offset<=0 || label[k].offset>=ncmd then
+        Error("Internal error: undefined label %s",label[k].name)
+        ip=-1
+      else
+        ip=label[k].offset
+      endif
+    endif
+  case OP_IFNOT:                       // Jump to label if flag not set
+    if flag[cmd[ip].parm2]!=0 then
+      ip++
+    else
+      k=cmd[ip].parm
+      if k<0 || k>=nlabel then
+        Error("Internal error: invalid label index (%i)",k)
+        ip=-1
+      else if label[k].offset<=0 || label[k].offset>=ncmd then
+        Error("Internal error: undefined label %s",label[k].name)
+        ip=-1
+      else
+        ip=label[k].offset
+      endif
+    endif
+  case OP_SOFTRES:                     // Make soft reset
+    SYS.Softimm(0)
+    pending=OP_SOFTRES
+    timeout=Time()
+    ip++
+  case OP_CARDTYPE:                    // Check type of measurement card
+    buf[0]=S_DEBUG
+    buf[1]=0x2E                        // Get version
+    buf[2]=0x80                        // Measurement card
+    SYS.Sendimm(0,3,buf)
+    pending=OP_CARDTYPE
+    timeout=Time()
+    ip++
+  case OP_DRAW:                        // Drawings
+    k=cmd[ip].parm
+    if k==1 || k==2 then
+      // Measurement card and multiplexer.
+      Drawmuxdata(k==1?1:0,rtesting)
+    endif
+    ip++
+  case OP_DRAWRLY:                     // Change meas relay state on drawing
+    k=cmd[ip].parm
+    p=cmd[ip].parm2
+    if k>=0 && k<Sizeof(rstate) rstate[k]=p
+    ip++
+  case OP_DRAWHEAD:                    // Change mux relay state on drawing
+    conn=Getconnector(head)
+    if (conn<0 || conn>=16) && (conn<32 || conn>33) then
+      Error("Invalid head %i",head); return -1
+    endif
+    if conn<8 then
+      k=conn*4+cmd[ip].parm
+    else if conn<16 then
+      k=32+(conn-8)*4+cmd[ip].parm
+    else if conn==32 then
+      // First external antenna.
+      muxtype=$int4($EXTLAY+674)
+      if (muxtype & MUX_TYPEMASK)==MUX_TYPE506 then
+        if (muxtype & MUX_EXTERN0)==0x00000002 then
+          k=64+cmd[ip].parm
+        else if (muxtype & MUX_EXTERN1)==0x00000010 then
+          k=68+cmd[ip].parm
+        else if (muxtype & MUX_EXTERN2)==0x00000080 then
+          k=72+cmd[ip].parm
+        else if (muxtype & MUX_EXTERN3)==0x00000400 then
+          k=76+cmd[ip].parm
+        else
+          Error("Internal error: modular mux 2 is not supported")
+        endif
+      else
+        k=72+cmd[ip].parm
+      endif
+    else
+      // Second external antenna.
+      muxtype=$int4($EXTLAY+674)
+      if (muxtype & MUX_TYPEMASK)==MUX_TYPE506 then
+        if (muxtype & MUX_EXTERN0)==0x00000003 then
+          k=64+cmd[ip].parm
+        else if (muxtype & MUX_EXTERN1)==0x00000018 then
+          k=68+cmd[ip].parm
+        else if (muxtype & MUX_EXTERN2)==0x000000C0 then
+          k=72+cmd[ip].parm
+        else if (muxtype & MUX_EXTERN3)==0x00000600 then
+          k=76+cmd[ip].parm
+        else
+          Error("Internal error: modular mux 2 is not supported")
+        endif
+      else
+        k=76+cmd[ip].parm
+      endif
+    endif
+    p=cmd[ip].parm2
+    if k>=0 && k<Sizeof(rstate) rstate[k]=p
+    ip++
+  case OP_MOVEHEAD:                    // Move selected head
+    if head>=$LAY.nfing*2 then
+      Error("Invalid head %i",head); return -1
+    endif
+    if (head & 1)==0 then
+      x=$LAY.leftlimit/1000.0+cmd[ip].umin
+    else
+      x=$LAY.rightlimit/1000.0-cmd[ip].umin
+    endif
+    y=$LAY.yoffset[head/2]/1000.0+cmd[ip].umax
+    sprintf(buf,"M %i(%g,%gA10) NOP",head,x,y)
+    SERV.Cmdimm(0,buf)
+    pending=OP_MOVEHEAD
+    timeout=Time()
+    ip++
+  case OP_MOVEHOME:                    // Move selected head in home pos
+    if head>=$LAY.nfing*2 then
+      Error("Invalid head %i",head); return -1
+    endif
+    sprintf(buf,"M %i(Z) NOP",head)
+    SERV.Cmdimm(0,buf)
+    pending=OP_MOVEHOME
+    timeout=Time()
+    ip++
+  case OP_MEMZERO:                     // Zero value of memory slot
+    mem[cmd[ip].parm]=0
+    ip++
+  case OP_MEMMAX:                      // Set memory to max(memory,voltage)
+    mem[cmd[ip].parm]=Max(mem[cmd[ip].parm],voltage-vzero)
+    ip++
+  case OP_MEMMIN:                      // Set memory to min(memory,voltage)
+    mem[cmd[ip].parm]=Min(mem[cmd[ip].parm],voltage-vzero)
+    ip++
+  case OP_MEMGET:                      // Get memory to voltage
+    voltage=mem[cmd[ip].parm]+vzero
+    ip++
+  default:
+    Error("Internal error: unknown command OP_xxx with code %i",cmd[ip].op)
+    ip=-1
+  endsw
+  return ip
+end
+
+// Waits for answer from the tester. Returns 0 on success and -1 if test must
+// be stopped.
+function int Waitanswer()
+  int ret=0
+  if $A[0].length==0 return            // Answer is not yet here
+  switch pending
+  case OP_OUT:                         // Send out to measurement card
+    if $A[0].answer!=S_DEBUG then
+      Error("Invalid answer from measurement card")
+      ret=-1
+    endif
+  case OP_VOLT,OP_NOISE,OP_PHASE,OP_FIXDEF,OP_FIXZERO,OP_FIXPHASE:
+    if $A[0].answer!=S_DEBUG then
+      Error("Invalid answer from measurement card")
+      ret=-1
+    endif
+    if pending==OP_VOLT then
+      voltage=($float4($A[0]+5)-32768.0)/32768.0*10.0
+      uovld=((~$int4($A[0]+5+16))>>18) & 0x3
+      iovld=((~$int4($A[0]+5+16))>>16) & 0x3
+    else if pending==OP_NOISE then
+      noise=$float4($A[0]+5+18*4)
+    else if pending==OP_FIXDEF then
+      vzero=($float4($A[0]+5)-32768.0)/32768.0*10.0
+      vdefzero=vzero
+    else if pending==OP_FIXZERO then
+      vzero=($float4($A[0]+5)-32768.0)/32768.0*10.0
+    else if pending==OP_PHASE then
+      voltage=Sqrt($float4($A[0]+5+18*4)*$float4($A[0]+5+18*4)+                \
+        $float4($A[0]+5+19*4)*$float4($A[0]+5+19*4))/512.0/32768.0*10.0
+      phase=Atan2($float4($A[0]+5+18*4),$float4($A[0]+5+19*4))*180.0/3.14159
+    else
+      zerophase=Atan2($float4($A[0]+5+18*4),$float4($A[0]+5+19*4))*180.0/3.14159
+    endif
+  case OP_CARDTYPE:                    // Check type of measurement card
+    if $A[0].answer!=S_DEBUG || $A[0].length<45 then
+      isnewmeas=0                      // Assume old measurement card
+    else if ($uint2($A[0]+5) & 0x8000)==0 then
+      isnewmeas=0                      // Old measurement card
+    else
+      isnewmeas=1                      // New measurement card
+    endif
+  endsw
+  pending=0
+  return ret
+end
+
+
+////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////// MAIN PROGRAM /////////////////////////////////
+
+// Main routine.
+function int main()
+  int ready,setbuttons,start,running
+  hmain=control WINDOW
+    window=NULL
+    position=10,10,MAINDX,MAINDY
+    name=format("%s v%s",DESCRIPTION,VERSION)
+    help=" "
+    bkcolor=PINK
+  endc
+  hgraph=control GRAPH
+    window=hmain
+    position=BDR+1,BDR+1,MAINDX-RIGHTDX-3*BDR-2,274
+    help="继电器"
+    color=BLACK
+    bkcolor=WHITE
+  endc
+  hlist=control LIST
+    window=hmain
+    position=BDR,2*BDR+274,MAINDX-RIGHTDX-3*BDR,MAINDY-274-3*BDR
+    help="信息"
+    mode=M_BORDER|M_VSCROLL
+    font=FIXEDSYS
+    size=65536
+  endc
+  hrun=control BUTTON
+    window=hmain
+    position=MAINDX-RIGHTDX-BDR,BDR,RIGHTDX,24
+    text="重复"
+    help="按下重复继电器测试"
+  endc
+  hcont=control BUTTON
+    window=hmain
+    position=MAINDX-RIGHTDX-BDR,24+2*BDR,RIGHTDX,24
+    text="继续"
+    help="按下继续继电器测试"
+  endc
+  hrepeat=control CHECKBOX
+    window=hmain
+    position=MAINDX-RIGHTDX-BDR,2*24+3*BDR+5,RIGHTDX,24
+    text="自动重复"
+    help="检查是否要无限重复此测试"
+    font=INFOFONT
+  endc
+  log=NULL
+  ready=0
+  running=0
+  start=0
+  // Compile test data and run test.
+  if Compiledata()!=0 then
+    Error("Internal error detected. Please report it to atg!")
+  else
+    ready=1
+    log=Fopen("a5relays.txt","wt")
+    start=1
+  endif
+  hexit=control BUTTON
+    window=hmain
+    position=MAINDX-RIGHTDX-BDR,MAINDY-24-BDR,RIGHTDX,24
+    text="关闭"
+    help="按下可以关闭此窗口"
+  endc
+  setbuttons=1
+  while 1 do
+    if start then
+      SYS.Killimm(0)
+      pending=0
+      running=1
+      setbuttons=1
+      vzero=0.0
+      vdefzero=0.0
+      uovld=0
+      iovld=0
+      pause=0
+      oscactive=0
+      nosc=0
+      isnewmeas=0
+      Memset(flag,0,Sizeof(flag))
+      if ($int4($EXTLAY+496) & HCM_HVTYPE)==HCM_HV1000 then
+        flag[FLAG_HV1000]=1
+      endif
+      if $EXTLAY.extant & 1 then
+        flag[FLAG_EXTANT]=1
+      endif
+      Memset(rstate,0,Sizeof(rstate))
+      rtesting=-1
+      Memset(mem,0,Sizeof(mem))
+      start=0
+      setbuttons=1
+    endif
+    if setbuttons then
+      if pause then
+        enable hrun
+        change hcont color=LIGHTRED
+        change hcont bkcolor=YELLOW
+        enable hcont
+      else if running>0 then
+        disable hrun
+        change hcont color=BLACK
+        change hcont bkcolor=GRAY
+        disable hcont
+      else if running<0 then
+        enable hrun
+        change hcont color=BLACK
+        change hcont bkcolor=GRAY
+        disable hcont
+      else
+        if ready enable hrun
+        change hcont color=LIGHTRED
+        change hcont bkcolor=YELLOW
+        enable hcont
+      endif
+      setbuttons=0
+    endif
+    if Pressed(hrun) then
+      if ready start=1
+    else if Pressed(hcont) then
+      pause=0
+      setbuttons=1
+    else if Pressed(hexit) then
+      break
+    endif
+    // Execute next step of the task.
+    if running>0 && pending!=0 then
+      if Waitanswer()<0 then
+        running=-1
+        setbuttons=1
+      endif
+    else if running>0 && pause==0 then
+      running=Step(running)
+      if running<=0 setbuttons=1
+      if running==0 Message("Test finished")
+      if pause setbuttons=1
+    else
+      wait
+    endif
+  enddo
+  if log!=NULL Fclose(log)
+end
+

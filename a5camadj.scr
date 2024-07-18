@@ -1,0 +1,609 @@
+#include "ls.icl"
+#include "or.icl"
+#cmdbuff 4
+
+#define VERSION        "1.03"
+#define DESCRIPTION    "Camera adjustment"
+
+// 1.01: Variable step, unused camera in right position.
+// 1.02: A5L support.
+// 1.03: Allowance for A5XXL (240 mm rail height).
+
+#define DX1            512             // Width of video viewer
+#define DY1            420             // Height of video viewer
+#define DX2            100             // Width of right pane
+#define DY2            126             // Height of message window
+
+// Constants determining tester type.
+#define TT_WRONG       (-1)
+#define TT_UNDEF       0
+#define TT_A1          1
+#define TT_A2          2
+#define TT_A2L         3
+#define TT_A2H         4
+#define TT_A3          5
+#define TT_A3L         6
+#define TT_A4          7
+#define TT_A5          8
+#define TT_A5L         9
+#define TT_A6          10
+#define TT_M2          11
+
+int              testertype            // Type of tester, one of TT_xxx
+float            basex,basey           // Expected position of adjustment tool
+int              selection             // Currently selected test
+float            shiftx[5],shifty[5]   // Shift from expected position
+float            step                  // Step per click, millimeters
+int              startmoving           // Request to start movements (0x1, 0x2)
+int              moving                // Pending X-Y movements (0x1, 0x2)
+int              baserail              // Rail (0 or 1) where tool is placed
+int              channel               // Currently selected camera
+int              automirror            // Automirror on bottom side
+float            zoom                  // Curently selected zoom
+int              laston                // Time when cameras were switched on
+
+handle           hmain                 // Main window
+handle           hview                 // Video viewer
+handle           hinfo                 // Explanations
+handle           hsel                  // Selected camera
+handle           hxpos,hypos           // Coordinates of active camera
+handle           hbrightness           // Brightness adjustment
+handle           hcontrast             // Contrast adjustment
+handle           hmirror               // Mirror bottom image
+handle           hzoom                 // Zoom image
+handle           hup,hl,hr,hdn         // Adjusting cross
+handle           hstep[3]              // Step selection
+handle           hexit                 // Close button
+
+
+// Sets type of tester to testertype (one of TT_xxx). Returns testertype.
+function int Recognizetester()
+  int w,h
+  w=($LAY.rightlimit-$LAY.leftlimit)/1000
+  h=Min($LAY.top[0]-$LAY.yoffset[0],$LAY.yoffset[0]-$LAY.bottom[0])/500
+  if $LAY.nfing<=0 || $LAY.nfing>=16 then
+    testertype=TT_WRONG                // Wrong layout
+  else if w<=0 || h<=0 then
+    testertype=TT_WRONG                // Wrong layout
+  else if $LAY.cameras==0 then
+    testertype=TT_WRONG                // At least one camera must be present
+  else if ($LAY.config & 0x80)!=0 then
+    testertype=TT_WRONG;               // M2 is not supported
+  else if h==155 && ($LAY.config & 3)==2 then
+    if w==600 && $LAY.software==0x84 then
+      testertype=TT_A2;                // A1 or A2 with linear motors
+    else if w==600 && $LAY.software==0x86 then
+      testertype=TT_A2;                // A1 or A2 with belts
+    else if w==600 && $LAY.software==0x8A then
+      testertype=TT_A2H;               // A2 (MCM modification)
+    else if w==600 && $LAY.software==0x8E then
+      testertype=TT_A4;                // A4
+    else if w==600 && ($LAY.software==0xA5 || $LAY.software==0xA6) then
+      testertype=TT_A6;                // A6 tester
+    else if w==800 && $LAY.software==0x84 then
+      testertype=TT_A2L;               // A1L or A2L with linear motors
+    else if w==800 && $LAY.software==0x86 then
+      testertype=TT_A2L;               // A1L or A2L with belts
+    else
+      testertype=TT_WRONG;             // Unknown tester
+    endif
+  else if h==200 then
+    if w==520 && $LAY.software==0xA5 then
+      testertype=TT_A5;                // A5
+    else if w==450 then
+      testertype=TT_A3;                // A3
+    else if w==520 then
+      testertype=TT_A3L;               // A3L
+    else
+      testertype=TT_WRONG;             // Unknown tester
+    endif
+  else if h==225 || h==230 || h==240 then
+    if w==610 && $LAY.software==0xA5 then
+      testertype=TT_A5L;               // A5L
+    else
+      testertype=TT_WRONG;             // Unknown tester
+    endif
+  else
+    testertype=TT_WRONG;               // Tester not recognized
+  endif
+  return testertype
+end
+
+// Moves specified cameras into the specified position. Returns 0 on success
+// and -1 if operator pressed "Close".
+function int Movecameras(int cameras,float x,float y)
+  char s[256]
+  SYS.Killimm(0)
+  SYS.Killimm(1)
+  if cameras & 0x1 then                // Move top camera
+    $A[0].length=0
+    sprintf(s,"M %i(%f,%f) NOP",$LAY.nfing*2+0,x,y)
+    SERV.Cmdimm(0,s)
+  endif
+  if cameras & 0x2 then                // Move bottom camera
+    $A[1].length=0
+    sprintf(s,"M %i(%f,%f) NOP",$LAY.nfing*2+1,x,y)
+    SERV.Cmdimm(1,s)
+  endif
+  while 1 do
+    wait
+    if Pressed(hexit) return -1
+    if (cameras & 0x1)!=0 && $A[0].length==0 continue
+    if (cameras & 0x2)!=0 && $A[1].length==0 continue
+    break
+  enddo
+end
+
+// Checks controls and executes movements and so on. Additionally, switches
+// camera lights on selected side.
+function int Doall(int force)
+  int newxy,newzm,mirror
+  char s[256]
+  if Pressed(hup) then
+    shifty[selection]=shifty[selection]+(Status(hup)+1)*step
+    if basey+shifty[selection]>$LAY.top[$LAY.nfing]/1000.0 then
+      shifty[selection]=$LAY.top[$LAY.nfing]/1000.0-basey
+    endif
+    newxy=1
+  else if Pressed(hl) then
+    shiftx[selection]=shiftx[selection]-(Status(hl)+1)*step
+    if shiftx[selection]<(-100.0) shiftx[selection]=-100.0
+    newxy=1
+  else if Pressed(hr) then
+    shiftx[selection]=shiftx[selection]+(Status(hr)+1)*step
+    if shiftx[selection]>100.0 shiftx[selection]=100.0
+    newxy=1
+  else if Pressed(hdn) then
+    shifty[selection]=shifty[selection]-(Status(hdn)+1)*step
+    if basey+shifty[selection]<$LAY.bottom[$LAY.nfing]/1000.0 then
+      shifty[selection]=$LAY.bottom[$LAY.nfing]/1000.0-basey
+    endif
+    newxy=1
+  else if Pressed(hstep[0]) then
+    step=0.001
+  else if Pressed(hstep[1]) then
+    step=0.010
+  else if Pressed(hstep[2]) then
+    step=0.100
+  endif
+  // Update coordinates on the screen and request movements.
+  if force || newxy then
+    change hsel text=(channel==0?"Top":"Bottom")
+    change hxpos text=format(" %.3f",basex+shiftx[selection])
+    change hypos text=format(" %.3f",basey+shifty[selection])
+    startmoving=startmoving|(1<<channel)
+  endif
+  // Check whether last movements are finished and whether we need to start new.
+  if (moving & 0x1)!=0 then
+    if $A[0].length!=0 moving=moving & 0xFFFFFFFE
+  else if channel==0 && (startmoving & 0x1)!=0 then
+    SYS.Killimm(0)
+    sprintf(s,"M %i(%f,%fA255) %i(%f,%fA255) NOP",                             \
+      $LAY.nfing*2+0,basex+shiftx[selection],basey+shifty[selection],          \
+      $LAY.nfing*2+1,$LAY.rightlimit/1000.0,basey)
+    SERV.Cmdimm(0,s)
+    startmoving=startmoving & 0xFFFFFFFE
+  endif
+  if (moving & 0x2)!=0 then
+    if $A[1].length!=0 moving=moving & 0xFFFFFFFD
+  else if channel==1 && (startmoving & 0x2)!=0 then
+    SYS.Killimm(1)
+    sprintf(s,"M %i(%f,%fA255) %i(%f,%fA255) NOP",                             \
+      $LAY.nfing*2+1,basex+shiftx[selection],basey+shifty[selection],          \
+      $LAY.nfing*2+0,$LAY.rightlimit/1000.0,basey)
+    SERV.Cmdimm(1,s)
+    startmoving=startmoving & 0xFFFFFFFD
+  endif
+  // Check video controls, update live video and keep lamps glowing.
+  if Pressed(hzoom) then
+    zoom=(Status(hzoom)==0?1.0:2.0)
+    newzm=1
+  else if Pressed(hmirror) then
+    automirror=Status(hmirror)
+    newzm=1
+  endif
+  if force || newzm || Pressed(hbrightness) || Pressed(hcontrast) then
+    if automirror && channel==1 then mirror=1;
+    else mirror=0; endif
+    SYS.Video(hview,channel,mirror,zoom,Status(hbrightness),Status(hcontrast))
+  endif
+  if force || Time()-laston>=500 then
+    if channel==0 then
+      SERV.Cmdimm(2,"OUTPORT 0x2004,1")
+      SERV.Cmdimm(3,"OUTPORT 0x2005,0")
+    else
+      SERV.Cmdimm(2,"OUTPORT 0x2004,0")
+      SERV.Cmdimm(3,"OUTPORT 0x2005,1")
+    endif
+    laston=Time()
+  endif
+end
+
+// Draws grid (type=0: cross, 1: cross and circles, 2: cross and squares).
+function int Drawgrid(int type,float zoom)
+  int i
+  change hview bkcolor=VIDEOFILL
+  clear hview
+  draw window=hview color=LIGHTRED
+  draw at DX1/2,0 to DX1/2,DY1/2-8
+  draw at DX1/2,DY1/2+9 to DX1/2,DY1
+  draw at 0,DY1/2 to DX1/2-8,DY1/2
+  draw at DX1/2+9,DY1/2 to DX1,DY1/2
+  draw pixel DX1/2,DY1/2
+  if type==1 then                      // Draw circles
+    for i=80,i<=400,i=i+80 do
+      draw at DX1/2,DY1/2
+      draw ellipse i,i
+    enddo
+  else if type==2 then                 // Draw squares
+    for i=40,i<=200,i=i+40 do
+      draw at DX1/2-i,DY1/2-i
+      draw rect DX1/2+i+1,DY1/2+i+1
+    enddo
+  endif
+  draw show
+end
+
+function int main()
+  int i,j
+  handle htemp,h[4]
+  // If user opens modal graphical window, any message box displayed by grabber
+  // DLL is not accessible for mouse. To avoid this, I create invisible graph
+  // taht is non-modal and immediately destroy it.
+  hmain=control WINDOW
+    window=NULL
+    position=-1000,-1000,10,10
+  endc
+  hview=control GRAPH
+    window=hmain
+    position=0,0,10,10
+  endc
+  wait
+  destroy hview
+  destroy hmain
+  // Now create correct main window and its panes.
+  hmain=control WINDOW
+    window=NULL
+    position=10,10,DX1+DX2+14,DY1+DY2+14
+    name=format("相机校正 v%s",VERSION)
+    help=" "
+    color=BLACK
+    bkcolor=LIGHTYELLOW
+    font=MEDIUMFONT
+    mode=M_MODAL
+    size=512
+  endc
+  hview=control GRAPH
+    window=hmain
+    position=5,5,DX1,DY1
+    help="视频查看器"
+    bkcolor=LIGHTGRAY
+    mode=M_NOTAB
+  endc
+  hinfo=control CHILD
+    window=hmain
+    position=5,DY1+10,DX1,DY2
+    help="接下来做什么"
+    font=MEDIUMFONT
+    size=1024
+  endc
+  draw window=hmain color=BLACK font=INFOFONT mode=M_LEFT
+  // Position of camera.
+  draw at DX1+10,23 text="Side:"
+  hsel=control TEXT
+    window=hmain
+    position=DX1+42,5,DX2-32,21
+    help="当前选择的相机"
+    font=MEDIUMFONT
+    mode=M_CENTERED|M_BORDER
+  endc
+  draw at DX1+10,48 text="X ="
+  hxpos=control TEXT
+    window=hmain
+    position=DX1+42,30,DX2-32,21
+    help="所选摄像机的X坐标 mm"
+    font=MEDIUMFONT
+    mode=M_BORDER
+  endc
+  draw at DX1+10,73 text="Y ="
+  hypos=control TEXT
+    window=hmain
+    position=DX1+42,55,DX2-32,21
+    help="所选摄像机的Y坐标 mm"
+    font=MEDIUMFONT
+    mode=M_BORDER
+  endc
+  // Movement cross. Size of each button is 30x30 pixel.
+  draw at DX1+10,115 text="Press and hold:"
+  hup=control BUTTON
+    window=hmain
+    position=DX1+10+DX2/2-16,120,32,32
+    name="上"
+    help="按住可向上移动相机"
+    font=MEDIUMFONT
+    mode=M_REPEAT
+  endc
+  hl=control BUTTON
+    window=hmain
+    position=DX1+10+DX2/2-48,152,32,32
+    name="左"
+    help="按住不放，将相机向上移动"
+    font=MEDIUMFONT
+    mode=M_REPEAT
+  endc
+  hr=control BUTTON
+    window=hmain
+    position=DX1+10+DX2/2+16,152,32,32
+    name="右"
+    help="按住不放，将相机向右移动"
+    font=MEDIUMFONT
+    mode=M_REPEAT
+  endc
+  hdn=control BUTTON
+    window=hmain
+    position=DX1+10+DX2/2-16,184,32,32
+    name="下"
+    help="按住可向下移动相机"
+    font=MEDIUMFONT
+    mode=M_REPEAT
+  endc
+  // Movement velocity.
+  j=1
+  draw at DX1+10,245 text="Step:"
+  do i=0,2,1
+    hstep[i]=control RADIO
+      window=hmain
+      position=DX1+45,230+i*18,60,15
+      name=format("%i um",j)
+      help=format(" 检查以%i微米级移动照相机",j)
+      font=INFOFONT
+    endc
+    j=j*10
+  enddo
+  change hstep[1] mode=M_CHECKED
+  step=0.010
+  // Brightness, contrast and zoom.
+  draw at DX1+10,323 text="Brightness:"
+  hbrightness=control HSCROLL
+    window=hmain
+    position=DX1+10,325,DX2,19
+    name="亮度"
+    help="调整图像的亮度"
+    limits=-100,100
+  endc
+  draw at DX1+10,363 text="Contrast:"
+  hcontrast=control HSCROLL
+    window=hmain
+    position=DX1+10,365,DX2,19
+    name="对比度"
+    help="调整图像的对比度"
+    limits=-100,100
+  endc
+  hzoom=control CHECKBOX
+    window=hmain
+    position=DX1+20,395,DX2-10,19
+    name="放大"
+    help="检查以将视频图片缩放2倍"
+    font=INFOFONT
+  endc
+  hmirror=control CHECKBOX
+    window=hmain
+    position=DX1+20,415,DX2-10,19
+    name="自动镜像"
+    help="检查以镜像底部摄像机的实时视频"
+    font=INFOFONT
+  endc
+  // Exit button.
+  hexit=control BUTTON
+    window=hmain
+    position=DX1+10,DY1+DY2-27,DX2,32+6
+    text="关闭"
+    help="安全关闭此脚本"
+    font=MEDIUMFONT
+  endc
+  draw show
+  // Get type of tester.
+  Recognizetester()
+  // Check whether tester is supported by tool/script combination.
+  if testertype!=TT_A3 && testertype!=TT_A3L && testertype!=TT_A4 &&           \
+    testertype!=TT_A5 && testertype!=TT_A5L && testertype!=TT_A6 then
+    draw window=hinfo color=BLACK bkcolor=WHITE font=MEDIUMFONT clear
+    draw at 10,25 wrap=DX1-5
+    draw text="Your tester is not supported by this script. Please ask atg "
+    draw text="for a different script and/or camera adjusting tool."
+    draw show
+    htemp=control BUTTON
+      window=hinfo
+      position=DX1/2-90,DY2-37,180,32
+      name="！！..."
+      help="别无选择，只需按下它！!"
+      font=MEDIUMFONT
+    endc
+    while 1 do
+      if Pressed(htemp) break
+      if Pressed(hexit) break
+      wait
+    enddo
+    return
+  endif
+  // Calculate expected position of adjustment tool.
+  basex=$LAY.xoffset/1000.0+30.0
+  if testertype==TT_A3 || testertype==TT_A3L ||                                \
+    testertype==TT_A5 || testertype==TT_A5L then
+    // A3/A5: install tool on the first rail.
+    basey=$LAY.yoffset[0]/1000.0-67.5
+    baserail=0
+  else
+    // A2/A4/A6: install tool on the second rail.
+    basey=$LAY.yoffset[1]/1000.0-67.5
+    baserail=1
+  endif
+  selection=4
+  // Step 1: confirm that homing is safe.
+  draw window=hinfo color=BLACK bkcolor=WHITE font=MEDIUMFONT clear
+  draw at 10,25 wrap=DX1-5
+  draw text="Script will park heads and move cameras into the working area. "
+  draw text="For security reasons, all other Ollytest windows are blocked. "
+  draw color=LIGHTRED text="If adjustment tool is already installed but heads "
+  draw text="are not in the park (leftmost) position, please remove the tool!"
+  draw show
+  htemp=control BUTTON
+    window=hinfo
+    position=DX1/2-90,DY2-37,180,32
+    name="停泊安全"
+    help="当治具和测试头之间没有碰撞危险时按下"
+    font=MEDIUMFONT
+  endc
+  while 1 do
+    if Pressed(hexit) goto safeexit
+    if Pressed(htemp) break
+    wait
+  enddo
+  destroy htemp
+  draw window=hinfo clear show
+  if Movecameras($LAY.cameras,basex,basey)!=0 goto safeexit
+  // Step 2: start video viewer and install adjusting tool.
+  if $LAY.cameras & 1 then
+    channel=0
+  else
+    channel=1
+  endif
+  zoom=1.0
+  Drawgrid(0,zoom)
+  Doall(1)
+  draw window=hinfo color=BLACK bkcolor=WHITE font=MEDIUMFONT clear
+  draw at 10,25 wrap=DX1-5
+  draw text=format("Please install adjustment tool on the rail %i ",baserail)
+  draw text="so that pyramids lie roughly in the middle of the shuttle."
+  draw show
+  htemp=control BUTTON
+    window=hinfo
+    position=DX1/2-90,DY2-37,180,32
+    name="工具载入"
+    help="当治具安全地放置在测试仪中时按下"
+    font=MEDIUMFONT
+  endc
+  while 1 do
+    if Pressed(hexit) goto safeexit
+    if Pressed(htemp) break
+    Doall(0)
+    wait
+  enddo
+  destroy htemp
+  // Step 3: prepare for 3-d adjustment.
+  draw window=hinfo color=BLACK bkcolor=WHITE font=MEDIUMFONT clear
+  draw at 10,25 wrap=DX1-5
+  draw text="Now adjust X-Y angles and rotation of the "
+  if $LAY.cameras==1 then
+    draw text="top camera. "
+  else if $LAY.cameras==2 then
+    draw text="bottom camera. "
+  else
+    draw text="top and bottom cameras. "
+  endif
+  draw text="When adjustment is finished, go through the tests again to "
+  draw text="improve accuracy. "
+  draw show
+  h[0]=control BUTTON
+    window=hinfo
+    position=4,DY2-37,DX1/4-8,32
+    name="正面 X-Y"
+    help="按下可以调整顶部摄像机的X-Y角度"
+    font=MEDIUMFONT
+  endc
+  h[1]=control BUTTON
+    window=hinfo
+    position=4+DX1/4,DY2-37,DX1/4-8,32
+    name="正面角度"
+    help="按下旋转顶部相机"
+    font=MEDIUMFONT
+  endc
+  if ($LAY.cameras & 0x1)==0 then
+    disable h[0]
+    disable h[1]
+  endif
+  h[2]=control BUTTON
+    window=hinfo
+    position=4+(DX1/4)*2,DY2-37,DX1/4-8,32
+    name="背面 X-Y"
+    help="按下可以调整顶部摄像机的X-Y角度"
+    font=MEDIUMFONT
+  endc
+  h[3]=control BUTTON
+    window=hinfo
+    position=4+(DX1/4)*3,DY2-37,DX1/4-8,32
+    name="背面角度"
+    help="按下旋转底部相机"
+    font=MEDIUMFONT
+  endc
+  if ($LAY.cameras & 0x2)==0 then
+    disable h[2]
+    disable h[3]
+  endif
+  while 1 do
+    Doall(0)
+    for i=0,i<4,i++ do
+      if Pressed(h[i]) then
+        if selection==4 then
+          for j=0,j<4,j++ do
+            shiftx[j]=shiftx[4]
+            shifty[j]=shifty[4]
+          enddo
+        endif
+        selection=i
+        change h[0] color=(i==0?LIGHTRED:BLACK)
+        change h[1] color=(i==1?LIGHTRED:BLACK)
+        change h[2] color=(i==2?LIGHTRED:BLACK)
+        change h[3] color=(i==3?LIGHTRED:BLACK)
+        draw window=hinfo color=BLACK bkcolor=WHITE font=MEDIUMFONT clear
+        draw at 10,25 wrap=DX1-5
+        if i==0 || i==2 then
+          draw text="Locate some dot on the printed board and assure that when "
+          draw text="you move tool up and down, dot goes out of focus but "
+          draw text="remains in the middle of the screen."
+        else
+          draw text="Locate pyramid and assure that sides of pyramid are "
+          draw text="parallel to the lines on the screen."
+        endif
+        draw show
+        channel=(i==0 || i==1?0:1)
+        Drawgrid(i==0 || i==2?1:2,zoom)
+        Doall(1)
+      endif
+    enddo
+    if Pressed(hexit) then
+      break
+    endif
+    wait
+  enddo
+  for i=0,i<4,i++ do
+    destroy h[i]
+  enddo
+safeexit:
+  destroy htemp
+  destroy hexit
+  change hview bkcolor=LIGHTGRAY
+  clear hview
+  draw window=hview color=LIGHTGRAY clear show
+  draw window=hinfo color=BLACK bkcolor=WHITE font=MEDIUMFONT clear show
+  // Move cameras to the right to simplify removing of tool.
+  Movecameras($LAY.cameras,$LAY.rightlimit/1000.0,basey)
+  draw at 10,25 wrap=DX1-5
+  draw text="Please remove adjustment tool from the tester. The heads will "
+  draw text="remain in park position even after this script is closed. "
+  draw text="However, if you leave tool inside, any movement (for example, "
+  draw text="Soft reset) may lead to collision!"
+  draw show
+  htemp=control BUTTON
+    window=hinfo
+    position=DX1/2-90,DY2-37,180,32
+    name="关闭程序"
+    help="按完成相机调整 "
+    font=MEDIUMFONT
+  endc
+  while 1 do
+    if Pressed(htemp) break
+    if Pressed(hexit) break
+    wait
+  enddo
+end

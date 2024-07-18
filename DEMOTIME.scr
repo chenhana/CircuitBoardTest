@@ -1,0 +1,50 @@
+#include "ls.icl"
+#multinst
+#define MX1 260
+#define MY1 110
+
+function int main()
+  handle hmain
+  handle htext
+  handle hquit
+  char s[80]
+  if Argv(s)==0 then
+    hmain=control WINDOW
+      window=NULL
+      position=0,0,MX1,MY1
+      name="Simple timer"
+      mode=M_NOMINIMIZE
+      color=LIGHTGREEN
+    endc
+  else
+    hmain=control WINDOW
+      window=NULL
+      position=Random(250),Random(150),MX1,MY1
+      minsize=MX1,MY1
+      name=s
+      mode=M_NOMINIMIZE
+      color=LIGHTGREEN
+    endc
+  endif
+  htext=control TEXT
+    window=hmain
+    position=10,10,MX1-20,45
+    font=LARGEFONT
+    color=RED
+    bkcolor=YELLOW
+    mode=M_CENTERED|M_BORDER
+  endc
+  hquit=control WINBUTTON
+    window=hmain
+    position=80,66,MX1-160,32
+    name="放弃"
+    font=MEDIUMFONT
+    help="Press button to close Simple timer"
+  endc
+  while Pressed(hquit)==0 do
+    sprintf(s,"t=%7.1f sec",Time()/1000.0)
+    change htext name=s
+    delay 50
+  enddo
+end
+

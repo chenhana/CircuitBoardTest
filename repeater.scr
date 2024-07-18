@@ -1,0 +1,401 @@
+#include "ls.icl"
+#include "or.icl"
+#cmdbuff 64
+#zeroid
+
+#define VERSION        "1.00"
+#define DESCRIPTION    "Test of Firewire repeaters"
+
+#define MAINDX         550             // Width of main window
+#define MAINDY         400             // Height of main window
+
+#define NNODE          5               // Max number of testable nodes
+
+handle           hmain                 // Main window
+handle           hlist                 // List of errors
+handle           hstart                // Start button
+handle           hstop                 // Stop button
+handle           hclear                // Clear button
+handle           hquit                 // Close button
+
+handle           henable[NNODE]        // Node enabling
+handle           hnode[NNODE]          // Node selector
+handle           hbytesread[NNODE]     // Bytes read
+handle           hbyteswrite[NNODE]    // Bytes written
+handle           herrcount[NNODE]      // Node-specific errors
+handle           hnobroadcast          // Disable broadcasts
+handle           htotaltime            // Total test time
+handle           herrtotal             // Total number of errors
+
+int              node[NNODE]           // List of currently selected nodes
+int              running               // Test running
+int              totaltime             // Total test time of previous runs
+int              tstart                // Time when current run started
+
+int              bytesreadlo[NNODE]    // Bytes read (low 9 digits)
+int              bytesreadhi[NNODE]    // Bytes read (high digits)
+int              byteswritelo[NNODE]   // Bytes written (low 9 digits)
+int              byteswritehi[NNODE]   // Bytes written (high digits)
+int              errcount[NNODE]       // Node-specific errors
+int              errtotal              // Total number of errors
+int              update                // Update indicators
+
+external int SERV.Decodeanswer(char *answer,char *text,char *extra,int mask);
+
+function int Answerproc(char *answer,int info)
+  char s[512],extra[2048]
+  if answer[4]==S_ERROR && answer[5]==0x20 then
+    // I/O error reported by crate.
+    SERV.Decodeanswer(answer,s,extra,0x7FFFFFFF)
+    change hlist color=(running?LIGHTRED:DARKGRAY)
+    add hlist text=s
+    if running errtotal++
+  endif
+end
+
+// Service function, adds small positive integer to very long positive integer.
+function int Addhilo(int *hi,int *lo,int increment)
+  lo[0]=lo[0]+increment
+  if lo[0]>=1000000000 then
+    lo[0]=lo[0]-1000000000
+    hi[0]++
+  endif
+end
+
+function int Formathilo(int hi,int lo,char *s)
+  int i,j,n
+  char t[256]
+  if hi==0 then
+    n=sprintf(t,"%u",lo)
+  else
+    n=sprintf(t,"%u%09u",hi,lo)
+  endif
+  i=0; j=0
+  s[i]=' '; i++
+  while n>0 do
+    s[i]=t[j]; i++; j++; n--
+    if n>0 && n%3==0 then
+      s[i]=','; i++
+    endif
+  enddo
+  s[i]='\0'
+  return i
+end
+
+// Sends or broadcasts size*count bytes of data to node with specified index
+// (broadcast if index is -1).
+function int Testbus(int index,int size,int count)
+  int i,j,t,n,listhi,listlo,mask
+  char buf[32]
+  update=1
+  if index<0 then
+    n=63                               // Broadcast
+  else if index>=NNODE || node[index]<0 then
+    return
+  else
+    n=node[index]
+  endif
+  if size<4 then
+    size=4
+  else if size>512 then
+    size=512
+  endif
+  if count>64 count=64
+  // Send commands.
+  for j=0,j<count,j++ do
+    buf[0]=S_DEBUG
+    buf[1]=0x42                        // Test Firewire bus
+    buf[2]=n
+    $uint2(buf+3)=size
+    SYS.Killimm(j)
+    SYS.Sendimm(j,5,buf)
+  enddo
+  // Calculate pattern.
+  listhi=0; listlo=0
+  if n==63 then
+    for i=0,i<NNODE,i++ do
+      if node[i]<0 continue
+      if node[i]<32 then
+        listlo=listlo|(1<<node[i])
+      else
+        listhi=listhi|(1<<(node[i]-32))
+      endif
+    enddo
+  else
+    if n<32 then
+      listlo=listlo|(1<<n)
+    else
+      listhi=listhi|(1<<(n-32))
+    endif
+  endif
+  // Wait for aswers.
+  t=Time()
+  while Time()-t<2000 do
+    for j=0,j<count,j++ do
+      if $A[j].length==0 break
+    enddo
+    if j>=count break                 // All answers are here
+  enddo
+  // Check answers.
+  for j=0,j<count,j++ do
+    if $A[j].length==0 || $A[j].answer!=S_DEBUG then
+      errtotal++
+    else
+      for i=0,i<NNODE,i++ do
+        if node[i]<0 continue
+        if node[i]<32 then
+          mask=1<<node[i]
+          if (listlo & mask)==0 continue
+          if ($uint4($A[j]+7) & mask)==0 then
+            errcount[i]++
+          else
+            Addhilo(bytesreadhi+i,bytesreadlo+i,size)
+            Addhilo(byteswritehi+i,byteswritelo+i,size)
+          endif
+        else
+          mask=1<<(node[i]-32)
+          if (listhi & mask)==0 continue
+          if ($uint4($A[j]+11) & mask)==0 then
+            errcount[i]++
+          else
+            Addhilo(bytesreadhi+i,bytesreadlo+i,size)
+            Addhilo(byteswritehi+i,byteswritelo+i,size)
+          endif
+        endif
+      enddo
+    endif
+  enddo
+end
+
+function int main()
+  int i,j,y,n,t,samenode,step,nobroadcast
+  char key[32],s[256]
+  hmain=control WINDOW
+    window=NULL
+    position=10,10,MAINDX,MAINDY
+    name=format("%s v%s",DESCRIPTION,VERSION)
+    help=" "
+    color=BLACK
+    bkcolor=WHITEBLUE
+    size=1024
+  endc
+  draw window=hmain color=BLUE font=INFOFONT mode=M_CENTERED
+  draw at 48,20 text="Connector"
+  draw at 117,20 text="Node"
+  draw at 225,20 text="Bytes read"
+  draw at 388,20 text="Bytes written"
+  draw at 505,20 text="Errors"
+  draw at 265,48+32*NNODE text="Elapsed time:"
+  draw mode=M_LEFT show
+  for i=0,i<NNODE,i++ do
+    y=30+32*i
+    henable[i]=control CHECKBOX
+      window=hmain
+      position=18,y+2,60,24
+      text=format("Conn %i",i+1)
+      help=format("启用或禁用连接器%i上的测试",i+1)
+      font=INFOFONT
+    endc
+    hnode[i]=control COMBOLIST
+      window=hmain
+      position=90,y,54,200
+      help=format("为连接器%i选择火线节点ID",i+1)
+      mode=M_VSCROLL
+    endc
+    for j=0,j<62,j++ do
+      add hnode[i] text=format("%i",j)
+    enddo
+    sprintf(key,"Node[%i]",i)
+    n=i; j=0; getini("Repeater",key,"%i,%i",&n,&j)
+    change hnode[i] select=n
+    change henable[i] mode=(j?M_CHECKED:0)
+    hbytesread[i]=control TEXT
+      window=hmain
+      position=155,y,150,24
+      help=format("从连接器%i读取的字节数",i+1)
+      mode=M_BORDER
+      bkcolor=WHITE
+    endc
+    hbyteswrite[i]=control TEXT
+      window=hmain
+      position=312,y,150,24
+      help=format("写入连接器%i的字节数",i+1)
+      mode=M_BORDER
+      bkcolor=WHITE
+    endc
+    herrcount[i]=control TEXT
+      window=hmain
+      position=470,y,70,24
+      help=format("与连接器%i相关的错误数",i+1)
+      mode=M_BORDER
+      bkcolor=WHITE
+    endc
+  enddo
+  nobroadcast=0
+  getini("Repeater","Mode","%i",&nobroadcast)
+  hnobroadcast=control CHECKBOX
+    window=hmain
+    position=18,32+32*NNODE,100,24
+    text="No broadcasts"
+    help="禁用广播(同时写入所有控制器)"
+    font=INFOFONT
+    mode=(nobroadcast?M_CHECKED:0)
+  endc
+  htotaltime=control TEXT
+    window=hmain
+    position=312,30+32*NNODE,150,24
+    help="已用的测试时间"
+    mode=M_BORDER
+    bkcolor=WHITE
+  endc
+  herrtotal=control TEXT
+    window=hmain
+    position=470,30+32*NNODE,70,24
+    help=format("火线错误总数")
+    mode=M_BORDER
+    bkcolor=WHITE
+  endc
+  hlist=control LIST
+    window=hmain
+    position=10,MAINDY-178,MAINDX-20,143
+    help="检测到的错误列表"
+    font=TERMINALFONT
+    mode=M_VSCROLL
+    size=262144
+  endc
+  hstart=control BUTTON
+    window=hmain
+    position=MAINDX-345,MAINDY-30,80,25
+    name="开始"
+    help="按下即可开始测试"
+  endc
+  hstop=control BUTTON
+    window=hmain
+    position=MAINDX-260,MAINDY-30,80,25
+    name="停止"
+    help="按下即可停止测试"
+  endc
+  disable hstop
+  hclear=control BUTTON
+    window=hmain
+    position=MAINDX-175,MAINDY-30,80,25
+    name="清除"
+    help="按下清除统计数据"
+  endc
+  hquit=control BUTTON
+    window=hmain
+    position=MAINDX-90,MAINDY-30,80,25
+    name="关闭"
+    help="按下可完成重复测试"
+  endc
+  change hlist color=DARKGRAY
+  add hlist text=format("Repeater test v%s",VERSION)
+  add hlist text=""
+  add hlist text="Firewire bus speed set to 400 MBit"
+  add hlist text=""
+  running=0
+  update=1
+  while 1 do
+    if Pressed(hquit) then
+      break
+    else if Pressed(hstart) then
+      for i=0,i<NNODE,i++ do
+        if Status(henable[i])==0 then
+          node[i]=-1
+        else
+          node[i]=Status(hnode[i])
+        endif
+      enddo
+      samenode=-1
+      for i=0,i<NNODE-1,i++ do
+        for j=i+1,j<NNODE,j++ do
+          if node[i]>=0 && node[j]>=0 && node[i]==node[j] samenode=node[i]
+        enddo
+      enddo
+      if samenode>=0 then
+        change hlist color=RED
+        add hlist text=format("Repeating node ID %i",samenode)
+      else
+        disable hstart
+        enable hstop
+        for i=0,i<NNODE,i++ do
+          disable henable[i]
+          disable hnode[i]
+        enddo
+        tstart=Time()
+        running=1
+        update=1
+        step=0
+      endif
+    else if Pressed(hstop) then
+      if running totaltime=totaltime+Time()-tstart
+      running=0
+      enable hstart
+      disable hstop
+      for i=0,i<NNODE,i++ do
+        enable henable[i]
+        enable hnode[i]
+      enddo
+    else if Pressed(hclear) then
+      for i=0,i<NNODE,i++ do
+        bytesreadhi[i]=0
+        bytesreadlo[i]=0
+        byteswritehi[i]=0
+        byteswritelo[i]=0
+        errcount[i]=0
+      enddo
+      errtotal=0
+      totaltime=0
+      tstart=Time()
+      clear hlist
+      update=1
+    endif
+    if running then
+      // Send or broadcast 24 K of data.
+      if Status(hnobroadcast)==0 || step>0 then
+        Testbus(step-1,384,64)
+      endif
+      step++
+      if step>NNODE step=0
+      t=Time()
+      if t-tstart>=100 then
+        totaltime=totaltime+t-tstart
+        tstart=t
+        update=1
+      endif
+    endif
+    if update then
+      for i=0,i<NNODE,i++ do
+        Formathilo(bytesreadhi[i],bytesreadlo[i],s)
+        change hbytesread[i] text=s
+        Formathilo(byteswritehi[i],byteswritelo[i],s)
+        change hbyteswrite[i] text=s
+        change herrcount[i] text=format(" %u",errcount[i])
+        change herrcount[i] color=(errcount[i]==0?BLACK:LIGHTRED)
+      enddo
+      change herrtotal text=format(" %u",errtotal)
+      if running then
+        t=totaltime+Time()-tstart
+      else
+        t=totaltime
+      endif
+      if t>86400000 then
+        sprintf(s,"%id %2i:%02i:%02i.%1i",                                     \
+        t/86400000,(t/3600000)%24,(t/60000)%60,(t/1000)%60,(t/100)%10)
+      else
+        sprintf(s," %i:%02i:%02i.%1i",                                         \
+        (t/3600000)%24,(t/60000)%60,(t/1000)%60,(t/100)%10)
+      endif
+      change htotaltime text=s
+      change herrtotal color=(errtotal==0?BLACK:LIGHTRED)
+      update=0
+    endif
+    wait
+  enddo
+  setini("Repeater","Mode","%i",Status(hnobroadcast))
+  for i=0,i<NNODE,i++ do
+    sprintf(key,"Node[%i]",i)
+    setini("Repeater",key,"%i,%i",Status(hnode[i]),Status(henable[i]))
+  enddo
+end
+

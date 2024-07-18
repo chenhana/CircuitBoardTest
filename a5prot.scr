@@ -1,0 +1,1742 @@
+#include "ls.icl"                  // Standard functions
+#include "or.icl"                // A2 command names
+#include "pa.icl"                  // Support for files in rich text format
+#zeroid                                // Answerproc receives answers with id=0
+#multinst                              // Allow multiple instances
+
+#define VERSION        "1.22"
+#define DESCRIPTION    "A5 movement oscilloscope"
+
+// 1.05: Added X and Y counters.
+// 1.06: Find Cursors.
+// 1.07: Scales 200k and 500k.
+// 1.08: Presets.
+// 1.09: Increased sync distance.
+// 1.10: X-Y plot.
+// 1.11: Histogramms.
+// 1.12: Bug in calculation of dispersion (square root of negative number).
+// 1.13: New inputs (X and Y relative to zero pulse), trigger on move.
+// 1.14: Custom presets.
+// 1.15: S1 support.
+// 1.16: History.
+// 1.17: Next head.
+// 1.18: Saving of oscillogramms to file.
+// 1.19: New inputs (Z I regulation and Z regulation).
+// 1.20: A8 support, variable order of channel entries.
+// 1.21: S3 support.
+// 1.22: More significant digits for cursors.
+
+#define HEADER         "atg movement oscillogramm 1.0 "
+
+#define NOSC           4096            // Maximal number of data points
+#define NH             32              // Length of saved history
+
+#define PLOTDX         512             // Width of plot window
+#define PLOTDY         420             // Height of plot window
+#define CHANDX         159             // Distance between control groups
+#define OVERSCAN       3300            // Number of points in overscan mode
+#define SYNCDX         384             // Synchronization interval for free run
+#define FFTXOFFS       20              // Start of FFT plot, pixel
+#define OVDX           110             // Width of overview window
+#define OVDY           80              // Height of overview window
+
+#define MANUAL         0               // Manual trigger
+#define FREERUN        1               // Free run
+#define FREESYNC1      2               // Free run with autosync on channel 1
+#define FREESYNC2      3               // Free run with autosync on channel 2
+#define FREESYNC3      4               // Free run with autosync on channel 3                
+#define FREESYNC4      5               // Free run with autosync on channel 4
+#define ONMOVE         6               // Start on next movement
+
+// Selected layout configuration bits.
+#define LC_TYPEMASK    0x0B000000      // General type of machine
+#define   LC_STD       0x00000000      // LC_TYPEMASK: standard A5/A6 tester
+#define   LC_NEWA1     0x01000000      // LC_TYPEMASK: new A1 (slow A5) tester
+#define   LC_S1        0x02000000      // LC_TYPEMASK: S1/S2
+#define   LC_A8        0x03000000      // LC_TYPEMASK: A7/A8
+#define   LC_S3        0x08000000      // LC_TYPEMASK: S3
+
+typedef struct t_saveosci              // Oscillogramm file header
+  int            head                  // Selected head
+  int            trigger               // Trigger settings
+  int            sweep                 // Sweep speed index
+  int            overscan              // Overscan flag
+  int            fourier               // Data processing mode
+  int            sub1                  // Subtract channel 0 from channel 1
+  int            sub3                  // Subtract channel 2 from channel 3
+  int            xoffset               // X offset in overscan mode, pixels
+  int            source[4]             // Source on channel
+  int            scale[4]              // Scale index
+  int            offset[4]             // Offset index
+  int            manual[4]             // Manual offset, divisions
+  int            cursor1               // Position of first cursor, pixel
+  int            cursor2               // Position of second cursor, pixel
+  int            cursor3               // Position of Fourier cursor, pixel
+  int            cursor4               // Position of histogramm cursor, pixel
+  int            maxcount              // Requested number of data points
+  int            nhistory              // Actual size of the history
+  int            acthist               // Actually displayed history sample
+  int            datavalid             // OK to use data
+  int            reserved[10]          // Reserved for the future use
+ends
+
+char entry[64][16] = {                                                         \
+  "00 < OFF >",                                                                \
+  "01 X, um",                                                                  \
+  "02 Y, um",                                                                  \
+  "03 Z, um",                                                                  \
+  "04 Xexp, um",                                                               \
+  "05 Yexp, um",                                                               \
+  "06 Zexp, um",                                                               \
+  "07 Vx, mm/s",                                                               \
+  "08 Vy, mm/s",                                                               \
+  "09 Vz, mm/s",                                                               \
+  "32 X counter",                                                              \
+  "10 X enc A",                                                                \
+  "11 X enc B",                                                                \
+  "12 X enc 0",                                                                \
+  "33 Y counter",                                                              \
+  "13 Y enc A",                                                                \
+  "14 Y enc B",                                                                \
+  "15 Y enc 0",                                                                \
+  "41 Z counter",                                                              \
+  "18 Z enc A",                                                                \
+  "19 Z enc B",                                                                \
+  "20 Z enc 0",                                                                \
+  "16 Raw Z (1)",                                                              \
+  "22 Raw Z (2)",                                                              \
+  "17 Z DMS",                                                                  \
+  "23 Uz, DAC",                                                                \
+  "29 Z surface",                                                              \
+  "21 AGND",                                                                   \
+  "24 Debug 1",                                                                \
+  "25 Debug 2",                                                                \
+  "42 Debug 3",                                                                \
+  "43 Debug 4",                                                                \
+  "26 RT data 1",                                                              \
+  "27 RT data 2",                                                              \
+  "28 RT data 3",                                                              \
+  "30 X reg",                                                                  \
+  "31 Y reg",                                                                  \
+  "40 Z reg",                                                                  \
+  "39 Z I reg",                                                                \
+  "34 X rel, um",                                                              \
+  "35 Y rel, um",                                                              \
+  "36 Power X",                                                                \
+  "37 Power Y",                                                                \
+  "38 Power Z" }
+
+int              indextoline[64];      // Converts index to line in the list
+int              linetoindex[64];      // Converts line in list to index
+int              loadchanged           // 1: load status changed
+int              layoutchanged         // 1: layout changed
+handle           hmain                 // Main window
+handle           hplot                 // Shows oscillogrammes
+handle           hhead                 // Selected head
+handle           htrig                 // Start condition
+handle           hsweep                // Sweeping velocity
+handle           hoverscan             // Extended X
+handle           hfourier[5]           // Data processing mode
+handle           hoverview             // Overview in case of overscan
+handle           hhiback               // Index in history
+handle           hsub1                 // Subtract channel 0 from channel 1
+handle           hsub3                 // Subtract channel 2 from channel 3
+handle           hsrc[4]               // Source on channel
+handle           hsca[4]               // Scale index
+handle           hofs[4]               // Offset index
+handle           hscr[4]               // Manual offset
+handle           hstart,hstop
+
+int              head                  // Protocolled head
+int              maxcount              // Requested number of data points
+int              trigger               // Condition to start acquisition
+int              sweep                 // Sweep index
+int              overscan              // Overscan mode
+int              fourier               // Data processing mode
+int              sub1                  // Subtract channel 0 from channel 1
+int              sub3                  // Subtract channel 2 from channel 3
+int              start                 // Send command to controller
+int              redraw                // Redraw screen
+int              rehist                // Update history controls
+int              cursor1               // Position of first cursor, pixel
+int              cursor2               // Position of second cursor, pixel
+int              cursor3               // Position of Fourier cursor, pixel
+int              cursor4               // Position of histogramm cursor, pixel
+int              catched               // Catched cursor, 0: none
+int              ovcatch               // Cursor catched in hoverview, 0: none
+int              ovx0                  // Mouse where cursor was catched
+int              ovofs0                // Offset when cursor was catched
+int              stopped               // Acquisition stopped
+
+int              source[4]             // Source on channel
+int              scale[4]              // Scale index
+int              offset[4]             // Offset index
+int              manual[4]             // Manual offset, divisions
+float            incd[4][NOSC]         // Buffers that keep incoming data
+float            data[4][NOSC]         // Buffers that keeps answers
+int              complete[4]           // All data on channel gathered
+int              datavalid             // OK to use data
+float            history[NH][4][NOSC]  // History
+int              nhistory              // Actual size of the history
+int              acthist               // Actually displayed history sample
+int              xoffset               // X offset in overscan mode, pixels
+char             savefile[260]         // Last used save file name
+
+int              chcolor[4]  = { BLACK,     LIGHTRED, GREEN,      LIGHTBLUE }
+int              lowcolor[4] = { LIGHTGRAY, PINK,     WHITEGREEN, WHITEBLUE }
+
+function int Answerproc(char *answer,int info)
+  int i,j,n,ch,ofs
+  if answer[4]==0xF0 then              // Internal OLLYTEST message
+    if Stricmp(answer+5,"CHG LOAD")==0 loadchanged=1
+    if Stricmp(answer+5,"CHG LAY")==0 layoutchanged=1
+  else if answer[4]==S_TEST && answer[5]==0x03 && $uint2(answer+2)==0 &&       \
+    hplot!=NULL && stopped==0 then
+    i=answer[6]                        // Head from answer
+    if i==head then                    // Correct finger, show protocol
+      ch=answer[7]; if ch>=4 return    // Channel, check whether valid one
+      ofs=$uint2(answer+10)            // Offset of first data point
+      n=$uint2(answer+12)              // Number of data points
+      if ofs+n>NOSC return             // Invalid data
+      for j=0,j<n,j++ do
+        incd[ch][ofs+j]=$float4(answer+14+j*4)
+      enddo
+      if ofs+n>=$uint2(answer+8) complete[ch]=1
+      for ch=0,ch<4,ch++ do
+        if source[ch]==0 continue      // Channel inactive
+        if complete[ch]==0 break
+      enddo
+      if ch==4 then                    // All answers complete
+        Memcpy(data,incd,Sizeof(incd))
+        complete[0]=0
+        complete[1]=0
+        complete[2]=0
+        complete[3]=0
+        if nhistory>=NH nhistory=NH-1
+        for j=nhistory-1,j>=0,j-- do
+          Memcpy(history[j+1],history[j],Sizeof(data))
+        enddo
+        Memcpy(history[0],incd,Sizeof(incd))
+        nhistory++
+        acthist=0
+        redraw=1
+        rehist=1
+        datavalid=1
+        if stopped==0 then
+          if (trigger==FREERUN ||                                              \
+            (trigger>=FREESYNC1 && trigger<=FREESYNC4) || trigger==ONMOVE) then
+            start=1
+          else if trigger==MANUAL then
+            stopped=1
+            change hstart color=BLACK
+            change hstop color=LIGHTRED
+          endif
+        endif
+      endif
+    endif
+  endif
+end
+
+function int Closehead(int head)
+  char buf[64]
+  buf[0]=S_TEST
+  buf[1]=0x03                          // Setup A5 oscilloscope
+  buf[2]=head                          // Head
+  buf[3]=0                             // Trigger
+  $uint2(buf+4)=1                      // Compression
+  $uint2(buf+6)=0                      // Maximal length of protocol
+  buf[8] =0                            // Data source for channel 1
+  buf[9] =0                            // Data source for channel 2
+  buf[10]=0                            // Data source for channel 3
+  buf[11]=0                            // Data source for channel 4
+  SYS.Send(12,buf,0)
+  start=0
+end
+
+function int Prvalue(char *txt,float value)
+  float a
+  draw text=txt
+  a=Abs(value)
+  if a==0.0 then
+    draw text="0.0"
+  else if a<10.0 then
+    draw text=format("%7.5f",value)
+  else if a<100.0 then
+    draw text=format("%7.4f",value)
+  else if a<1000.0 then
+    draw text=format("%7.3f",value)
+  else if a<10000.0 then
+    draw text=format("%7.2f",value)
+  else if a<100000.0 then
+    draw text=format("%7.1f",value)
+  else if a<1000000.0 then
+    draw text=format("%-7.0f",value)
+  else if a<10000000.0 then
+    draw text=format("%7.4fe6",value/1000000.0)
+  else if a<100000000.0 then
+    draw text=format("%7.4fe7",value/10000000.0)
+  else
+    draw text=format("%7.5g",value)
+  endif
+end
+
+// Display modal "dialog box" with error message.
+function int Error(char *s1,char *s2)
+  handle herr,hdummy,hok
+  herr=control WINDOW
+    window=hmain
+    position=0,0,350,135
+    name="错误"
+    mode=M_MODAL
+    bkcolor=YELLOW
+  endc
+  hok=control BUTTON
+    window=herr
+    position=135,100,80,24
+    name="确定"
+    help="按下可以确认错误消息"
+  endc
+  hdummy=control ICON
+    window=herr
+    position=5,30,36,36
+    name="EXCLAM"
+    bkcolor=YELLOW
+  endc
+  hdummy=control TEXT
+    window=herr
+    position=41,20,300,24
+    name=s1
+    bkcolor=YELLOW
+    mode=M_CENTERED
+  endc
+  hdummy=control TEXT
+    window=herr
+    position=41,45,300,54
+    name=s2
+    bkcolor=YELLOW
+    mode=M_CENTERED
+  endc
+  while Pressed(hok)==0 do; enddo
+  destroy herr
+end
+
+int compression[8] = {                                                         \
+  1, 2, 5, 10, 25, 50, 125, 250 }
+float scalefactor[24] = {                                                      \
+  0.01,    0.02,    0.05,    0.1,     0.2,     0.5,     1.0,     2.0,          \
+  5.0,     10.0,    20.0,    50.0,    100.0,   200.0,   500.0,   1000.0,       \
+  2000.0,  5000.0,  10000.0, 20000.0, 50000.0, 100000.0,200000.0,500000.0 }
+
+#define NCUST          5               // Number of custom presets
+
+function int Getpreset()
+  int i,j,answer
+  char key[32],s[256]
+  handle hp,hx,hy,hz,hxenc,hyenc,hzdms,hcust[NCUST],hdefcust[NCUST],hquit
+  hp=control WINDOW
+    window=hmain
+    position=10,10,200,210+NCUST*25
+    name="预设"
+    help=" "
+    color=BLACK
+    bkcolor=YELLOW
+    mode=M_MODAL
+  endc
+  hx=control BUTTON
+    window=hp
+    position=10,10,180,20
+    text="X movements"
+    help="研究短X轴运动"
+  endc
+  hy=control BUTTON
+    window=hp
+    position=10,35,180,20
+    text="Y movements"
+    help="研究短Y轴运动"
+  endc
+  hz=control BUTTON
+    window=hp
+    position=10,60,180,20
+    text="Z movements"
+    help="研究Z轴运动"
+  endc
+  hxenc=control BUTTON
+    window=hp
+    position=10,85,180,20
+    text="X encoder"
+    help="研究X编码器"
+  endc
+  hyenc=control BUTTON
+    window=hp
+    position=10,110,180,20
+    text="Y encoder"
+    help="研究Y编码器"
+  endc
+  hzdms=control BUTTON
+    window=hp
+    position=10,135,180,20
+    text="Z splinogramm"
+    help="研究软针"
+  endc
+  for i=0,i<NCUST,i++ do
+    sprintf(key,"Custname[%i]",i)
+    sprintf(s,"Custom %i",i+1)
+    j=getini("Oscilloscope",key,"%s",s)
+    hcust[i]=control BUTTON
+      window=hp
+      position=10,170+i*25,135,20
+      text=s
+      help="召回自定义预设"
+    endc
+    if j==0 disable hcust[i]
+    hdefcust[i]=control BUTTON
+      window=hp
+      position=150,170+i*25,40,20
+      text="Set"
+      help="将实际设置保存为预设"
+      mode=M_DBLCLICK
+    endc
+  enddo
+  hquit=control BUTTON
+    window=hp
+    position=10,180+NCUST*25,180,20
+    text="Quit"
+    help="不更改当前设置"
+    color=RED
+  endc
+  while 1 do
+    answer=-1000
+    if Pressed(hx) then
+      answer=0
+    else if Pressed(hy) then
+      answer=1
+    else if Pressed(hz) then
+      answer=2
+    else if Pressed(hxenc) then
+      answer=10
+    else if Pressed(hyenc) then
+      answer=11
+    else if Pressed(hzdms) then
+      answer=12
+    else if Pressed(hquit) then
+      answer=-1
+    endif
+    for i=0,i<NCUST,i++ do
+      if Pressed(hcust[i]) then
+        answer=100+i; break
+      else if Pressed(hdefcust[i]) then
+        answer=200+i; break
+      endif
+    enddo
+    if answer!=(-1000) break
+    wait
+  enddo
+  destroy hp
+  return answer
+end
+
+function int Getpresetname(int preset,char *s)
+  int n,nprev,answer
+  char key[32]
+  handle hp,hedit,hok,hcancel
+  hp=control WINDOW
+    window=hmain
+    position=10,10,200,94
+    name="指定预设名"
+    help=" "
+    color=BLACK
+    bkcolor=YELLOW
+    mode=M_MODAL
+    size=256
+  endc
+  draw window=hp at 10,20
+  draw text=format("Name of preset %i:",preset+1)
+  draw show
+  sprintf(key,"Custname[%i]",preset)
+  sprintf(s,"Custom %i",preset+1)
+  getini("Oscilloscope",key,"%s",s)
+  hedit=control EDIT
+    window=hp
+    position=10,26,180,24
+    name=s
+    help="指定预设名称"
+    font=MEDIUMFONT
+    bkcolor=WHITE
+  endc
+  hok=control BUTTON
+    window=hp
+    position=10,60,85,24
+    name="确定"
+    help="按下确认名称"
+  endc
+  hcancel=control BUTTON
+    window=hp
+    position=105,60,85,24
+    name="取消"
+    help="按下放弃预设"
+  endc
+  nprev=-1
+  while 1 do
+    n=Text(hedit,s)
+    if n!=nprev then
+      if n==0 then
+        disable hok
+      else
+        enable hok
+      endif
+      nprev=n
+    endif
+    if Pressed(hok) then
+      answer=n; break
+    else if Pressed(hcancel) then
+      answer=0; break
+    endif
+    wait
+  enddo
+  destroy hp
+  return answer
+end
+
+// Saves current set of oscillogramms to binary file.
+function int Saveosci(char *path)
+  int i
+  char *buf
+  handle f
+  struct t_saveosci so
+  f=Fopen(path,"wb")
+  if f==NULL then
+    Error("Unable to create file",path)
+    return -1
+  endif
+  // Save header.
+  Fwrite(HEADER,Strlen(HEADER),f)
+  // Save oscillogramm header.
+  so.head=head
+  so.trigger=trigger
+  so.sweep=sweep
+  so.overscan=overscan
+  so.fourier=fourier
+  so.sub1=sub1
+  so.sub3=sub3
+  so.xoffset=xoffset
+  for i=0,i<4,i++ do
+    so.source[i]=source[i]
+    so.scale[i]=scale[i]
+    so.offset[i]=offset[i]
+    so.manual[i]=manual[i]
+  enddo
+  so.cursor1=cursor1
+  so.cursor2=cursor2
+  so.cursor3=cursor3
+  so.cursor4=cursor4
+  so.maxcount=maxcount
+  so.nhistory=nhistory
+  so.acthist=acthist
+  so.datavalid=datavalid
+  for i=0,i<10,i++ do
+    so.reserved[i]=0
+  enddo
+  Fwrite(so,Sizeof(so),f)
+  // Save oscillogramms.
+  Alloc(buf,Sizeof(history))
+  Memcpy(buf,history,nhistory*4*NOSC*8)
+  Fwrite(buf,nhistory*4*NOSC*8,f)
+  Free(buf)
+  Fclose(f)
+  return 0
+end
+
+// Loads set of oscillogramms from the disc.
+function int Loadosci(char *path)
+  int i,k,n
+  char s[256],*buf
+  handle f
+  struct t_saveosci so
+  f=Fopen(path,"rb")
+  if f==NULL then
+    Error("Unable to open file",path)
+    return -1
+  endif
+  // Check header.
+  k=Strlen(HEADER)
+  n=Fread(s,k,f)
+  if n!=k || Memcmp(s,HEADER,k)!=0 goto error
+  // Read oscillogramm header.
+  n=Fread(so,Sizeof(so),f)
+  if n!=Sizeof(so) goto error
+  head=so.head
+  change hhead select=(head==$LAY.nfing*2 && $LAY.cameras==2?head-1:head)
+  trigger=so.trigger
+  change htrig select=trigger
+  sweep=so.sweep
+  change hsweep select=sweep
+  overscan=so.overscan
+  change hoverscan mode=(overscan?M_CHECKED:0)
+  Pressed(hoverscan)
+  fourier=so.fourier
+  if fourier>=0 && fourier<4 then
+    change hfourier[fourier] mode=M_CHECKED
+  endif
+  sub1=so.sub1
+  change hsub1 mode=(sub1?M_CHECKED:0)
+  sub3=so.sub3
+  change hsub3 mode=(sub3?M_CHECKED:0)
+  xoffset=so.xoffset
+  for i=0,i<4,i++ do
+    source[i]=so.source[i]
+    change hsrc[i] select=indextoline[source[i]]
+    scale[i]=so.scale[i]
+    change hsca[i] select=scale[i]
+    offset[i]=so.offset[i]
+    change hofs[i] select=offset[i]
+    manual[i]=so.manual[i]
+    change hscr[i] select=manual[i]
+  enddo
+  cursor1=so.cursor1
+  cursor2=so.cursor2
+  cursor3=so.cursor3
+  cursor4=so.cursor4
+  maxcount=so.maxcount
+  nhistory=so.nhistory
+  acthist=so.acthist
+  rehist=1
+  datavalid=so.datavalid
+  // Restore oscillogramms.
+  Alloc(buf,Sizeof(history))
+  Fread(buf,nhistory*4*NOSC*8,f)
+  Memcpy(history,buf,nhistory*4*NOSC*8)
+  Memcpy(data,history[acthist],Sizeof(data))
+  Free(buf)
+  Fclose(f)
+  return 0
+error:
+  Fclose(f)
+  Error("Invalid or unsupported file",path)
+  return -1
+end
+
+function int main()
+  int i,j,k,q,n,nf,x,y,x0,xofs,sync,iss1
+  int setsweep,setoverscan
+  int hist[4,PLOTDX]
+  char buf[64],key[32],s[256]
+  float r,f,xfact,yfact,xoffs,yoffs,foffs,tfact,ymin,ymax,ysync,sum,fstep
+  float rein[4096],imin,reout[4096],imout[4096],sy[4],syy[4]
+  float fftampl[4,512],fftfreq[512]
+  handle hnext
+  handle hhiindex,hhiclr,hhifwd,hload,hsave,hcurs,hpreset
+  handle hquit
+  loadchanged=0
+  hmain=control WINDOW
+    window=NULL
+    position=10,10,PLOTDX+129,PLOTDY+136
+    name=format("A5 示波器 v%s",VERSION)
+    help=" "
+    bkcolor=GRAY
+    size=4096
+  endc
+  hplot=control GRAPH
+    window=hmain
+    position=6,5,PLOTDX,PLOTDY
+    help="协议数据"
+    bkcolor=WHITE
+  endc
+  draw window=hmain
+  head=0; trigger=MANUAL; sweep=0; overscan=0; fourier=0; sub1=0; sub3=0
+  getini("Oscilloscope","Settings","%i,%i,%i,%i,%i,%i,%i",                     \
+    &head,&trigger,&sweep,&overscan,&fourier,&sub1,&sub3)
+  Strcpy(savefile,"a5prot.osm")
+  getini("Oscilloscope","Savefile",savefile)
+  // Controller selection.
+  draw color=BLACK bkcolor=LIGHTGRAY font=SMALLFONT mode=M_CENTERED
+  draw at PLOTDX+12,4 fillrect PLOTDX+124,206
+  draw at PLOTDX+69,20 text="控制器"
+  hhead=control COMBOLIST
+    window=hmain
+    position=PLOTDX+19,23,74,350
+    help="选择控制器"
+    font=MAINFONT
+    mode=M_VSCROLL
+  endc
+  for i=0,i<$LAY.nfing*2,i++ do
+    add hhead text=format(" %2i (%i%c)",i,i/2,(i & 1?'R':'L'))
+  enddo
+  if $LAY.cameras & 1 add hhead text="Top"
+  if $LAY.cameras & 2 add hhead text="Bottom"
+  change hhead select=(head==$LAY.nfing*2 && $LAY.cameras==2?head-1:head)
+  hnext=control BUTTON
+    window=hmain
+    position=PLOTDX+93,23,24,24
+    name="+1"
+    help="选择下一个可用的测试头"
+    font=SMALLFONT
+  endc
+  // Trigger and sweep controls.
+  draw at PLOTDX+69,64 text="触发扫描"
+  htrig=control COMBOLIST
+    window=hmain
+    position=PLOTDX+19,66,98,200
+    help="选择开始采集的事件"
+    font=MAINFONT
+    mode=M_VSCROLL
+  endc
+  add htrig text=" Manual"
+  add htrig text=" 自由运行"
+  add htrig text=" Sync ch1"
+  add htrig text=" Sync ch2"
+  add htrig text=" Sync ch3"
+  add htrig text=" Sync ch4"
+  add htrig text=" On move"
+  change htrig select=trigger
+  hsweep=control COMBOLIST
+    window=hmain
+    position=PLOTDX+19,95,98,200
+    help="选择扫描速度"
+    font=MAINFONT
+    mode=M_VSCROLL
+  endc
+  hoverscan=control CHECKBOX
+    window=hmain
+    position=PLOTDX+19,123,98,20
+    name="扩展的X"
+    help=format("检查以收集%i X点替代%i",OVERSCAN,PLOTDX)
+    mode=(overscan?M_CHECKED:0)
+    bkcolor=LIGHTGRAY
+  endc
+  hstart=control BUTTON
+    window=hmain
+    position=PLOTDX+19,148,98,24
+    text="开始"
+    help="开始手动获取"
+    font=MAINFONT
+  endc
+  hstop=control BUTTON
+    window=hmain
+    position=PLOTDX+19,176,98,24
+    text="停止"
+    color=LIGHTRED
+    help="暂停获取"
+    font=MAINFONT
+  endc
+  layoutchanged=1
+  // Mode selection conrols.
+  hfourier[0]=control RADIO
+    window=hmain
+    position=PLOTDX+14,210,55,18
+    name="Osc"
+    help="在时域中显示正常的示波器图"
+    mode=(fourier==0?M_CHECKED:0)
+  endc
+  hfourier[1]=control RADIO
+    window=hmain
+    position=PLOTDX+14,230,45,18
+    name="FFT"
+    help="显示输入信号的频谱"
+    mode=(fourier==1?M_CHECKED:0)
+  endc
+  hfourier[2]=control RADIO
+    window=hmain
+    position=PLOTDX+14,250,55,18
+    name="FFT*f"
+    help="显示频谱乘以频率"
+    mode=(fourier==2?M_CHECKED:0)
+  endc
+  hfourier[3]=control RADIO
+    window=hmain
+    position=PLOTDX+14,270,55,18
+    name="X-Y"
+    help="显示2中的依存关系1和4中的依存关系3"
+    mode=(fourier==3?M_CHECKED:0)
+  endc
+  hfourier[4]=control RADIO
+    window=hmain
+    position=PLOTDX+14,290,55,18
+    name="直方图"
+    help="显示直方图"
+    mode=(fourier==4?M_CHECKED:0)
+  endc
+  hcurs=control BUTTON
+    window=hmain
+    position=PLOTDX+70,210,53,18
+    text="指针"
+    help="按下可将光标移至可见区域"
+    font=TERMINALFONT
+  endc
+  hpreset=control BUTTON
+    window=hmain
+    position=PLOTDX+70,230,53,18
+    text="预设"
+    help="选择预定义的参数集"
+    font=TERMINALFONT
+  endc
+  hhiindex=control TEXT
+    window=hmain
+    position=PLOTDX+70,253,34,18
+    help="历史样本('行为'指实际数据)"
+    bkcolor=WHITE
+    mode=M_CENTERED|M_BORDER
+  endc
+  hhiclr=control BUTTON
+    window=hmain
+    position=PLOTDX+103,253,20,18
+    text="C"
+    help="清除历史记录"
+  endc
+  hhiback=control BUTTON
+    window=hmain
+    position=PLOTDX+70,270,27,18
+    text="<<"
+    help="按下可转到历史记录中的上一个数据样本"
+  endc
+  hhifwd=control BUTTON
+    window=hmain
+    position=PLOTDX+96,270,27,18
+    text=">>"
+    help="按下转到历史记录中的下一个数据样本"
+  endc
+  hload=control BUTTON
+    window=hmain
+    position=PLOTDX+70,290,27,18
+    text="Ld"
+    help="从文件中加载先前保存的示波器图"
+    font=SMALLFONT
+  endc
+  hsave=control BUTTON
+    window=hmain
+    position=PLOTDX+96,290,27,18
+    text="Sv"
+    help="按下可将波形图和控件状态保存到文件"
+    font=SMALLFONT
+  endc
+  // Channel controls.
+  for j=0,j<64,j++ do
+    if entry[j,0]=='\0' break
+    k=(entry[j,0]-'0')*10+entry[j,1]-'0'
+    linetoindex[j]=k
+    indextoline[k]=j
+  enddo
+  for i=0,i<4,i++ do
+    sprintf(s,"通道[%i]",i)
+    source[i]=0; scale[i]=6; offset[i]=0; manual[i]=0;
+    getini("Oscilloscope",s,"%i,%i,%i,%i",source+i,scale+i,offset+i,manual+i)
+    source[i]=Max(0,Min(63,source[i]))
+    scale[i]=Max(0,Min(23,scale[i]))
+    if i==1 then
+      hsub1=control CHECKBOX
+        window=hmain
+        position=124+CHANDX*i,PLOTDY+11,29,17
+        name="-1"
+        help="减去通道1"
+        color=chcolor[i-1]
+        bkcolor=lowcolor[i]
+        mode=(sub1?M_CHECKED:0)
+      endc
+    endif
+    if i==3 then
+      hsub3=control CHECKBOX
+        window=hmain
+        position=124+CHANDX*i,PLOTDY+11,29,17
+        name="-3"
+        help="减去通道3"
+        color=chcolor[i-1]
+        bkcolor=lowcolor[i]
+        mode=(sub3?M_CHECKED:0)
+      endc
+    endif
+    draw color=chcolor[i] bkcolor=lowcolor[i] font=MAINFONT mode=M_LEFT
+    draw at 5+CHANDX*i,PLOTDY+10 fillrect 159+CHANDX*i,PLOTDY+132
+    draw at 44+CHANDX*i,PLOTDY+27 text=format("通道 %i",i+1)
+    draw font=INFOFONT color=BLACK
+    draw at 11+CHANDX*i,PLOTDY+50 text="资源:"
+    draw at 11+CHANDX*i,PLOTDY+76 text="刻度:"
+    draw at 11+CHANDX*i,PLOTDY+101 text="补偿:"
+    hsrc[i]=control COMBOLIST
+      window=hmain
+      position=61+CHANDX*i,PLOTDY+30,90,850
+      help=format("通道%i的源",i+1)
+      font=MAINFONT
+      mode=M_VSCROLL
+    endc
+    for j=0,j<64,j++ do
+      if entry[j,0]=='\0' break
+      add hsrc[i] text=entry[j]+2
+    enddo
+    change hsrc[i] select=indextoline[source[i]]
+    hsca[i]=control COMBOLIST
+      window=hmain
+      position=61+CHANDX*i,PLOTDY+56,90,440
+      help=format("通道%i的刻度，单位/刻度 ",i+1)
+      font=MAINFONT
+      mode=M_VSCROLL
+    endc
+    add hsca[i] text=" 0.01/div"
+    add hsca[i] text=" 0.02/div"
+    add hsca[i] text=" 0.05/div"
+    add hsca[i] text=" 0.1/div"
+    add hsca[i] text=" 0.2/div"
+    add hsca[i] text=" 0.5/div"
+    add hsca[i] text=" 1/div"
+    add hsca[i] text=" 2/div"
+    add hsca[i] text=" 5/div"
+    add hsca[i] text=" 10/div"
+    add hsca[i] text=" 20/div"
+    add hsca[i] text=" 50/div"
+    add hsca[i] text=" 100/div"
+    add hsca[i] text=" 200/div"
+    add hsca[i] text=" 500/div"
+    add hsca[i] text=" 1K/div"
+    add hsca[i] text=" 2K/div"
+    add hsca[i] text=" 5K/div"
+    add hsca[i] text=" 10K/div"
+    add hsca[i] text=" 20K/div"
+    add hsca[i] text=" 50K/div"
+    add hsca[i] text=" 100K/div"
+    add hsca[i] text=" 200K/div"
+    add hsca[i] text=" 500K/div"
+    change hsca[i] select=scale[i]
+    hofs[i]=control COMBOLIST
+      window=hmain
+      position=61+CHANDX*i,PLOTDY+81,90,200
+      help=format("通道%i的偏移量",i+1 )
+      mode=M_VSCROLL
+    endc
+    add hofs[i] text=" Auto (AC)"
+    add hofs[i] text=" Cursor 1"
+    add hofs[i] text=" Cursor 2"
+    add hofs[i] text=" Manual"
+    change hofs[i] select=offset[i]
+    hscr[i]=control HSCROLL
+      window=hmain
+      position=12+CHANDX*i,PLOTDY+107,139,20
+      help=format("手动通道%i的偏移量",i+1 )
+      limits=-35,35
+    endc
+    change hscr[i] select=manual[i]
+  enddo
+  draw show
+  // Overview window.
+  hoverview=control GRAPH
+    window=hmain
+    position=PLOTDX+13,314,OVDX,OVDY
+    help="扩展X数据总览"
+  endc
+  // Auxiliary controls.
+  hquit=control BUTTON
+    window=hmain
+    position=PLOTDX+12,PLOTDY-20,112,26
+    text="关闭"
+    help="关闭示波器"
+  endc
+  // Prepare for test.
+  start=0
+  stopped=1
+  redraw=1
+  rehist=1
+  datavalid=0
+  maxcount=PLOTDX
+  cursor1=PLOTDX/4; cursor2=PLOTDX*3/4; cursor3=FFTXOFFS; cursor4=PLOTDX/2
+  catched=0;
+  while 1 do
+    // S1 and A7 have different timescale than A5 (10000 interrupts per second
+    // instead of 5000).
+    if layoutchanged then
+      if Status(hsweep)>=0 sweep=Status(hsweep)
+      clear hsweep
+      if ($LAY.config & LC_TYPEMASK)==LC_S1 ||                                 \
+        ($LAY.config & LC_TYPEMASK)==LC_A8 ||                                  \
+        ($LAY.config & LC_TYPEMASK)==LC_S3                                     \
+      then
+        add hsweep text=" 2 ms/div"
+        add hsweep text=" 4 ms/div"
+        add hsweep text=" 10 ms/div"
+        add hsweep text=" 20 ms/div"
+        add hsweep text=" 50 ms/div"
+        add hsweep text="100 ms/div"
+        add hsweep text="250 ms/div"
+        add hsweep text="500 ms/div"
+      else
+        add hsweep text=" 4 ms/div"
+        add hsweep text=" 8 ms/div"
+        add hsweep text=" 20 ms/div"
+        add hsweep text=" 40 ms/div"
+        add hsweep text="100 ms/div"
+        add hsweep text="200 ms/div"
+        add hsweep text="500 ms/div"
+        add hsweep text=" 1 s/div"
+      endif
+      change hsweep select=sweep
+      layoutchanged=0
+      redraw=1
+    endif
+    // Check for pressed buttons.
+    if Pressed(hhead) then
+      head=Status(hhead)
+      if head>=$LAY.nfing*2 && $LAY.cameras==2 head++
+    else if Pressed(hnext) then
+      head=Status(hhead)
+      if head>=$LAY.nfing*2 && $LAY.cameras==2 head++
+      Closehead(head)
+      if head>=$LAY.nfing*2-1 && $LAY.cameras==0 then
+        head=0
+      else if head==$LAY.nfing*2-1 && $LAY.cameras==2 then
+        head=head+2
+      else if head==$LAY.nfing*2 && ($LAY.cameras & 2)==0 then
+        head=0
+      else if head>=$LAY.nfing*2+1 then
+        head=0
+      else
+        head++
+      endif
+      change hhead select=(head==$LAY.nfing*2+1 && $LAY.cameras==2?head-1:head)
+      stopped=0                        // Same as Pressed(hstart) below
+      start=1
+      change hstart color=LIGHTRED
+      change hstop color=BLACK
+    else if Pressed(hquit) then
+      break
+    else if Pressed(htrig) then
+      trigger=Status(htrig)
+    else if Pressed(hstart) then
+      stopped=0
+      start=1
+      change hstart color=LIGHTRED
+      change hstop color=BLACK
+    else if Pressed(hstop) then
+      Closehead(head)
+      stopped=1
+      start=0
+      change hstart color=BLACK
+      change hstop color=LIGHTRED
+    else if Pressed(hoverscan) then
+      overscan=Status(hoverscan)
+      if overscan==0 then
+        xoffset=0
+        if cursor1>=PLOTDX || cursor2>=PLOTDX then
+          cursor1=PLOTDX/4; cursor2=PLOTDX*3/4
+        endif
+      endif
+      nhistory=Min(nhistory,1)
+      acthist=0
+      redraw=1
+      rehist=1
+    else if Pressed(hcurs) then
+      if fourier==0 then
+        if overscan then x0=xoffset; else x0=0; endif
+        cursor1=x0+PLOTDX/4; cursor2=x0+PLOTDX*3/4
+      else if fourier==1 || fourier==2 then
+        cursor3=PLOTDX/2
+      else if fourier==4 then
+        cursor4=PLOTDX/2
+      endif
+      redraw=1
+    else if Pressed(hpreset) then
+      setsweep=sweep; setoverscan=overscan
+      if ($LAY.config & LC_TYPEMASK)==LC_S1 ||                                 \
+        ($LAY.config & LC_TYPEMASK)==LC_A8 ||                                  \
+        ($LAY.config & LC_TYPEMASK)==LC_S3 then
+        iss1=1
+      else
+        iss1=0
+      endif
+      j=Getpreset()
+      if j>=200 then                   // Save custom preset
+        i=Getpresetname(j-200,s)
+        if i>0 then
+          sprintf(key,"Custname[%i]",j-200)
+          setini("Oscilloscope",key,"%s",s)
+          sprintf(key,"Custdata[%i]",j-200)
+          setini("Oscilloscope",key,                                           \
+          "%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i",                         \
+          source[0],scale[0],manual[0],source[1],scale[1],manual[1],           \
+          source[2],scale[2],manual[2],source[3],scale[3],manual[3],           \
+          sweep,overscan)
+        endif
+        j=-1                           // Request processed
+      endif
+      switch j
+      case 0:                          // X movements
+        source[0]=4; scale[0]=16; manual[0]=3
+        source[1]=1; scale[1]=16; manual[1]=1
+        source[2]=7; scale[2]=12; manual[2]=-1
+        if iss1==0 then
+          source[3]=0
+        else
+          source[3]=36; scale[3]=5; manual[3]=-3
+        endif
+      case 1:                          // Y movements
+        source[0]=5; scale[0]=16; manual[0]=2
+        source[1]=2; scale[1]=16; manual[1]=0
+        source[2]=8; scale[2]=12; manual[2]=-2
+        if iss1==0 then
+          source[3]=0
+        else
+          source[3]=37; scale[3]=5; manual[3]=-3
+        endif
+
+
+
+      case 2:                          // Z movements
+        source[0]=6; scale[0]=15; manual[0]=3
+        source[1]=3; scale[1]=15; manual[1]=1
+        source[2]=9; scale[2]=10; manual[2]=-1
+        source[3]=23;scale[3]=16; manual[3]=-3
+      case 10:                         // X encoder
+        source[0]=10;scale[0]=16; manual[0]=3
+        source[1]=11;scale[1]=16; manual[1]=1
+        source[2]=12;scale[2]=16; manual[2]=-1
+        source[3]=1; scale[3]=16; manual[3]=-3
+        setsweep=0; setoverscan=1
+      case 11:                         // Y encoder
+        source[0]=13;scale[0]=16; manual[0]=3
+        source[1]=14;scale[1]=16; manual[1]=1
+        source[2]=15;scale[2]=16; manual[2]=-1
+        source[3]=2; scale[3]=16; manual[3]=-3
+        setsweep=0; setoverscan=1
+      case 12:                         // Z splinogramm
+        source[0]=6; scale[0]=14; manual[0]=3
+        source[1]=3; scale[1]=14; manual[1]=1
+        source[2]=29;scale[2]=14; manual[2]=-1
+        source[3]=17;scale[3]=16; manual[3]=-4
+        setsweep=2; setoverscan=1
+      case 100,101,102,103,104,105,106,107,108,109,110:
+        sprintf(key,"Custdata[%i]",j-100)
+        getini("Oscilloscope",key,                                             \
+        "%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i",                           \
+        source+0,scale+0,manual+0,source+1,scale+1,manual+1,                   \
+        source+2,scale+2,manual+2,source+3,scale+3,manual+3,                   \
+        &setsweep,&setoverscan)
+      endsw
+      if j>=0 then
+        for i=0,i<4,i++ do
+          change hsrc[i] select=indextoline[source[i]]
+          change hsca[i] select=scale[i]
+          offset[i]=0; change hofs[i] select=0
+          change hscr[i] select=manual[i]
+        enddo
+        fourier=0
+        change hfourier[0] mode=M_CHECKED
+        sweep=setsweep
+        change hsweep select=sweep
+        overscan=setoverscan
+        change hoverscan mode=(overscan?M_CHECKED:0)
+        redraw=1
+      endif
+    else if Pressed(hfourier[0]) then
+      fourier=0
+      redraw=1
+    else if Pressed(hfourier[1]) then
+      fourier=1
+      redraw=1
+    else if Pressed(hfourier[2]) then
+      fourier=2
+      redraw=1
+    else if Pressed(hfourier[3]) then
+      fourier=3
+      redraw=1
+    else if Pressed(hfourier[4]) then
+      fourier=4
+      redraw=1
+    else if Pressed(hhiclr) then
+      nhistory=0
+      acthist=0
+      datavalid=0
+      redraw=1
+      rehist=1
+    else if Pressed(hhiback) && acthist<nhistory-1 then
+      acthist++
+      Memcpy(data,history[acthist],Sizeof(data))
+      redraw=1
+      rehist=1
+    else if Pressed(hhifwd) && acthist>0 then
+      acthist--
+      Memcpy(data,history[acthist],Sizeof(data))
+      redraw=1
+      rehist=1
+    else if Pressed(hload) then
+      if SYS.Browse(hmain,savefile,"Select oscillogramm file",0) then
+        Closehead(head)
+        stopped=1
+        start=0
+        change hstart color=BLACK
+        change hstop color=LIGHTRED
+        Loadosci(savefile)
+        redraw=1
+      endif
+    else if Pressed(hsave) then
+      if SYS.Browse(hmain,savefile,"Select file to save oscillogramm",0) then
+        Saveosci(savefile)
+      endif
+    else if Pressed(hsub1) then
+      sub1=Status(hsub1)
+      redraw=1
+    else if Pressed(hsub3) then
+      sub3=Status(hsub3)
+      redraw=1
+    endif
+    for i=0,i<4,i++ do
+      if Pressed(hsrc[i]) then
+        source[i]=linetoindex[Status(hsrc[i])]
+      else if Pressed(hsca[i]) then
+        scale[i]=Status(hsca[i])
+        redraw=1
+      else if Pressed(hofs[i]) then
+        offset[i]=Status(hofs[i])
+        redraw=1
+      else if Pressed(hscr[i]) then
+        manual[i]=Status(hscr[i])
+        redraw=1
+      endif
+    enddo
+    // Move overview window.
+    if overscan!=0 && Status(hoverview)==1 then
+      x=Limit0(hoverview)
+      if ovcatch==0 then
+        ovcatch=1
+        ovx0=x
+        ovofs0=xoffset
+      else
+        x=Max(0,Min(OVERSCAN-PLOTDX,ovofs0+(x-ovx0)*30))
+        if x!=xoffset then
+          xoffset=x
+          redraw=1
+        endif
+      endif
+    else
+      ovcatch=0
+    endif
+    // Move cursors.
+    if (Status(hplot)==1) then
+      x=Limit0(hplot)
+      if fourier==0 then
+        if (catched==3 || catched==4) catched=0
+        if overscan then
+          if x<0 && xoffset>0 then
+            xoffset=Max(0,xoffset+(x-5)/10); redraw=1
+          else if x>=PLOTDX && xoffset<OVERSCAN-PLOTDX-1 then
+            xoffset=Min(OVERSCAN-PLOTDX,xoffset+(x-PLOTDX+5)/10); redraw=1
+          endif
+        endif
+        x=Max(0,Min(PLOTDX-1,x))+(overscan==0?0:xoffset)
+        if catched==0 && Abs(cursor1-x)<5 then
+          catched=1; redraw=1; endif
+        if catched==0 && Abs(cursor2-x)<5 then
+          catched=2; redraw=1; endif
+        if catched==1 && cursor1!=x then
+          cursor1=x; redraw=1
+        else if catched==2 && cursor2!=x then
+          cursor2=x; redraw=1
+        endif
+      else if fourier==1 || fourier==2 then
+        if (catched==1 || catched==2 || catched==4) catched=0
+        x=Max(FFTXOFFS,Min(PLOTDX-FFTXOFFS-1,x))
+        if catched==0 && Abs(cursor3-x)<5 then
+          catched=3; redraw=1; endif
+        if catched==3 && cursor3!=x then
+          cursor3=x; redraw=1
+        endif
+      else if fourier==4 then
+        if (catched==1 || catched==2 || catched==3) catched=0
+        x=Max(0,Min(PLOTDX-1,x))
+        if catched==0 && Abs(cursor4-x)<5 then
+          catched=4; redraw=1; endif
+        if catched==4 && cursor4!=x then
+          cursor4=x; redraw=1
+        endif
+      endif
+    else
+      if catched!=0 redraw=1           // Reset cursor highlighting
+      catched=0
+    endif
+    // Send command to tester.
+    if start then                      // Start oscilloscope
+      sweep=Max(0,Min(7,Status(hsweep)))
+      buf[0]=S_TEST
+      buf[1]=0x03                      // Setup A5 oscilloscope
+      buf[2]=head                      // Head
+      if trigger==MANUAL || trigger==FREERUN ||                                \
+        (trigger>=FREESYNC1 && trigger<=FREESYNC4) then
+        buf[3]=1                       // Trigger
+      else if trigger==ONMOVE then
+        buf[3]=8
+      else
+        buf[3]=trigger
+      endif
+      $uint2(buf+4)=compression[sweep] // Compression
+      maxcount=(overscan?OVERSCAN:PLOTDX)
+      if trigger>=FREESYNC1 && trigger<=FREESYNC4 then
+        maxcount=maxcount+SYNCDX
+      endif
+      $uint2(buf+6)=maxcount           // Maximal length of protocol
+      buf[8] =source[0]                // Data source for channel 1
+      buf[9] =source[1]                // Data source for channel 2
+      buf[10]=source[2]                // Data source for channel 3
+      buf[11]=source[3]                // Data source for channel 4
+      SYS.Send(12,buf,0)
+      start=0
+    endif
+    // Update history controls.
+    if rehist then
+      if acthist>=nhistory-1 then
+        disable hhiback
+      else
+        enable hhiback
+      endif
+      if acthist==0 then
+        change hhiindex color=BLACK
+        change hhiindex text="Act"
+        disable hhifwd
+      else
+        change hhiindex color=LIGHTRED
+        change hhiindex text=format("-%i",acthist)
+        enable hhifwd
+      endif
+      rehist=0
+    endif
+    // Redraw oscillogrammes.
+    if redraw then
+      redraw=0
+      clear hplot
+      draw window=hplot
+      if fourier!=0 || overscan==0 then
+        x0=0
+      else
+        x0=xoffset
+      endif
+      xofs=0
+      if trigger>=FREESYNC1 && trigger<=FREESYNC4 then
+        sync=trigger-FREESYNC1
+        n=Min(SYNCDX,maxcount)
+        ymin=data[sync,0]
+        ymax=data[sync,0]
+        for j=1,j<n,j++ do
+          ymin=Min(ymin,data[sync,j])
+          ymax=Max(ymax,data[sync,j])
+        enddo
+        ysync=(ymin+ymax)/2.0
+        for xofs=1,xofs<n,xofs++ do
+          if data[sync,xofs-1]<=ysync && data[sync,xofs]>=ysync break
+        enddo
+        if xofs==n then
+          for xofs=1,xofs<n,xofs++ do
+            if data[sync,xofs-1]>=ysync && data[sync,xofs]<=ysync break
+          enddo
+        endif
+      endif
+      // Draw grid.
+      draw color=LIGHTGRAY
+      for j=20,j<OVERSCAN,j=j+20 do
+        k=j-x0
+        if fourier==3 || fourier==4 k=k+(PLOTDX/2)%20-20
+        if k<0 continue
+        if k>PLOTDX break
+        draw at k,0 to k,PLOTDY
+      enddo
+      for j=-10,j<=10,j++ do
+        k=PLOTDY/2+j*20
+        if k<0 continue
+        if k>=PLOTDY break
+        draw at 0,k to PLOTDX,k
+      enddo
+      // Draw background of overview window.
+      draw window=hoverview
+      if overscan then
+        draw bkcolor=WHITEBLUE clear
+        if fourier==0 then
+          // Draw selection and cursors in overview window.
+          draw color=GRAY bkcolor=WHITE
+          draw at x0/30,OVDY/2-11
+          draw fillrect (x0+PLOTDX)/30+1,OVDY/2+11
+          draw color=STRANGE at cursor1/30,0 to cursor1/30,OVDY
+          draw color=STRANGE at cursor2/30,0 to cursor2/30,OVDY
+        endif
+      else
+        draw bkcolor=GRAY clear
+      endif
+      // Draw main oscilloscope window.
+      draw window=hplot font=SMALLFONT mode=M_CENTERED
+      if fourier==0 then
+        // Normal time sweep.
+        if catched!=1 then
+          draw color=STRANGE at cursor1-x0,12 text="1" to cursor1-x0,PLOTDY
+        endif
+        if catched!=2 then
+          draw color=STRANGE at cursor2-x0,12 text=" 2" to cursor2-x0,PLOTDY
+        endif
+        draw color=WHITE at PLOTDX-231,0 fillrect PLOTDX,60
+        if catched==1 then
+          draw color=LIGHTRED at cursor1-x0,12 text="1" to cursor1-x0,PLOTDY
+        else if catched==2 then
+          draw color=LIGHTRED at cursor2-x0,12 text=" 2" to cursor2-x0,PLOTDY
+        endif
+        draw color=DARKGRAY mode=M_LEFT
+        if compression[sweep]<50 then
+          if ($LAY.config & LC_TYPEMASK)==LC_S1 ||                             \
+            ($LAY.config & LC_TYPEMASK)==LC_A8 ||                              \
+            ($LAY.config & LC_TYPEMASK)==LC_S3                                 \
+          then
+            tfact=compression[sweep]*0.1
+          else
+            tfact=compression[sweep]*0.2
+          endif
+          draw at PLOTDX-225,15
+          draw text=format("t1 = %g ms",cursor1*tfact)
+          draw at PLOTDX-145,15
+          draw text=format("t2 = %g ms",cursor2*tfact)
+          draw at PLOTDX-65,15
+          draw text=format("dt = %g ms",(cursor2-cursor1)*tfact)
+        else
+          if ($LAY.config & LC_TYPEMASK)==LC_S1 ||                             \
+            ($LAY.config & LC_TYPEMASK)==LC_A8 ||                              \
+            ($LAY.config & LC_TYPEMASK)==LC_S3                                 \
+          then
+            tfact=compression[sweep]*0.0001
+          else
+            tfact=compression[sweep]*0.0002
+          endif
+          draw at PLOTDX-225,15
+          draw text=format("t1 = %g s",cursor1*tfact)
+          draw at PLOTDX-145,15
+          draw text=format("t2 = %g s",cursor2*tfact)
+          draw at PLOTDX-65,15
+          draw text=format("dt = %g s",(cursor2-cursor1)*tfact)
+        endif
+        y=28
+        for i=0,i<4,i++ do
+          if source[i]==0 continue     // Channel inactive
+          draw color=chcolor[i]
+          if (i==1 && sub1!=0 && source[0]!=0) ||                              \
+            (i==3 && sub3!=0 && source[2]!=0) then
+            draw at PLOTDX-225,y
+            Prvalue("D1 = ",data[i,cursor1+xofs]-data[i-1,cursor1+xofs])
+            draw at PLOTDX-145,y
+            Prvalue("D2 = ",data[i,cursor2+xofs]-data[i-1,cursor2+xofs])
+            draw at PLOTDX-65,y
+            Prvalue("d = ",data[i,cursor2+xofs]-data[i,cursor1+xofs]-          \
+              data[i-1,cursor2+xofs]+data[i-1,cursor1+xofs])
+            y=y+11
+          else
+            draw at PLOTDX-225,y
+            Prvalue("U1 = ",data[i,cursor1+xofs])
+            draw at PLOTDX-145,y
+            Prvalue("U2 = ",data[i,cursor2+xofs])
+            draw at PLOTDX-65,y
+            Prvalue("d = ",data[i,cursor2+xofs]-data[i,cursor1+xofs])
+            y=y+11
+          endif
+        enddo
+      else if fourier==1 || fourier==2 then
+        // Calculate spectra.
+        if datavalid then
+          n=maxcount-xofs              // Total number of displayable points
+          k=(n<=1024?512:2048)         // Number of data points
+          nf=512-2*FFTXOFFS            // Number of points in spectrum
+          if ($LAY.config & LC_TYPEMASK)==LC_S1 ||                             \
+            ($LAY.config & LC_TYPEMASK)==LC_A8 ||                              \
+            ($LAY.config & LC_TYPEMASK)==LC_S3                                 \
+          then
+            fstep=10000.0/(k*compression[sweep])
+          else
+            fstep=5000.0/(k*compression[sweep])
+          endif
+          for i=0,i<4,i++ do
+            if source[i]==0 continue   // Channel inactive
+            sum=0.0
+            for j=0,j<k && j<n,j++ do
+              if (i==1 && sub1!=0 && source[0]!=0) ||                          \
+                (i==3 && sub3!=0 && source[2]!=0) then
+                r=data[i,j+xofs]-data[i-1,j+xofs]
+              else
+                r=data[i,j+xofs]
+              endif
+              sum=sum+r
+              rein[j]=r
+            enddo
+            if j>0 sum=sum/j
+            for q=0,q<j,q++ do
+              rein[q]=rein[q]-sum
+            enddo
+            for j=j,j<k,j++ do
+              rein[j]=0.0              // Fill rest with zeros, no good solution
+            enddo
+            SYS.Fft(k,rein,&imin,reout,imout)
+            f=0.0
+            if k==512 then
+              for j=0,j<256,j++ do
+                r=Sqrt(reout[j]*reout[j]+imout[j]*imout[j])/4.0
+                if fourier==2 r=r*j*2
+                fftampl[i,j*2]=r
+                fftampl[i,j*2+1]=r
+                fftfreq[j*2]=f
+                fftfreq[j*2+1]=f
+                f=f+fstep
+              enddo
+            else
+              for j=0,j<512,j++ do
+                r=Sqrt(reout[j*2]*reout[j*2]+imout[j*2]*imout[j*2])
+                r=r+Sqrt(reout[j*2+1]*reout[j*2+1]+imout[j*2+1]*imout[j*2+1])
+                if fourier==2 r=r*j
+                fftampl[i,j]=r/20.0
+                fftfreq[j]=f
+                f=f+fstep*2.0
+              enddo
+            endif
+          enddo
+        endif
+        if catched!=3 then
+          draw color=STRANGE at cursor3,0 to cursor3,PLOTDY
+        endif
+        draw color=WHITE at PLOTDX-231,0 fillrect PLOTDX,60
+        if catched==3 then
+          draw color=LIGHTRED at cursor3,0 to cursor3,PLOTDY
+        endif
+        draw color=DARKGRAY mode=M_LEFT
+        draw at PLOTDX-225,15
+        draw text=format("f = %.4g Hz",fftfreq[cursor3-FFTXOFFS])
+        y=28
+        for i=0,i<4,i++ do
+          if source[i]==0 continue     // Channel inactive
+          draw color=chcolor[i] at PLOTDX-225,y
+          Prvalue("A = ",fftampl[i,cursor3-FFTXOFFS])
+          y=y+11
+        enddo
+      else if fourier==4 then
+        // Process histogramms.
+        n=maxcount-xofs                // Total number of displayable points
+        if catched!=4 then
+          draw color=STRANGE at cursor4,0 to cursor4,PLOTDY
+        endif
+        draw color=WHITE at PLOTDX-291,0 fillrect PLOTDX,60
+        if catched==4 then
+          draw color=LIGHTRED at cursor4,0 to cursor4,PLOTDY
+        endif
+        draw color=GRAY at 0,PLOTDY-50 to PLOTDX,PLOTDY-50
+        y=28
+        for i=0,i<4,i++ do
+          if source[i]==0 continue     // Channel inactive
+          Memset(hist[i],0,PLOTDX*4)
+          sy[i]=0.0; syy[i]=0.0
+          yfact=20.0/scalefactor[scale[i]]
+          if (i==1 && sub1!=0 && source[0]!=0) ||                              \
+            (i==3 && sub3!=0 && source[2]!=0) then
+            if offset[i]==0 then       // "AC" mode
+              yoffs=0.0
+              for j=0,j<n,j++ do
+                yoffs=yoffs+data[i,j+xofs]-data[i-1,j+xofs]
+              enddo
+              if n>0 yoffs=yoffs/n
+            else if offset[i]==1 then  // Offset at cursor 1
+              yoffs=data[i,cursor1+xofs]-data[i-1,cursor1+xofs]
+            else if offset[i]==2 then  // Offset at cursor 2
+              yoffs=data[i,cursor2+xofs]-data[i-1,cursor2+xofs]
+            else
+              yoffs=0                  // Manual offset
+            endif
+            yoffs=yoffs-manual[i]*scalefactor[scale[i]]
+          else
+            if offset[i]==0 then       // "AC" mode
+              yoffs=0.0
+              for j=0,j<n,j++ do
+                yoffs=yoffs+data[i,j+xofs]
+              enddo
+              if n>0 yoffs=yoffs/n
+            else if offset[i]==1 then  // Offset at cursor 1
+              yoffs=data[i,cursor1+xofs]
+            else if offset[i]==2 then  // Offset at cursor 2
+              yoffs=data[i,cursor2+xofs]
+            else
+              yoffs=0.0                // Manual offset
+            endif
+            yoffs=yoffs-manual[i]*scalefactor[scale[i]]
+          endif
+          for j=0,j<n,j++ do
+            if (i==1 && sub1!=0 && source[0]!=0) ||                            \
+              (i==3 && sub3!=0 && source[2]!=0) then
+              r=data[i,j+xofs]-data[i-1,j+xofs]
+            else
+              r=data[i,j+xofs]
+            endif
+            sy[i]=sy[i]+r
+            syy[i]=syy[i]+r*r
+            k=PLOTDY/2+(r-yoffs)*yfact
+            if k>=0 && k<PLOTDX hist[i,k]++
+          enddo
+          if source[i]==0 continue     // Channel inactive
+          draw color=chcolor[i] at PLOTDX-270,y mode=M_LEFT
+          Prvalue("U = ",(cursor4-PLOTDY/2)/yfact+yoffs)
+          draw at PLOTDX-205,y
+          draw text=format("N = %i",hist[i,cursor4])
+          if n>1 then
+            draw at PLOTDX-152,y
+            Prvalue("Mn = ",sy[i]/n)
+            draw at PLOTDX-76,y
+            Prvalue("S = ",Sqrt(Abs(n*syy[i]-sy[i]*sy[i])/n/(n-1)))
+          endif
+          y=y+11
+        enddo
+      endif
+      // Draw gathered data.
+      if datavalid then
+        n=maxcount-xofs                // Total number of displayable points
+        if fourier==1 || fourier==2 then
+          for i=0,i<4,i++ do           // Draw spectra
+            if source[i]==0 continue
+            draw window=hplot color=chcolor[i]
+            draw at FFTXOFFS,PLOTDY/2+60-manual[i]*20
+            draw to PLOTDX-FFTXOFFS,PLOTDY/2+60-manual[i]*20
+          enddo
+        else if fourier==3 then
+          for i=0,i<4,i=i+2 do         // Draw X-Y plots
+            if source[i]==0 || source[i+1]==0 continue
+            draw window=hplot color=chcolor[i+1]
+            draw at 0,PLOTDY/2-manual[i]*20
+            draw to PLOTDX,PLOTDY/2-manual[i]*20
+            draw color=chcolor[i]
+            draw at PLOTDX/2+manual[i+1]*20,0
+            draw to PLOTDX/2+manual[i+1]*20,PLOTDY
+          enddo
+        endif
+        for i=0,i<4,i++ do
+          if source[i]==0 continue     // Channel inactive
+          yfact=20.0/scalefactor[scale[i]]
+          draw window=hplot color=chcolor[i]
+          if fourier==1 || fourier==2 then
+            r=scalefactor[scale[i]]*nf/512.0
+            if fourier==2 r=r*100.0
+            foffs=PLOTDY/2+60-manual[i]*20
+            draw at FFTXOFFS,foffs-fftampl[i,0]/r
+            for j=1,j<nf,j++ do
+              draw to j+FFTXOFFS,foffs-fftampl[i,j]/r
+            enddo
+          endif
+          if fourier==4 then
+            yfact=(overscan?0.25:1.0)
+            for j=0,j<PLOTDX,j++ do
+              if hist[i,j]==0 continue
+              draw at j,PLOTDY-50-hist[i,j]*yfact to j,PLOTDY-50
+            enddo
+          else if fourier!=3 && ((i==1 && sub1!=0 && source[0]!=0) ||          \
+            (i==3 && sub3!=0 && source[2]!=0)) then
+            if offset[i]==0 then       // "AC" mode
+              yoffs=0.0
+              for j=0,j<n,j++ do
+                yoffs=yoffs+data[i,j+xofs]-data[i-1,j+xofs]
+              enddo
+              if n>0 yoffs=yoffs/n
+            else if offset[i]==1 then  // Offset at cursor 1
+              yoffs=data[i,cursor1+xofs]-data[i-1,cursor1+xofs]
+            else if offset[i]==2 then  // Offset at cursor 2
+              yoffs=data[i,cursor2+xofs]-data[i-1,cursor2+xofs]
+            else
+              yoffs=0                  // Manual offset
+            endif
+            yoffs=yoffs-manual[i]*scalefactor[scale[i]]
+            if fourier==0 then
+              y=PLOTDY/2-(data[i,xofs+x0]-data[i-1,xofs+x0]-yoffs)*yfact
+              draw at 0,y
+              for j=1,j+x0<n && j<PLOTDX,j++ do
+                y=PLOTDY/2-(data[i,j+xofs+x0]-data[i-1,j+xofs+x0]-yoffs)*yfact
+                draw to j,y
+              enddo
+            endif
+          else
+            if offset[i]==0 then       // "AC" mode
+              yoffs=0.0
+              for j=0,j<n,j++ do
+                yoffs=yoffs+data[i,j+xofs]
+              enddo
+              if n>0 yoffs=yoffs/n
+            else if offset[i]==1 then  // Offset at cursor 1
+              yoffs=data[i,cursor1+xofs]
+            else if offset[i]==2 then  // Offset at cursor 2
+              yoffs=data[i,cursor2+xofs]
+            else
+              yoffs=32768              // Manual offset
+            endif
+            yoffs=yoffs-manual[i]*scalefactor[scale[i]]
+            if fourier==0 then
+              y=PLOTDY/2-(data[i,xofs+x0]-yoffs)*yfact
+              draw at 0,y
+              for j=1,j+x0<n && j<PLOTDX,j++ do
+                y=PLOTDY/2-(data[i,j+xofs+x0]-yoffs)*yfact
+                draw to j,y
+              enddo
+            else if fourier==3 && (i==0 || i==2) && source[i+1]!=0 then
+              if offset[i+1]==0 then   // X-Y plots
+                xoffs=0.0
+                for j=0,j<n,j++ do
+                  xoffs=xoffs+data[i+1,j+xofs]
+                enddo
+                if n>0 xoffs=xoffs/n
+              else if offset[i+1]==1 then
+                xoffs=data[i+1,cursor1+xofs]
+              else if offset[i+1]==2 then
+                xoffs=data[i+1,cursor2+xofs]
+              else
+                xoffs=32768
+              endif
+              xoffs=xoffs-manual[i+1]*scalefactor[scale[i+1]]
+              xfact=20.0/scalefactor[scale[i+1]]
+              y=PLOTDY/2-(data[i,xofs]-yoffs)*yfact
+              x=PLOTDX/2+(data[i+1,xofs]-xoffs)*xfact
+              draw at x,y
+              for j=1,j+xofs<maxcount && j<OVERSCAN,j++ do
+                y=PLOTDY/2-(data[i,j+xofs]-yoffs)*yfact
+                x=PLOTDX/2+(data[i+1,j+xofs]-xoffs)*xfact
+                draw to x,y
+              enddo
+            endif
+          endif
+          if fourier==0 then
+            draw to j+1,y
+            y=PLOTDY/2-manual[i]*20.0
+            draw at 4,y+1 to 1,y+4 to 1,y-4 to 2,y-3 to 2,y+2
+            draw to 3,y+1 to 3,y-2 to 4,y-1 to 4,y to 8,y
+            draw color=WHITE
+            draw at 5,y+1 to 0,y+6 to 0,y-6 to 6,y
+          endif
+          if overscan then
+            draw window=hoverview color=chcolor[i]
+            yfact=1.0/scalefactor[scale[i]]
+            if (i==1 && sub1!=0 && source[0]!=0) ||                            \
+              (i==3 && sub3!=0 && source[2]!=0) then
+              y=Max(0.0,Min(OVDY-1,OVDY/2-                                     \
+                (data[i,xofs]-data[i-1,xofs]-yoffs)*yfact))
+              draw at 0,y
+              for j=1,j<OVDX,j++ do
+                if j*30+xofs>=maxcount break
+                y=Max(0.0,Min(OVDY-1,OVDY/2-                                   \
+                  (data[i,j*30+xofs]-data[i-1,j*30+xofs]-yoffs)*yfact))
+                draw to j,y
+              enddo
+            else
+              y=Max(0.0,Min(OVDY-1,OVDY/2-(data[i,xofs]-yoffs)*yfact))
+              draw at 0,y
+              for j=1,j<OVDX,j++ do
+                if j*30+xofs>=maxcount break
+                y=Max(0.0,Min(OVDY-1,OVDY/2-(data[i,j*30+xofs]-yoffs)*yfact))
+                draw to j,y
+              enddo
+            endif
+          endif
+        enddo
+      endif
+      draw window=hplot show
+      draw window=hoverview show
+    endif
+    wait
+  enddo
+  // Save settings to .ini file and close oscilloscope on controller.
+  head=Status(hhead); trigger=Status(htrig)
+  sweep=Status(hsweep); overscan=Status(hoverscan)
+  setini("Oscilloscope","Settings","%i,%i,%i,%i,%i,%i,%i",                     \
+    head,trigger,sweep,overscan,fourier,sub1,sub3)
+  setini("Oscilloscope","Savefile",savefile)
+  Closehead(head)
+  for i=0,i<4,i++ do
+    sprintf(s,"通道[%i]",i)
+    setini("Oscilloscope",s,"%i,%i,%i,%i",                                     \
+      source[i],scale[i],offset[i],manual[i])
+    ;
+  enddo
+end
+

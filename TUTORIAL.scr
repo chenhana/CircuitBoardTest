@@ -1,0 +1,46 @@
+﻿#include "ls.icl"
+#bitmap "a"="aluminum.bmp"
+
+
+function int main()
+  handle hmain,hh,hquit
+  int i
+
+  hmain=control WINDOW
+    window=NULL
+    position=10,10,500,500
+    name="教程"
+    bkcolor=PINK
+    size=200
+    help=" "
+  endc
+
+  draw window=hmain
+  draw at 0,0 bitmap=0,0,1,"a"
+  draw at 20,40 font=MEDIUMFONT color=GREEN text="Hello, nice world!"
+  draw at 20,70 font=MEDIUMFONT color=RED text="Hello, nice world!"
+  draw at 20,120 font=MEDIUMFONT color=MAGENTA text="Hello, nice world!"
+  draw at 50,50 ellipse 50,50
+  draw show
+
+  hh=control HSCROLL
+    window=hmain
+    position=10,10,150,24
+    limits=0,1000
+  endc
+
+  hquit=control BUTTON
+    window=hmain
+    position=70,170,80,24
+    text="Quit"
+    help="好的，请按我!"
+    bkcolor=LIGHTRED
+    font=MEDIUMFONT
+  endc
+
+  while 1 do
+    if Pressed(hquit) break
+    wait
+  enddo
+
+end

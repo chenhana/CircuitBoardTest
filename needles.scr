@@ -1,0 +1,739 @@
+#include "ls.icl"                  // System definitions and functions
+#include "or.icl"                // Command & error mnemonics
+#include "pa.icl"                  // Rich Text Format extentions
+#cmdbuff 34                            // 32+2 command buffers
+
+#define VERSION        ""
+#define DESCRIPTION    "Viewer for needles"
+
+// 1.01: Warning to clear central part of the working area.
+// 1.02: All fingers move into the upmost position before any X-Y movement.
+// 1.03: Window is modal.
+// 1.04: Support for head cameras.
+// 1.05: Support for S2.
+// 1.06: Prolongated exposition, side illumination.
+
+#define DX             550             // Dimensions of live video window
+#define DY             550
+#define X1             7               // Position of live video in main window
+#define Y1             7
+#define MAINX          (X1+DX+130)     // Dimensions of main window
+#define MAINY          (Y1+DY+60)
+
+#define DELTA          1.0             // Distance between heads in view4 mode
+
+handle           hmain                 // Main window
+handle           hvideo                // Live video
+handle           hhead[32]             // Head selection
+handle           hview1                // Single needle
+handle           hview4                // 4 needles at once
+handle           hup,hdn,hl,hr         // Positioning cross
+handle           hz                    // Z coordinate
+handle           hbrightness           // Brightness adjustment
+handle           hcontrast             // Contrast adjustment
+handle           hzoom                 // Zoom video
+handle           hgrid                 // Show grid
+handle           hiexp                 // Long exposition
+handle           hskew                 // Side lights
+handle           hbmp                  // Save picture to .BMP
+handle           hrtf                  // Save picture(s) to .rtf
+handle           hexit                 // Close window
+
+int              headcams              // Flag indicating tester with headcams
+float            shiftx,shifty         // Shift of video camera
+int              zoffset[32]           // Individual Z offsets
+
+// Display modal "dialog box" with error message.
+function int Error(char *s1,char *s2)
+  handle herr,hdummy,hok
+  herr=control WINDOW
+    window=hmain
+    position=0,0,350,135
+    name="错误"
+    mode=M_MODAL
+    bkcolor=YELLOW
+  endc
+  hok=control BUTTON
+    window=herr
+    position=150,100,80,24
+    name="确定"
+    help="按下可以确认错误消息"
+  endc
+  hdummy=control ICON
+    window=herr
+    position=5,30,36,36
+    name="EXCLAM"
+    bkcolor=YELLOW
+  endc
+  hdummy=control TEXT
+    window=herr
+    position=41,20,300,24
+    name=s1
+    bkcolor=YELLOW
+    mode=M_CENTERED
+  endc
+  hdummy=control TEXT
+    window=herr
+    position=41,45,300,54
+    name=s2
+    bkcolor=YELLOW
+    mode=M_CENTERED
+  endc
+  while Pressed(hok)==0 do
+    wait
+  enddo
+  destroy herr
+end
+
+// Given video channel, returns head that carries corresponding video camera,
+// or -1 if channel is invalid or not assigned.
+function int Headfromchannel(int channel)
+  int head,n
+  if $LAY.cameras!=0 then
+    if channel==0 return $LAY.nfing*2
+    if channel==1 return $LAY.nfing*2+1
+  else
+    n=0
+    for head=0,head<$LAY.nfing*2,head++ do
+      if ($LAY.headcameras & (1<<head))==0 continue
+      if channel==n return head
+      n++
+    enddo
+  endif
+  return -1
+end
+
+// Given head, returns associated video channel, or -1 if head is invalid or
+// carries no camera.
+function int Channelfromhead(int head)
+  int i,channel
+  if $LAY.cameras!=0 then
+    if head==$LAY.nfing*2 return 0
+    if head==$LAY.nfing*2+1 return 1
+  else if ($LAY.headcameras & (1<<head))!=0 then
+    channel=0
+    for i=0,i<head,i++ do
+      if ($LAY.headcameras & (1<<i))!=0 channel++
+    enddo
+    return channel
+  endif
+  return -1
+end
+
+// Given Y coordinate in millimeters and side, selects camera controller and
+// corresponding video channel. Returns head on success, and -1 on any error.
+function int Camerafromyside(float y,int side,int *channel,float *angle)
+  int head
+  float h,headcamradius
+  if side!=0 side=1
+  if $LAY.cameras!=0 then
+    if ($LAY.cameras & (1<<side))==0 then
+      return -1
+    else
+      channel[0]=side
+      angle[0]=0.0
+      return $LAY.nfing*2+side
+    endif
+  else if $LAY.headcameras!=0 then
+    for head=0,head<$LAY.nfing*2,head++ do
+      if $LAY.side[head/2]!=side continue
+      if ($LAY.headcameras & (1<<head))==0 continue
+      if ($LAY.excludedrails & (1<<(head/2)))!=0 continue
+      if $LAY.top[head/2]/1000.0<=y continue
+      if $LAY.bottom[head/2]/1000.0>y continue
+      break
+    enddo
+    if $EXTLAY.headcamradius!=0 then
+      headcamradius=$EXTLAY.headcamradius/1000.0
+    else if $LAY.top[0]-$LAY.bottom[0]<=125000 then
+      headcamradius=118.0
+    else
+      headcamradius=153.0
+    endif
+    if head>=$LAY.nfing*2 return -1
+    channel[0]=Channelfromhead(head)
+    h=y-$LAY.yoffset[head/2]/1000.0
+    angle[0]=(Abs(h)>0.9*headcamradius?0.0:Asin(h/headcamradius))
+    if side!=0 angle[0]=-angle[0]
+    if (head & 1)!=0 angle[0]=-angle[0]
+    return head
+  else
+    return -1                          // No cameras
+  endif
+end
+
+function int main()
+  int i,j,x,y,t,testersides,head,camhead,channel,view4,base
+  int headchanged,zchanged,tzchanged,videochanged,longmove
+  float zoom,scalex,scaley,posx,posy,angle
+  char s[256],bmpname[260],buf[32]
+  handle hunlock,hok,hquit
+  handle f
+  if $LAY.software!=0xA5 && $LAY.software!=0xA6 && $LAY.software!=0xA7 &&      \
+    $LAY.software!=0xA8 && $LAY.software!=0xB7 && $LAY.software!=0xB8 then
+    Error("Unsupported tester!",                                               \
+      "Currently this script is allowed only for A5, A6, S2, A7 and A8.")
+    return
+  endif
+  buf[0]=S_INPORT32
+  buf[1]=0xFF                          // Crate controller
+  $uint4(buf+2)=0x10000010             // Version
+  SYS.Sendimm(0,6,buf)
+  t=Time()
+  while $A[0].length==0 do
+    if Time()-t>5000 then
+      Error("Unable to get crate version!","Script terminated")
+      return
+    endif
+    wait
+  enddo
+  if $A[0].answer!=S_INPORT32 || $uint4($A[0]+5)<0x05000061 then
+    Error("Old crate!",                                                        \
+      "Please upgrade your crate software to v5.00.97 or newer")
+    return
+  endif
+  // Verify that this script applies to the tester.
+  if $LAY.nfing==0 then
+    Error("No layout!","Please load tester or get layout.")
+    return
+  else if $LAY.cameras==0 && $LAY.headcameras==0 then
+    Error("No video cameras!","For this reason, script can't show needles.")
+    return
+  endif
+  for j=0,j<$LAY.nfing,j++ do
+    if $LAY.side[j]==0 then testersides=testersides|0x01;
+    else testersides=testersides|0x02; endif
+  enddo
+  if testersides!=0x03 then
+    Error("Single-sided tester!",                                              \
+      "To view needles, you need camera on the opposide side.")
+    return
+  endif
+  if $LAY.cameras!=0x03 && $LAY.headcameras==0 then
+    Error("Single video camera!",                                              \
+      "To view needles, you need camera on the opposide side.")
+    return
+  endif
+  headcams=($LAY.cameras==0 && $LAY.headcameras!=0)
+  // Create main window and all controls.
+  hmain=control WINDOW
+    window=NULL
+    position=10,10,MAINX,MAINY
+    name=format("查看针尖 %s",VERSION)
+    help=" "
+    bkcolor=LIGHTGRAY
+    size=1024
+    mode=M_MODAL
+  endc
+  hvideo=control GRAPH
+    window=hmain
+    position=X1,Y1,DX,DY
+    help="实时视频"
+  endc
+  draw window=hmain color=BLACK font=INFOFONT
+  for j=0,j<$LAY.nfing,j++ do
+    y=Y1+j*($LAY.nfing<=8?23:20)-1
+    if $LAY.side[j]!=0 y=y+5
+    for i=0,i<2,i++ do
+      hhead[j*2+i]=control BUTTON
+        window=hmain
+        position=X1+DX+10+i*58,y,52,($LAY.nfing<=8?20:19)
+        name=format("%i%c",j,i==0?'L':'R')
+        help=format("按下可查看%i%c上的针",j,i==0?'L':'R')
+        color=BLACK
+        bkcolor=GRAY
+      endc
+    enddo
+  enddo
+  hview1=control RADIO
+    window=hmain
+    position=MAINX-120,Y1+210,110,19
+    name="查看1个针头"
+    help="按下查看单个针头"
+    font=INFOFONT
+    mode=M_CHECKED
+  endc
+  hview4=control RADIO
+    window=hmain
+    position=MAINX-120,Y1+232,110,19
+    name="查看4个针头"
+    help="按下同时查看4个针头"
+    font=INFOFONT
+  endc
+  hup=control BUTTON
+    window=hmain
+    position=MAINX-83,Y1+265,36,36
+    name="上"
+    help="按住可向上移动相机"
+    font=MEDIUMFONT
+    mode=M_REPEAT
+  endc
+  hl=control BUTTON
+    window=hmain
+    position=MAINX-120,Y1+302,36,36
+    name="左"
+    help="按住不放，将相机向上移动"
+    font=MEDIUMFONT
+    mode=M_REPEAT
+  endc
+  hr=control BUTTON
+    window=hmain
+    position=MAINX-46,Y1+302,36,36
+    name="右"
+    help="按住不放，将相机向右移动"
+    font=MEDIUMFONT
+    mode=M_REPEAT
+  endc
+  hdn=control BUTTON
+    window=hmain
+    position=MAINX-83,Y1+339,36,36
+    name="下"
+    help="按住可向下移动相机"
+    font=MEDIUMFONT
+    mode=M_REPEAT
+  endc
+  draw at X1+DX+29,Y1+406 text="Z坐标:"
+  hz=control VSCROLL
+    window=hmain
+    position=X1+DX+47,Y1+409,36,142
+    help="设置被检针头的Z坐标"
+    limits=-50,50
+  endc
+  draw at X1,Y1+DY+26 text="明亮度:"
+  hbrightness=control HSCROLL
+    window=hmain
+    name="明亮度"
+    help="调整图像的亮度"
+    position=X1+70,Y1+DY+9,150,19
+    limits=-100,100
+  endc
+  draw at X1,Y1+DY+50 text="对比度:"
+  hcontrast=control HSCROLL
+    window=hmain
+    position=X1+70,Y1+DY+33,150,19
+    name="对比度"
+    help="调整图像的对比度"
+    limits=-100,100
+  endc
+  hzoom=control CHECKBOX
+    window=hmain
+    position=X1+240,Y1+DY+9,60,19
+    text="缩放"
+    help="按系数2缩放视频图像"
+    font=INFOFONT
+  endc
+  hgrid=control CHECKBOX
+    window=hmain
+    position=X1+240,Y1+DY+33,60,19
+    text="栅格"
+    help="选中可在图像上显示网格"
+    font=INFOFONT
+    mode=M_CHECKED
+  endc
+  hiexp=control CHECKBOX
+    window=hmain
+    position=X1+310,Y1+DY+9,60,19
+    text="高亮"
+    help="选中此项可设置扩展的曝光范围(如果支持)"
+    font=INFOFONT
+  endc
+  if $GLOBAL.a5==0 disable hiexp
+  hskew=control CHECKBOX
+    window=hmain
+    position=X1+310,Y1+DY+33,60,19
+    text="倾斜"
+    help="检查可以打开侧灯(如果可用)"
+    font=INFOFONT
+  endc
+  if $GLOBAL.a5==0 disable hskew
+  hbmp=control BUTTON
+    window=hmain
+    position=MAINX-270,MAINY-32,80,24
+    text="存.bmp"
+    help="按下可将视频图像保存到位图文件"
+  endc
+  hrtf=control BUTTON
+    window=hmain
+    position=MAINX-180,MAINY-32,80,24
+    text="存.rtf"
+    help="按下可将视频图像保存到MSWord兼容文件"
+  endc
+  disable hrtf                         // Not yet implemented
+  hexit=control BUTTON
+    window=hmain
+    position=MAINX-90,MAINY-32,80,24
+    name="退出"
+    help="按下关闭视频查看器"
+  endc
+  draw show
+  head=-1                              // No selected head
+  headchanged=0
+  zchanged=0
+  videochanged=1
+  longmove=1
+  Strcpy(bmpname,"needles.bmp")
+  // Warn user about state of the shuttle.
+  draw window=hvideo color=WHITE bkcolor=WHITE clear
+  draw font=LARGEFONT color=RED mode=M_CENTERED
+  draw at DX/2,90 text="注意!"
+  draw font=MEDIUMFONT color=BLACK mode=M_LEFT
+  draw at 15,125 wrap=DX-5
+  draw text="   请确保没有任何产品在架板框上，前后左右的夹板条， "
+  draw text=""
+  if $LAY.software==0xA6 then
+    draw text=", that left and right PCB holders do not cover central part of "
+    draw text="the working area and that rear stopper is pulled out at least "
+    draw text="to position 52. "
+  else
+    draw text=" 都不在中心测试区域，否则可能会使针头碰到架板框，\n导致损坏，无法修复!\n "
+    draw text=" "
+  endif
+  // draw text="Otherwise, needles may collide with the shuttle and suffer "
+  // draw text="irreparable damages!\n\n"
+  draw text="   如果允许，请按 " color=RED text="解锁 " color=BLACK
+  draw text="弹出架板框。准备好了，按 " color=RED text="确定。 " color=BLACK
+  draw text="推出查看，按 " color=RED text="退出 " color=BLACK
+  //draw text="to close Needle Viewer."
+  draw at 15,390 wrap=DX-5
+  draw text="   提示: 防止其它脚本发送命令给测试机，查看针头脚本屏蔽 "
+  draw text="使用其它诊断软件，请不要打开飞针测试软件。 "
+  if Embedded()==0 then
+    draw text=""
+  else
+    draw text=""
+  endif
+  draw show
+  hunlock=control BUTTON
+    window=hvideo
+    position=DX/2-145,280,90,30
+    text="解锁"
+    help="按下松开架板框"
+    color=RED
+    font=MEDIUMFONT
+  endc
+  hok=control BUTTON
+    window=hvideo
+    position=DX/2-45,280,90,30
+    text="确定"
+    help="是的，中心已经清除"
+    color=RED
+    font=MEDIUMFONT
+  endc
+  hquit=control BUTTON
+    window=hvideo
+    position=DX/2+55,280,90,30
+    text="退出"
+    help="不，中心已经清除"
+    color=RED
+    font=MEDIUMFONT
+  endc
+  while 1 do
+    if Pressed(hunlock) then
+      buf[0]=S_LOCKDOOR; buf[1]=0      // Unlock door
+      SYS.Send(2,buf,0)                // Do not wait for answer, no need
+    else if Pressed(hok) then
+      destroy hunlock
+      destroy hok
+      destroy hquit
+      break
+    else if Pressed(hquit) || Pressed(hexit) then
+      SYS.Softreset(0)
+      return
+    endif
+    wait
+  enddo
+  draw window=hvideo color=VIDEOFILL bkcolor=VIDEOFILL clear
+  draw show
+  // Get Z offsets from .ini file
+  for i=0,i<$LAY.nfing*2,i++ do
+    sprintf(s,"Z offset[%i]",i)
+    zoffset[i]=0; getini("Needles",s,"%i",zoffset+i)
+  enddo
+  while 1 do
+    for j=0,j<$LAY.nfing,j++ do
+      for i=0,i<2,i++ do
+        if Pressed (hhead[j*2+i]) then
+          if head>=0 then
+            change hhead[head] color=BLACK
+            change hhead[head] bkcolor=GRAY
+          endif
+          if Status(hview1)!=0 || $LAY.side[head/2]!=$LAY.side[j] then
+            longmove=1
+          else if $LAY.side[j]==0 && head/4!=j/2 then
+            longmove=1
+          else if $LAY.side[j]!=0 &&                                           \
+            (head-$LAY.nfing)/4!=(j-$LAY.nfing/2)/2 then
+            longmove=1
+          endif
+          head=j*2+i
+          change hhead[head] color=LIGHTRED
+          change hhead[head] bkcolor=YELLOW
+          change hz select=zoffset[head]
+          videochanged=1
+          headchanged=1
+          shiftx=0.0; shifty=0.0
+        endif
+      enddo
+    enddo
+    if Pressed(hview1) then
+      videochanged=1
+      headchanged=1
+      longmove=1
+    else if Pressed(hview4) then
+      videochanged=1
+      headchanged=1
+      longmove=1
+    else if Pressed(hup) then
+      shifty=Min(5.0,shifty+0.1)
+      headchanged=1
+    else if Pressed(hl) then
+      shiftx=Max(-5.0,shiftx-0.1)
+      headchanged=1
+    else if Pressed(hr) then
+      shiftx=Min(5.0,shiftx+0.1)
+      headchanged=1
+    else if Pressed(hdn) then
+      shifty=Max(-5.0,shifty-0.1)
+      headchanged=1
+    else if Pressed(hz) && head>=0 then
+      zoffset[head]=Status(hz)
+      zchanged=1
+    else if Pressed(hbrightness) then
+      videochanged=1
+    else if Pressed(hcontrast) then
+      videochanged=1
+    else if Pressed(hzoom) then
+      videochanged=1
+    else if Pressed(hgrid) then
+      videochanged=1
+    else if Pressed(hiexp) then
+      videochanged=1
+    else if Pressed(hskew) then
+      headchanged=1
+      videochanged=1
+    else if Pressed(hbmp) then
+      i=SYS.Browse(hmain,bmpname,"Select file to save bitmap",0)
+      if i!=0 then
+        f=Fopen(bmpname,"wb")
+        SYS.Writebmp(hvideo,0,0,DX,DY,f,0)
+        Fclose(f)
+      endif
+    else if Pressed(hexit) then
+      break
+    endif
+    // Select reference point.
+    view4=Status(hview4)
+    posx=$LAY.xoffset/1000.0
+    if head>=0 then
+      if view4 then
+        base=head & 0xFC               // Base head of 4-group
+        if $LAY.side[head/2]==0 then
+          if base+4>$LAY.nfing base=base-2
+          if base<0 base=0
+        else
+          if base+4>$LAY.nfing*2 base=base-2
+          if base<$LAY.nfing base=$LAY.nfing
+        endif
+        posy=$LAY.top[base/2]/1000.0
+      else
+        base=head & 0xFE               // Base head of 1-group
+        posy=$LAY.yoffset[head/2]/1000.0
+      endif
+    else
+      base=0
+      posy=$LAY.yoffset[0]/1000.0
+    endif
+    // Check if requested to change video parameters.
+    if videochanged || (headcams && headchanged) then
+      // Select camera on opposite side.
+      if head<0 then
+        camhead=Camerafromyside(0.0,0,&channel,&angle)
+      else
+        camhead=Camerafromyside(posy+shifty,                                   \
+        $LAY.side[head/2]==1?0:1,&channel,&angle)
+      endif
+      if camhead<0 then
+        videochanged=0
+        headchanged=0
+        continue
+      endif
+      zoom=(Status(hzoom)?2.0:1.0)
+      if headcams then
+        scalex=8.5; scaley=8.5         // um per pixel
+        sprintf(s,"Headcam scale[%i]",camhead)
+        getini("System",s,"%f,%f",&scalex,&scaley)
+      else
+        scalex=6.5; scaley=6.5         // mm per 512 pixels
+        sprintf(s,"Video scale[%i]",channel)
+        getini("System",s,"%f,%f",&scalex,&scaley)
+        scalex=scalex*1000.0/512.0     // Convert to micrometers per pixel
+        scaley=scaley*1000.0/512.0
+      endif
+      draw window=hvideo bkcolor=VIDEOFILL clear
+      if Status(hgrid) then
+        draw color=LIGHTRED font=SMALLFONT mode=M_CENTERED
+        for i=-40,i<=40,i++ do
+          x=DX/2+100.0*i*zoom/scalex+0.5
+          if i%10==0 then
+            draw at x,DY/2-8 to x,DY/2+9
+            if i!=0 draw at x+1,DY/2-9 text=format("%i",Abs(i/10))
+          else if Abs(i%10)==5 then
+            draw at x,DY/2-6 to x,DY/2+7
+          else
+            draw at x,DY/2-2 to x,DY/2+3
+          endif
+        enddo
+        draw mode=M_LEFT
+        for i=-40,i<=40,i++ do
+          y=DY/2+100.0*i*zoom/scaley+0.5
+          if i%10==0 then
+            draw at DX/2-8,y to DX/2+9,y
+            if i!=0 draw at DX/2+10,y+7 text=format("%i",Abs(i/10))
+          else if Abs(i%10)==5 then
+            draw at DX/2-6,y to DX/2+7,y
+          else
+            draw at DX/2-2,y to DX/2+3,y
+          endif
+        enddo
+        for i=-5,i<=5,i++ do
+          x=DX/2+1000.0*i*zoom/scalex
+          if i==0 continue
+          for j=-5,j<=5,j++ do
+            y=DY/2+1000.0*j*zoom/scaley
+            if j==0 continue
+            draw at x-5,y to x+6,y
+            draw at x,y-5 to x,y+6
+          enddo
+        enddo
+      endif
+      if head>=0 then
+        view4=Status(hview4)
+        if view4 then
+          draw color=LIGHTRED font=MEDIUMFONT mode=M_CENTERED
+          base=head & 0xFC             // Base head of 4-group
+          if $LAY.side[head/2]==0 then
+            if base+4>$LAY.nfing base=base-2
+            if base<0 base=0
+          else
+            if base+4>$LAY.nfing*2 base=base-2
+            if base<$LAY.nfing base=$LAY.nfing
+          endif
+          for i=0,i<4,i++ do
+            j=base+($LAY.side[head/2]==0?i^1:i)
+            x=((i & 1)==0?20:DX-20)
+            y=((i & 2)==0?DY-8:27)
+            draw at x,y text=format("%i%c",j/2,(j & 1)==0?'L':'R')
+          enddo
+        else
+          draw color=LIGHTRED font=MEDIUMFONT mode=M_LEFT
+          draw at DX/2+5,25 text=format("%i%c",head/2,(head & 1)==0?'L':'R')
+        endif
+      endif
+      SYS.Videoangle(hvideo,channel,0,zoom,                                    \
+        Status(hbrightness),Status(hcontrast),                                 \
+        2 | (Status(hiexp)?4:0),angle)
+      draw show
+      videochanged=0
+    endif
+    // Check if requested to view another needle.
+    if headchanged && head>=0 then
+      // Move ALL fingers into the upmost position if long movement!
+      if longmove then
+        for i=0,i<$LAY.nfing*2,i++ do
+          sprintf(s,"OUTPORT %i,0",0x8008+(i/2)*256+(i & 1))
+          SERV.Cmdimm(i,s)
+        enddo
+        // Now wait for answers. For security reasons, there is no timeout.
+        while (1) do
+          for i=0,i<$LAY.nfing*2,i++ do
+            if $A[i].length==0 break
+          enddo
+          if i>=$LAY.nfing*2 break
+          wait
+        enddo
+        delay 250                      // Let fingers to move up
+        longmove=0
+      endif
+      // Move heads to requested point.
+      if headcams then
+        camhead=Camerafromyside(posy+shifty,                                   \
+        $LAY.side[head/2]==1?0:1,&channel,&angle)
+      else
+        camhead=-1
+      endif
+      for i=0,i<$LAY.nfing*2,i++ do
+        if headcams==0 && $LAY.side[i/2]!=$LAY.side[head/2] continue
+        if view4!=0 && i>=base && i<base+4 then
+          sprintf(s,"M %i(%g,%gH99) NOP",i,                                    \
+          posx+((i & 1)==0?(-DELTA/2.0):DELTA/2.0),                            \
+          posy+(((i-base) & 2)==0?(-DELTA/2.0):DELTA/2.0))
+        else if view4==0 && i==head then
+          sprintf(s,"M %i(%g,%gH99) NOP",i,posx,posy)
+        else if i!=camhead then
+          sprintf(s,"M %i(Z) NOP",i)
+        endif
+        SERV.Cmdimm(i,s)
+      enddo
+      // Move video camera to requested point.
+      if headcams then
+        SERV.Cmdimm(33,"OUTPORT32 ALL 0x80000002,0")
+        sprintf(s,"OUTPORT32 HEAD(%i) 0x80000002,%i",                          \
+          camhead,7 | (Status(hskew)==0?0:8))
+        SERV.Cmdimm(33,s)
+        sprintf(s,"M @%i[%g,%g] NOP",camhead,posx+shiftx,posy+shifty)
+      else
+        sprintf(s,"M %i(%g,%g) NOP",$LAY.nfing*2+($LAY.side[head/2]==0?1:0),   \
+        posx+shiftx,posy+shifty)
+      endif
+      SERV.Cmdimm($LAY.nfing*2,s)
+      // Now wait for answers. For security reasons, there is no timeout.
+      while (1) do
+        for i=0,i<$LAY.nfing*2,i++ do
+          if $LAY.side[i/2]!=$LAY.side[head/2] continue
+          if $A[i].length==0 break
+        enddo
+        if i<$LAY.nfing*2 continue     // Some head answers are still not here
+        if $A[$LAY.nfing*2].length!=0 break
+        wait
+      enddo
+      zchanged=1
+      headchanged=0
+    endif
+    // Check if requested to change or renew Z coordinate of selected finger.
+    if head>=0 && (zchanged!=0 || Time()>tzchanged+2000) then
+      view4=Status(hview4)
+      if view4 then
+        base=head & 0xFC               // Base head of 4-group
+        if $LAY.side[head/2]==0 then
+          if base+4>$LAY.nfing base=base-2
+          if base<0 base=0
+        else
+          if base+4>$LAY.nfing*2 base=base-2
+          if base<$LAY.nfing base=$LAY.nfing
+        endif
+        for i=base,i<base+4,i++ do
+          if $LAY.side[i/2]!=$LAY.side[head/2] continue
+          sprintf(s,"OUTPORT %i,%i",                                           \
+            0x8008+(i/2)*256+(i & 1),90+zoffset[i])
+          SERV.Cmdimm(32,s)
+        enddo
+      else
+        sprintf(s,"OUTPORT %i,%i",                                             \
+          0x8008+(head/2)*256+(head & 1),90+zoffset[head])
+        SERV.Cmdimm(32,s)
+      endif
+      sprintf(s,"OUTPORT %i,%i",0x2004+($LAY.side[head/2]==1?0:1),1)
+      SERV.Cmdimm(32,s)
+      zchanged=0
+      tzchanged=Time()
+    endif
+    wait
+  enddo
+  // Save Z offsets to .ini file.
+  for i=0,i<$LAY.nfing*2,i++ do
+    sprintf(s,"Z offset[%i]",i)
+    setini("Needles",s,"%i",zoffset[i])
+  enddo
+  SYS.Softreset(0)
+end
+

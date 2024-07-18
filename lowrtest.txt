@@ -1,0 +1,29 @@
+
+                L O W   R E S I S T A N C E  M E A S U R E M E N T S
+
+                                  Version 19.02
+
+      Tester type:        A7/8
+      Crate controller:   Crate controller v05.06.14 29.10.21 DEVELOPMENT
+                          AutoMon,DateTime,LMBug,CycleMiss
+      Layout:             GKHC7M23B0009
+      Head controller:    Head controller v05.00.31 28.10.21
+                          RdCorr,ZSurf,OverPr,NoCrash
+      Probes:             Soft Kelvin
+      Test tool:          Combo R-C board
+      Start on:           Thu 09-Mar-2023 17:13
+      Tester temperature: 22.0 C
+
+      Calibrated resistances:
+      ÄÚ¶Ì                0.000000 Ohm
+      10 mOhm             0.010000 Ohm
+      0.1 Ohm             0.100000 Ohm
+      1 Ohm               1.000000 Ohm
+      10 Ohm              10.00000 Ohm
+
+-----------------------------------------------------------------------------
+
+      Resistance of connecting lines:
+      Wire resistance     0.003432 Ohm
+
+      Finished on:        Thu 09-Mar-2023 17:16

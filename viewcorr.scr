@@ -1,0 +1,1457 @@
+#include "ls.icl"                  // System definitions and functions
+#multinst
+
+#define VERSION        "1.06"
+#define DESCRIPTION    "Correction file viewer"
+
+// 1.01: Compensation of shift and rotation.
+// 1.02: Option to shift corrections.
+// 1.03: Support for optional corrections (3-D, etc.).
+// 1.04: Variable Y step of S3 video corrections.
+// 1.05: Full rewrite, cartesian corrections; fine and editing are removed.
+// 1.06: Show surface of the calibration board.
+
+#define GRAPHX         600             // Width of graph window, with border
+#define GRAPHY         500             // Height of graph window, with border
+#define RIGHTX         140             // Width of right pane
+#define LISTX          190             // Additional X space for list
+#define DELTA          5               // Distance between graphical elements
+
+#define NHEAD          32              // Max number of heads
+
+// Legacy correction grid
+#define CORRX          31              // Number of legacy points along X
+#define CORRY          19              // Number of legacy points along Y
+#define CORXY          589             // CORRX*CORRY
+#define CENTERX        15              // (CORRX/2)
+#define CENTERY        9               // (CORRY/2)
+
+// Cartesian grid currently used by calibration script.
+#define GRIDX          125             // Number of cartesian points along X
+#define GRIDY          41              // Number of cartesian points along Y
+#define GRIDXY         5125            // GRIDX*GRIDY
+#define GRIDCX         62              // (GRIDX/2)
+#define GRIDCY         20              // (GRIDY/2)
+
+#define CE_VALID       0x0000001       // Correction extention valid
+#define CE_QUICK       0x0000002       // Quick head adjustment is allowed
+#define CE_HEADCAM     0x0000010       // Head camera corrections are valid
+#define CE_FINE        0x0000020       // Fine head corrections are valid
+#define CE_VALIDHCAM   (CE_VALID|CE_HEADCAM)
+#define CE_VALIDFINE   (CE_VALID|CE_FINE)
+
+#define CSY_VALID      0x00000001      // Structure t_csy is valid
+
+#define NSCALE         12              // Number of available scales
+
+float            scales[NSCALE] = {  \ // Scales, pixels/mm
+  1.0000, 2.0000, 5.0000, 10.000,    \
+  20.000, 50.000, 100.00, 200.00,    \
+  500.00, 1000.0, 2000.0, 5000.0 }
+
+typedef struct t_corr
+  // Validity markers.
+  int            mode                  // Set of CE_xxx
+  int            caldate               // Date of last calibration from layout
+  int            headok                // Head corrections present
+  int            cartok                // Cartesian corrs (left/only) present
+  int            car2ok                // Cartesian corrs (right) present
+  int            hcamok                // Head camera corrections present
+  int            ccamok                // Cartesian headcam corrections present
+  // Properties of cartesian corrections.
+  int            cartx0                // First cartesian column, center-based
+  int            cartnx                // No. of columns in cartesian corrs
+  int            carty0                // First cartesian row, center-based
+  int            cartny                // No. of rows in cartesian corrections
+  int            cartdistx             // Distance between columns, um
+  int            cartdisty             // Distance between rows, um
+  // Corrections.
+  int            headdx[CORRX,CORRY]   // X head correction, um
+  int            headdy[CORRX,CORRY]   // Y head correction, um
+  float          cartdx[GRIDX,GRIDY]   // Cartesian X head corrs (left), um
+  float          cartdy[GRIDX,GRIDY]   // Cartesian Y head corrs (left), um
+  float          car2dx[GRIDX,GRIDY]   // Cartesian X head corrs (right), um
+  float          car2dy[GRIDX,GRIDY]   // Cartesian Y head corrs (right), um
+  int            hcamdx[CORRX,CORRY]   // X head camera correction, um
+  int            hcamdy[CORRX,CORRY]   // Y head camera correction, um
+  float          ccamdx[GRIDX,GRIDY]   // Cartesian X headcam correction, um
+  float          ccamdy[GRIDX,GRIDY]   // Cartesian Y headcam correction, um
+ends
+
+typedef struct t_cext                  // Extention of correction table
+  int            mode                  // Set of CE_xxx
+  $int2          caldate               // Date of last calibration from layout
+  $int2          corrcount             // Number of remaining quick corrections
+  $int4          optdata[4]            // Offsets of optional corrections
+  // Attention, fine corrections are obsolete! Use cartesian instead!
+  $int4          finehead              // Offset of fine head corrections or 0
+  $int2          finex0                // First col of fine corr, center-based
+  $int2          finenx                // No. of columns in fine head corrs
+  $int2          finey0                // First row of fcorr, center-based
+  $int2          fineny                // No. of rows in fine head corrections
+  $int2          finedx                // Distance between fine head columns, um
+  $int2          finedy                // Distance between fine head rows, um
+  // Cartesian corrections are described here.
+  $int4          carthead              // Offset of cartesian head corrs or 0
+  $int4          carthcam              // Offset of cartesian headcam corrs or 0
+  $int2          cartx0                // First column of cartcorr, center-based
+  $int2          cartnx                // No. of columns in cartesian corrs
+  $int2          carty0                // First row of cartcorr, center-based
+  $int2          cartny                // No. of rows in cartesian corrections
+  $int2          cartdx                // Distance between cartesian columns, um
+  $int2          cartdy                // Distance between cartesian rows, um
+  $int4          carthead2             // Offset of corrs for right shuttle or 0
+  // Reserved data is reserved.
+  char           reserved[192]         // Reserved for the future
+ends
+
+// Type of optional corrections.
+#define COPT_IGNORE    0x00000000      // Block must be ignored
+#define COPT_3D        0x00004433      // 3-D position of calibration board
+
+typedef struct t_copt                  // Optional corrections, general layout
+  $int4          key                   // One of COPT_xxx
+  char           reserved[252]         // Total size 256 bytes
+ends
+
+typedef struct t_3dcorr                // 3-D position of calibration board
+  $int4 key                            // 0x00004433: 3-D board position
+  $int4 date                           // Date of calibration
+  $int4 mode                           // 0x0000001: 3-D data valid
+  $float4 zcenter                      // Z of central point, um
+  $float4 zfactorx                     // Z tilt of calibration board in X
+  $float4 zfactory                     // Z tilt of calibration board in Y
+  char  reserved[232]                  // Total size 256 bytes
+ends
+
+typedef struct t_csy                   // Header of corrsy.cor
+  int   mode                           // Set of CSY_xxx
+  $int2 caldate                        // Date of last calibration from layout
+  $int2 mbz                            // Reserved for the future, must be 0
+  int   shycor0                        // Offset of t_shycor (left/only) or 0
+  int   shycor1                        // Offset of t_shycor for right shuttle
+  char  reserved[240]                  // Reserved for the future
+ends
+
+typedef struct t_shycor                // Shuttle Y corrections
+  int   key                            // 0x00594853 (L) or 0x00595253 (R)
+  $float4 ystep                        // Distance between points in Y, um
+  int   ny                             // No. of steps, total ny*2+1 points
+  $float4 data[243]                    // X corr, Y corr (um), angle (rad)
+ends
+
+typedef struct t_layout $LAY           // Create compatible layout type
+typedef struct t_extlay $EXTLAY        // Create compatible layout type
+
+struct t_corr    c[NHEAD]              // Currently active correction data
+struct t_corr    raw[NHEAD]            // Raw correction data
+struct t_corr    shr[NHEAD]            // Shifted and rotated correction data
+struct t_cext    cext[NHEAD]           // Extended data
+struct t_copt    copt[NHEAD,4]         // Optional corrections
+struct t_csy     csy                   // Descriptor of shuttle Y corrections
+struct t_shycor  shycor[2]             // Shuttle Y corrections, left/right
+
+handle           hmain                 // Main window
+handle           hcorrname             // Correction file selection
+handle           hgraph                // Viewer
+handle           hinfo                 // Info/error viewer
+handle           hlist                 // Row/column viewer
+handle           hbrowse               // File prototype selector
+handle           hexit                 // Close button
+
+handle           hscale                // Scale
+handle           hscscr                // Scale scroll
+handle           hcompensate           // Compensate for shift and rotation
+handle           hlistx                // List horizontal line
+handle           hlisty                // List vertical line
+handle           hsurface              // Show calibration board surface
+
+handle           hhead[NHEAD]          // Head selection buttons
+handle           hcart[NHEAD]          // Cartesian head (left/only)
+handle           hcar2[NHEAD]          // Cartesian head (right)
+handle           hhcam[NHEAD]          // Head camera selection buttons
+handle           hccam[NHEAD]          // Cartesian headcam selection buttons
+handle           hshyc[2]              // Shuttle Y corrections (left/right)
+
+char             *buf                  // General-purpose buffer
+
+struct t_layout  l                     // Copy of layout
+struct t_extlay  lx                    // Copy of layout extension
+int              lvalid                // Whether this copy is valid
+float            headxdist,headydist   // Grid of head correction data, mm
+float            camxdist,camydist     // Grid of camera correction data, mm
+char             testername[64]        // Tester description
+
+int              selectedhead          // Selected legacy head corr or -1
+int              selectedcart          // Selected cartesian head corr or -1
+int              selectedcar2          // Selected right cartesian head or -1
+int              selectedhcam          // Selected legacy headcam corr or -1
+int              selectedccam          // Selected cartesian headcam corr or -1
+int              selectedshyc          // Selected shuttle (0,1) or -1
+
+int              scaleindex            // Index of currently selected scale
+int              pointx                // Selected X point
+int              pointy                // Selected Y point
+int              refvalid              // Whether refx, refy valid
+int              refx                  // Selected X reference
+int              refy                  // Selected Y reference
+int              redraw                // Drawing requested
+int              list                  // 0: none, 1: X, 2: Y
+
+// Grid nodes on the screen have pixel coordinates:
+//   Xpixel=basex+center_based_node_index_X*stepx
+//   Ypixel=basey-center_based_node_index_Y*stepy
+float            basex,stepx           // X grid
+float            basey,stepy           // Y grid
+float            distx,disty           // Actual grid steps, mm per step
+
+// Redraws graph window.
+function int Redraw()
+  int i,j,k,k0,m,n,ny,head,mode,di,dj
+  float xsize,ysize,scale,scalex,scaley,x,y,x0,y0,fi0,x1,y1,fi1,dx,dy,a,da
+  float d,cx[200],cy[200],coord[200],linx[200],liny[200]
+  char s[128]
+  struct t_3dcorr surface
+  draw window=hgraph bkcolor=WHITE clear
+  if selectedhead<0 && selectedcart<0 && selectedcar2<0 &&                     \
+    selectedhcam<0 && selectedccam<0 && selectedshyc<0 then
+    // Nothing to draw.
+    draw show
+    draw window=hlist bkcolor=WHITE clear show
+    return
+  endif
+  // Draw header.
+  if selectedhead>=0 then
+    head=selectedhead
+    mode=0
+    n=sprintf(s,"Head")
+  else if selectedcart>=0 then
+    head=selectedcart
+    mode=1
+    if c[head].car2ok==0 then
+      n=sprintf(s,"Cartesian")
+    else
+      n=sprintf(s,"Cartesian (left shuttle)")
+    endif
+  else if selectedcar2>=0 then
+    head=selectedcar2
+    mode=2
+    n=sprintf(s,"Cartesian (right shuttle)")
+  else if selectedhcam>=0 then
+    head=selectedhcam
+    mode=3
+    n=sprintf(s,"Head camera")
+  else if selectedccam>=0 then
+    head=selectedccam
+    mode=4
+    n=sprintf(s,"Cartesian head camera")
+  else if selectedshyc>=0 then
+    head=selectedshyc
+    mode=5
+    n=sprintf(s,"Shuttle Y")
+  else
+    draw show
+    return
+  endif
+  draw at 10,20 color=DARKGRAY font=MEDIUMFONT mode=M_LEFT
+  if mode==5 then
+    draw text=format("%s %s",s,head==0?"left":"right")
+    if csy.caldate!=0 then
+      Strtime(s,"Calibrated on %d-%b-%Y",2,csy.caldate)
+      draw mode=M_LEFT at GRAPHX/2-25,20 text=s
+    endif
+  else
+    draw text=format("%s %i%c",s,head/2,head & 1?'R':'L')
+    if c[head].caldate!=0 then
+      Strtime(s,"Calibrated on %d-%b-%Y",2,c[head].caldate)
+      draw mode=M_LEFT at GRAPHX/2-25,20 text=s
+    endif
+  endif
+  if lvalid then
+    draw mode=M_RIGHT at GRAPHX-10,20 text=testername
+  endif
+  // Calculate grid size in millimeters.
+  if mode==0 || mode==3 then
+    // Legacy corrections.
+    if lvalid && head>=l.nfing*2 then  // Dedicated camera
+      distx=camxdist
+      disty=camydist
+    else                               // Head
+      distx=headxdist
+      disty=headydist
+    endif
+  else if mode==5 then
+    // Shuttle Y corrections.
+    distx=0.0
+    disty=shycor[head].ystep/1000.0
+  else
+    // Cartesian corrections.
+    distx=c[head].cartdistx/1000.0
+    disty=c[head].cartdisty/1000.0
+  endif
+  draw at 10,40 color=DARKGRAY font=MEDIUMFONT mode=M_LEFT
+  if mode==5 then
+    draw text=format("Y step=%.5g mm",disty)
+  else
+    draw text=format("Grid size X=%.5g, Y=%.5g mm",distx,disty)
+  endif
+  // Center of the correction grid coincides with the center of the window.
+  basex=GRAPHX/2.0
+  basey=GRAPHY/2.0
+  // Now the ways for X-Y and shuttle Y corrections diverge.
+  if mode==5 then
+    ny=shycor[head].ny
+    disty=shycor[head].ystep/1000.0
+    ysize=disty*ny*2
+    scaley=GRAPHY/(ysize+1.0)*0.6      // Screen pixel per mm of tester
+    stepx=scaley*disty                 // Screen pixel per grid step
+    stepy=scaley*disty
+    // Draw ideal grid.
+    draw color=GRAY
+    draw at basex,basey-ny*stepy-10
+    draw to basex,basey+ny*stepy+11
+    for i=-ny,i<=ny,i++ do
+      draw at basex-10,basey+i*stepy
+      draw to basex+11,basey+i*stepy
+    enddo
+    // Highlight central cross.
+    draw color=LIGHTRED
+    draw at basex-5,basey to basex+6,basey
+    draw at basex,basey-5 to basex,basey+6
+    // Highlight selected and reference points.
+    if refvalid then
+      draw color=GREEN bkcolor=LIGHTGREEN
+      draw at basex,basey+refy*stepy fillellipse 11,11
+    endif
+    draw color=RED bkcolor=PINK
+    draw at basex,basey+pointy*stepy fillellipse 11,11
+    // Draw coordinates as text.
+    y=pointy*disty
+    draw color=DARKGRAY font=MEDIUMFONT mode=M_RIGHT
+    draw at 80,GRAPHY-25 text="ShY="
+    draw color=BLACK
+    draw at 145,GRAPHY-25 text=format("%6.1f",y)
+    if refvalid then
+      y=(pointy-refy)*disty
+      draw color=DARKGRAY font=MEDIUMFONT mode=M_RIGHT
+      draw at 80,GRAPHY-5 text="dY="
+      draw color=GREEN
+      draw at 145,GRAPHY-5 text=format("%6.1f",y)
+    endif
+    // Draw corrections as text.
+    x0=shycor[head].data[(pointy+ny)*3+0]
+    y0=shycor[head].data[(pointy+ny)*3+1]
+    fi0=shycor[head].data[(pointy+ny)*3+2]*180.0/3.14159265359
+    if refvalid then
+      x1=shycor[head].data[(refy+ny)*3+0]
+      y1=shycor[head].data[(refy+ny)*3+1]
+      fi1=shycor[head].data[(refy+ny)*3+2]*180.0/3.14159265359
+    endif
+    draw color=DARKGRAY font=MEDIUMFONT mode=M_RIGHT
+    draw at 250,GRAPHY-25 text="CX="
+    draw at 350,GRAPHY-25 text="CY="
+    draw at 470,GRAPHY-25 text="um,  A="
+    draw at 580,GRAPHY-25 text="deg"
+    draw color=BLACK
+    draw at 300,GRAPHY-25 text=format("%6.1f",x0)
+    draw at 400,GRAPHY-25 text=format("%6.1f",y0)
+    draw at 540,GRAPHY-25 text=format("%8.5f",fi0)
+    if refvalid then
+      draw color=DARKGRAY font=MEDIUMFONT mode=M_RIGHT
+      draw at 250,GRAPHY-5 text="DX="
+      draw at 350,GRAPHY-5 text="DY="
+      draw at 470,GRAPHY-5 text="um,  A="
+      draw at 580,GRAPHY-5 text="deg"
+      draw color=GREEN
+      draw at 300,GRAPHY-5 text=format("%6.1f",x0-x1)
+      draw at 400,GRAPHY-5 text=format("%6.1f",y0-x1)
+      draw at 540,GRAPHY-5 text=format("%8.5f",fi0-fi1)
+    endif
+    // Draw corrections, hedgehog-style.
+    scale=scales[scaleindex]/1000.0    // Pixels/um
+    draw color=BLACK
+    for i=-ny,i<=ny,i++ do
+      y=basey+i*stepy
+      dx=shycor[head].data[(i+ny)*3+0]
+      dy=shycor[head].data[(i+ny)*3+1]
+      draw at basex,y
+      draw to basex+dx*scale,y-dy*scale
+    enddo
+  else
+    // X-Y corrections. Calculate scales. They must be sufficient to display
+    // both legacy and cartesian corrections in the same scale.
+    if lvalid && head>=l.nfing*2 then  // Dedicated camera
+      xsize=camxdist*(CORRX-1)
+      ysize=camydist*(CORRY-1)
+    else                               // Head
+      xsize=headxdist*(CORRX-1)
+      ysize=headydist*(CORRY-1)
+    endif
+    if (c[head].cartok || c[head].ccamok) && c[head].cartdistx<25000 then
+      xsize=Max(xsize,c[head].cartdistx/1000.0*(GRIDX-1))
+      ysize=Max(ysize,c[head].cartdisty/1000.0*(GRIDY-1))
+    endif
+    scalex=GRAPHX/(xsize+1.0)*0.8      // Screen pixel per mm of tester
+    scaley=GRAPHY/(ysize+1.0)*0.6
+    stepx=scalex*distx                 // Screen pixel per grid step
+    stepy=scaley*disty
+    // Draw ideal grid.
+    draw color=GRAY
+    if mode==0 || mode==3 then
+      for i=-CENTERX,i<=CENTERX,i++ do
+        draw at basex+i*stepx,basey-CENTERY*stepy
+        draw to basex+i*stepx,basey+CENTERY*stepy
+      enddo
+      for j=-CENTERY,j<=CENTERY,j++ do
+        draw at basex-CENTERX*stepx,basey+j*stepy
+        draw to basex+CENTERX*stepx,basey+j*stepy
+      enddo
+    else
+      for i=-GRIDCX,i<=GRIDCX,i++ do
+        draw at basex+i*stepx,basey-GRIDCY*stepy
+        draw to basex+i*stepx,basey+GRIDCY*stepy
+      enddo
+      for j=-GRIDCY,j<=GRIDCY,j++ do
+        draw at basex-GRIDCX*stepx,basey-j*stepy
+        draw to basex+GRIDCX*stepx,basey-j*stepy
+      enddo
+    endif
+    // Draw rail limits.
+    if lvalid then
+      draw color=LIGHTRED
+      x0=(l.leftlimit-l.xoffset)/1000.0
+      x1=(l.rightlimit-l.xoffset)/1000.0
+      y0=(l.bottom[head/2]-l.yoffset[head/2])/1000.0
+      y1=(l.top[head/2]-l.yoffset[head/2])/1000.0
+      draw at basex+x0*scalex,basey-y0*scaley
+      draw to basex+x1*scalex,basey-y0*scaley
+      draw to basex+x1*scalex,basey-y1*scaley
+      draw to basex+x0*scalex,basey-y1*scaley
+      draw to basex+x0*scalex,basey-y0*scaley
+    endif
+    // Highlight central cross.
+    draw color=LIGHTRED
+    draw at basex-stepx/2,basey to basex+stepx/2+1,basey
+    draw at basex,basey-stepy/2 to basex,basey+stepy/2+1
+    // Highlight selected and reference points.
+    if refvalid then
+      x=basex+refx*stepx
+      y=basey-refy*stepy
+      draw color=GREEN bkcolor=LIGHTGREEN
+      draw at x,y to basex+pointx*stepx,basey-pointy*stepy
+      draw at x,y fillellipse stepx*0.7,stepx*0.7
+    endif
+    x=basex+pointx*stepx
+    y=basey-pointy*stepy
+    draw color=RED bkcolor=PINK
+    draw at x,y fillellipse stepx*0.7,stepx*0.7
+    // Draw coordinates as text.
+    x=pointx*distx
+    y=pointy*disty
+    if lvalid then
+      x=x+l.xoffset/1000.0
+      y=y+l.yoffset[head/2]/1000.0
+    endif
+    draw color=DARKGRAY font=MEDIUMFONT mode=M_RIGHT
+    draw at 80,GRAPHY-25 text="X="
+    draw at 180,GRAPHY-25 text="Y="
+    draw at 280,GRAPHY-25 text="mm"
+    draw color=BLACK
+    draw at 145,GRAPHY-25 text=format("%6.1f",x)
+    draw at 245,GRAPHY-25 text=format("%6.1f",y)
+    if refvalid then
+      x=(pointx-refx)*distx
+      y=(pointy-refy)*disty
+      draw color=DARKGRAY font=MEDIUMFONT mode=M_RIGHT
+      draw at 80,GRAPHY-5 text="dX="
+      draw at 180,GRAPHY-5 text="dY="
+      draw at 280,GRAPHY-5 text="mm"
+      draw color=GREEN
+      draw at 145,GRAPHY-5 text=format("%6.1f",x)
+      draw at 245,GRAPHY-5 text=format("%6.1f",y)
+    endif
+    // Draw corrections as text.
+    if mode==0 then
+      x0=c[head].headdx[pointx+CENTERX,pointy+CENTERY]
+      y0=c[head].headdy[pointx+CENTERX,pointy+CENTERY]
+      if refvalid then
+        x1=c[head].headdx[refx+CENTERX,refy+CENTERY]
+        y1=c[head].headdy[refx+CENTERX,refy+CENTERY]
+      endif
+    else if mode==1 then
+      x0=c[head].cartdx[pointx+GRIDCX,pointy+GRIDCY]
+      y0=c[head].cartdy[pointx+GRIDCX,pointy+GRIDCY]
+      if refvalid then
+        x1=c[head].cartdx[refx+GRIDCX,refy+GRIDCY]
+        y1=c[head].cartdy[refx+GRIDCX,refy+GRIDCY]
+      endif
+    else if mode==2 then
+      x0=c[head].car2dx[pointx+GRIDCX,pointy+GRIDCY]
+      y0=c[head].car2dy[pointx+GRIDCX,pointy+GRIDCY]
+      if refvalid then
+        x1=c[head].car2dx[refx+GRIDCX,refy+GRIDCY]
+        y1=c[head].car2dy[refx+GRIDCX,refy+GRIDCY]
+      endif
+    else if mode==3 then
+      x0=c[head].hcamdx[pointx+CENTERX,pointy+CENTERY]
+      y0=c[head].hcamdy[pointx+CENTERX,pointy+CENTERY]
+      if refvalid then
+        x1=c[head].hcamdx[refx+CENTERX,refy+CENTERY]
+        y1=c[head].hcamdy[refx+CENTERX,refy+CENTERY]
+      endif
+    else
+      x0=c[head].ccamdx[pointx+GRIDCX,pointy+GRIDCY]
+      y0=c[head].ccamdy[pointx+GRIDCX,pointy+GRIDCY]
+      if refvalid then
+        x1=c[head].ccamdx[refx+GRIDCX,refy+GRIDCY]
+        y1=c[head].ccamdy[refx+GRIDCX,refy+GRIDCY]
+      endif
+    endif
+    draw color=DARKGRAY font=MEDIUMFONT mode=M_RIGHT
+    draw at 370,GRAPHY-25 text="CX="
+    draw at 480,GRAPHY-25 text="CY="
+    draw at 580,GRAPHY-25 text="um"
+    draw color=BLACK
+    draw at 430,GRAPHY-25 text=format("%6.1f",x0)
+    draw at 550,GRAPHY-25 text=format("%6.1f",y0)
+    if refvalid then
+      draw color=DARKGRAY font=MEDIUMFONT mode=M_RIGHT
+      draw at 370,GRAPHY-5 text="DX="
+      draw at 480,GRAPHY-5 text="DY="
+      draw at 580,GRAPHY-5 text="um"
+      draw color=GREEN
+      draw at 430,GRAPHY-5 text=format("%6.1f",x0-x1)
+      draw at 550,GRAPHY-5 text=format("%6.1f",y0-y1)
+    endif
+    // Draw corrections, hedgehog-style.
+    scale=scales[scaleindex]/1000.0    // Pixels/um
+    draw color=BLACK
+    if mode==0 || mode==3 then
+      for i=-CENTERX,i<=CENTERX,i++ do
+        x=basex+i*stepx
+        for j=-CENTERY,j<=CENTERY,j++ do
+          y=basey-j*stepy
+          if mode==0 then
+            dx=c[head].headdx[i+CENTERX,j+CENTERY]
+            dy=c[head].headdy[i+CENTERX,j+CENTERY]
+          else
+            dx=c[head].hcamdx[i+CENTERX,j+CENTERY]
+            dy=c[head].hcamdy[i+CENTERX,j+CENTERY]
+          endif
+          draw at x,y to x+dx*scale,y-dy*scale
+        enddo
+      enddo
+    else
+      for i=-GRIDCX,i<=GRIDCX,i++ do
+        if i<c[head].cartx0 continue
+        if i>=c[head].cartx0+c[head].cartnx break
+        x=basex+i*stepx
+        for j=-GRIDCY,j<=GRIDCY,j++ do
+          if j<c[head].carty0 continue
+          if j>=c[head].carty0+c[head].cartny break
+          y=basey-j*stepy
+          if mode==1 then
+            dx=c[head].cartdx[i+GRIDCX,j+GRIDCY]
+            dy=c[head].cartdy[i+GRIDCX,j+GRIDCY]
+          else if mode==2 then
+            dx=c[head].car2dx[i+GRIDCX,j+GRIDCY]
+            dy=c[head].car2dy[i+GRIDCX,j+GRIDCY]
+          else
+            dx=c[head].ccamdx[i+GRIDCX,j+GRIDCY]
+            dy=c[head].ccamdy[i+GRIDCX,j+GRIDCY]
+          endif
+          draw at x,y to x+dx*scale,y-dy*scale
+        enddo
+      enddo
+    endif
+  endif
+  draw show
+  if list==1 || list==2 then
+    draw window=hlist bkcolor=WHITE clear
+    draw font=TERMINALFONT color=BLACK mode=M_LEFT
+    if list==1 then
+      y=pointy*disty
+      if lvalid y=y+l.yoffset[head/2]/1000.0
+      draw at 10,25 text=format("Y=%.1f mm",y)
+      draw at 10,45 text="     X        dX        dY"
+      if (mode==0 || mode==3) then
+        n=CORRX; i=-CENTERX
+      else
+        n=GRIDX; i=-GRIDCX
+      endif
+      j=pointy; di=1; dj=0; k0=pointx-i
+      a=i*distx
+      if lvalid a=a+l.xoffset/1000.0
+      da=distx
+    else
+      x=pointx*distx
+      if lvalid x=x+l.xoffset/1000.0
+      draw at 10,25 text=format("X=%.1f mm",y)
+      draw at 10,45 text="     Y        dX        dY"
+      if (mode==0 || mode==3) then
+        n=CORRY; j=-CENTERY
+      else
+        n=GRIDY; j=-GRIDCY
+      endif
+      i=pointx; di=0; dj=1; k0=pointy-j
+      a=j*disty
+      if lvalid a=a+l.yoffset[head/2]/1000.0
+      da=disty
+    endif
+    // Calculate linear regression to our data.
+    for k=0,k<n,k++ do
+      if mode==0 then
+        cx[k]=c[head].headdx[i+CENTERX,j+CENTERY]
+        cy[k]=c[head].headdy[i+CENTERX,j+CENTERY]
+      else if mode==1 then
+        cx[k]=c[head].cartdx[i+GRIDCX,j+GRIDCY]
+        cy[k]=c[head].cartdy[i+GRIDCX,j+GRIDCY]
+      else if mode==2 then
+        cx[k]=c[head].car2dx[i+GRIDCX,j+GRIDCY]
+        cy[k]=c[head].car2dy[i+GRIDCX,j+GRIDCY]
+      else if mode==3 then
+        cx[k]=c[head].hcamdx[i+CENTERX,j+CENTERY]
+        cy[k]=c[head].hcamdy[i+CENTERX,j+CENTERY]
+      else
+        cx[k]=c[head].ccamdx[i+GRIDCX,j+GRIDCY]
+        cy[k]=c[head].ccamdy[i+GRIDCX,j+GRIDCY]
+      endif
+      coord[k]=a+da*k
+      i=i+di
+      j=j+dj
+    enddo
+    d=0.0
+    SYS.Linfit(n,coord,cx,&d,n,coord,linx)
+    SYS.Linfit(n,coord,cy,&d,n,coord,liny)
+    // Display data.
+    m=60
+    for k=0,k<n,k++ do
+      if k==k0 then
+        draw color=GRAY bkcolor=LIGHTGRAY
+        draw at 0,m-11 fillrect LISTX,m+2
+        draw color=LIGHTRED
+      else
+        draw color=BLACK
+      endif
+      draw at 10,m
+      if Status(hcompensate) then
+        x0=cx[k]-linx[k]
+        y0=cy[k]-liny[k]
+      else
+        x0=cx[k]
+        y0=cy[k]
+      endif
+      draw text=format("%6.1f  %8.1f  %8.1f",coord[k],x0,y0)
+      m=m+13
+    enddo
+    draw show
+  else if list==3 then
+    draw window=hlist bkcolor=WHITE clear
+    draw font=TERMINALFONT color=BLACK mode=M_LEFT
+    for i=0,i<4,i++ do
+      if copt[head,i].key==COPT_3D break
+    enddo
+    draw at 10,25 text=format("Head %i%s",head/2,head & 1?"R":"L")
+    if i>=4 then
+      draw at 10,55 text="No surface"
+    else
+      Memcpy(surface,copt[head],256)
+      draw at 10,55 text=format("Z center = %.1f",surface.zcenter)
+      draw at 10,80 text=format("X tilt = %.3f um/mm",surface.zfactorx*1000.0)
+      draw at 10,105 text=format("Y tilt = %.3f um/mm",surface.zfactory*1000.0)
+    endif
+    draw show
+  endif
+end
+
+// Selects head (mode=0), cartesian head (mode=1), second cartesian head
+// (mode=2), head camera (mode=3) or cartesian head camera (mode=4).
+function int Selectsource(int head,int mode)
+  int i
+  selectedhead=-1
+  selectedcart=-1
+  selectedcar2=-1
+  selectedhcam=-1
+  selectedccam=-1
+  selectedshyc=-1
+  for i=0,i<NHEAD,i++ do
+    if hhead[i]!=NULL then
+      if i==head && mode==0 then
+        change hhead[i] color=LIGHTRED
+        change hhead[i] bkcolor=YELLOW
+        selectedhead=i
+      else
+        change hhead[i] color=BLACK
+        change hhead[i] bkcolor=GRAY
+      endif
+    endif
+    if hcart[i]!=NULL then
+      if i==head && mode==1 then
+        change hcart[i] color=LIGHTRED
+        change hcart[i] bkcolor=YELLOW
+        selectedcart=i
+      else
+        change hcart[i] color=BLACK
+        change hcart[i] bkcolor=LIGHTGRAY
+      endif
+    endif
+    if hcar2[i]!=NULL then
+      if i==head && mode==2 then
+        change hcar2[i] color=LIGHTRED
+        change hcar2[i] bkcolor=YELLOW
+        selectedcar2=i
+      else
+        change hcar2[i] color=BLACK
+        change hcar2[i] bkcolor=LIGHTGRAY
+      endif
+    endif
+    if hhcam[i]!=NULL then
+      if i==head && mode==3 then
+        change hhcam[i] color=LIGHTRED
+        change hhcam[i] bkcolor=YELLOW
+        selectedhcam=i
+      else
+        change hhcam[i] color=BLACK
+        change hhcam[i] bkcolor=GRAY
+      endif
+    endif
+    if hccam[i]!=NULL then
+      if i==head && mode==4 then
+        change hccam[i] color=LIGHTRED
+        change hccam[i] bkcolor=YELLOW
+        selectedccam=i
+      else
+        change hccam[i] color=BLACK
+        change hccam[i] bkcolor=LIGHTGRAY
+      endif
+    endif
+  enddo
+  for i=0,i<2,i++ do
+    if hshyc[i]!=NULL then
+      if i+32==head && mode==5 then
+        change hshyc[i] color=LIGHTRED
+        change hshyc[i] bkcolor=YELLOW
+        selectedshyc=i
+      else
+        change hshyc[i] color=BLACK
+        change hshyc[i] bkcolor=GRAY
+      endif
+    endif
+  enddo
+  pointx=0
+  pointy=0
+  refvalid=0
+  refx=0
+  refy=0
+  redraw=1
+end
+
+// Service function, rotates correction table shr[head] and, if save is 1,
+// saves corrected data back to sh. Returns sum of squares of Y corrections.
+function float Rotatecorrections(int head,float alpha,int save)
+  int i,j
+  float xdist,ydist,sum,s,c,x,y,dx,dy
+  if lvalid && head>=l.nfing*2 then
+    xdist=camxdist
+    ydist=camydist
+  else
+    xdist=headxdist
+    ydist=headydist
+  endif
+  s=Sin(alpha)
+  c=Cos(alpha)-1.0
+  sum=0.0
+  for i=0,i<CORRX,i++ do
+    x=(i-CENTERX)*xdist*1000.0
+    for j=0,j<CORRY,j++ do
+      y=(j-CENTERY)*ydist*1000.0
+      dy=shr[head].headdy[i,j]+x*s+y*c
+      sum=sum+dy*dy
+      if save then
+        dx=shr[head].headdx[i,j]+x*c-y*s
+        shr[head].headdx[i,j]=Floor(dx+0.5)
+        shr[head].headdy[i,j]=Floor(dy+0.5)
+      endif
+    enddo
+  enddo
+
+///AND ALSO ROTATE CARTESIAN CORRECTIONS!!!!!
+
+  return sum
+end
+
+// Service function, calculates x corresponding to the minimum of the parabola
+// that passes through three points (x0-step,y0), (x0,y1) and (x0+step,y2). On
+// error, returns x0.
+function float Parabint(float x0,float step,float y0,float y1,float y2)
+  float a,b
+  b=(y2-y0)/2.0
+  a=(y0+y2)/2.0-y1
+  if Abs(a)<1.0e-20 return x0
+  return x0-b*step/2.0/a
+end
+
+// Shifts head corrections and calculates best fit rotation.
+function int Shiftandrotate(int head)
+  int i,j
+  float x,y,alpha,step,y0,y1,y2
+  // Prepare data.
+  Memcpy(raw[head],c[head],Sizeof(c)/NHEAD)
+  Memcpy(shr[head],c[head],Sizeof(c)/NHEAD)
+  // Shift data.
+  x=shr[head].headdx[CENTERX,CENTERY]
+  y=shr[head].headdy[CENTERX,CENTERY]
+  for i=0,i<CORRX,i++ do
+    for j=0,j<CORRY,j++ do
+      shr[head].headdx[i,j]=shr[head].headdx[i,j]-x
+      shr[head].headdy[i,j]=shr[head].headdy[i,j]-y
+    enddo
+  enddo
+  // Calculate best fit rotation.
+  alpha=0.0
+  step=0.02
+  for i=0,i<3,i++ do
+    y1=Rotatecorrections(head,alpha,0)
+    if y1<1000.0 break                 // Already perfect compensation
+    y0=Rotatecorrections(head,alpha-step,0)
+    y2=Rotatecorrections(head,alpha+step,0)
+    alpha=Parabint(alpha,step,y0,y1,y2)
+    step=step/3.0
+  enddo
+  Rotatecorrections(head,alpha,1)
+end
+
+// Reads corrections according to the prototype and updates selection buttons.
+function int Readdata(char *prot)
+  int i,j,k,w,ic,jc,head,patch,firsthead,len,xlen,offs,x,y,dx
+  int yside,ycam,dxhead,dxcart,dxcar2,dxhcam,dxccam
+  float h,dy
+  char s[260],drv[3],dir[260],fna[260],ext[260]
+  handle f
+  // Delete old corrections and corresponding selection buttons.
+  Memset(c,0,Sizeof(c))
+  Memset(shycor,0,Sizeof(shycor))
+  for head=0,head<NHEAD,head++ do
+    if hhead[head]!=NULL then
+      destroy hhead[head]
+      hhead[head]=NULL
+    endif
+    if hcart[head]!=NULL then
+      destroy hcart[head]
+      hcart[head]=NULL
+    endif
+    if hcar2[head]!=NULL then
+      destroy hcar2[head]
+      hcar2[head]=NULL
+    endif
+    if hhcam[head]!=NULL then
+      destroy hhcam[head]
+      hhcam[head]=NULL
+    endif
+    if hccam[head]!=NULL then
+      destroy hccam[head]
+      hccam[head]=NULL
+    endif
+  enddo
+  for i=0,i<2,i++ do
+    if hshyc[i]!=NULL then
+      destroy hshyc[i]
+      hshyc[i]=NULL
+    endif
+  enddo
+  // Parse prototype.
+  Fnsplit(prot,drv,dir,fna,ext)
+  patch=Strlen(fna)-2; if (patch<0) patch=0;
+  i=Toupper(fna[patch+1])
+  if Isdigit(fna[patch])==0 || (i!='L' && i!='R') then
+    change hinfo color=LIGHTRED
+    change hinfo text="Invalid prototype name for correction files"
+    return 2
+  endif
+  // Read layout, if available.
+  Memset(l,0,Sizeof(l))
+  Memset(lx,0,Sizeof(lx))
+  lvalid=0
+  headxdist=25.0; headydist=10.0       // Safe defaults (A6)
+  camxdist=25.0; camydist=77.5
+  Fnmerge(s,drv,dir,"f_layout",".bin")
+  f=Fopen(s,"rb")
+  if f!=NULL then
+    len=Fread(l,Sizeof(l),f)
+    xlen=Fread(lx,Sizeof(lx),f)
+    Fclose(f)
+    if len==Sizeof(l) then
+      h=(l.top[0]-l.bottom[0])/1000
+      if l.software==0xB7 then
+        Strcpy(testername,"A7")
+        headxdist=25.0; headydist=17.5
+        camxdist=25.0; camydist=100.0
+        lvalid=1
+      else if (l.config & 0x00000080)!=0 then
+        Strcpy(testername,"M2")
+        headxdist=15.0; headydist=5.00
+        camxdist=15.0; camydist=22.5
+        lvalid=1
+      else if l.software==0xA9 || l.software==0xAA then
+        Strcpy(testername,"S3")
+        headxdist=25.0; headydist=10.0
+        camxdist=25.0
+        if l.cameras==0 then
+          camydist=77.5                // Pro forma setting
+        else
+          dy=Max(Abs(l.top[l.nfing]-l.yoffset[l.nfing])+6000,                  \
+            Abs(l.yoffset[l.nfing]-l.bottom[l.nfing])+6000)/9000.0
+          if dy<=19.375 then
+            camydist=19.375
+          else if dy<=38.75 then
+            camydist=38.75
+          else
+            camydist=77.5
+          endif
+        endif
+        lvalid=1
+      else if h==155.0 then
+        if l.software==0xA6 then
+          Strcpy(testername,"A6")
+        else if l.software==0xA7 then
+          Strcpy(testername,"S1")
+        else if l.software==0xA8 then
+          Strcpy(testername,"S2")
+        else
+          Strcpy(testername,"A2/A4")
+        endif
+        headxdist=25.0; headydist=10.0
+        camxdist=25.0; camydist=77.5   // Wrong for Hitachi MCM
+        lvalid=1
+      else if h==200.0 || h==225 || h==230 || h==240 then
+        if l.software==0xA5 then
+          Strcpy(testername,"A5")
+        else
+          Strcpy(testername,"A3")
+        endif
+        headxdist=25.0; headydist=12.5
+        camxdist=25.0; camydist=50.0
+        lvalid=1
+      endif
+      if lx.radius==0 then
+        if l.software==0xB7 then
+          lx.radius=180000
+        else if l.software==0x8C || l.software==0xA5 then
+          lx.radius=155000
+        else
+          lx.radius=115000
+        endif
+      endif
+      if lx.headcamradius==0 then
+        if l.software==0xB7 then
+          lx.headcamradius=183000
+        else if l.software==0x8C || l.software==0xA5 then
+          lx.headcamradius=158000
+        else if l.software==0xA7 || l.software==0xA8 then
+          lx.headcamradius=117000
+        else
+          lx.headcamradius=118000
+        endif
+      endif
+    endif
+  endif
+  // Read correction data.
+  Memset(cext,0,Sizeof(cext))
+  Memset(copt,0,Sizeof(copt))
+  firsthead=-1
+  for head=0,head<NHEAD,head++ do
+    fna[patch]=(head/2<10?head/2+'0':head/2-10+'A')
+    fna[patch+1]=(head & 1)==0?'L':'R'
+    fna[patch+2]='\0'
+    Fnmerge(s,drv,dir,fna,ext)
+    f=Fopen(s,"rb")
+    if f==NULL continue
+    len=Fread(buf,Sizeof(buf),f)
+    Fclose(f)
+    if len!=2356 && len!=2612 && len<4968 then
+      change hinfo color=LIGHTRED
+      change hinfo text=format("Invalid length of file '%s'",s)
+      continue
+    endif
+    // Read head legacy corrections. They are always present.
+    for i=0,i<CORRX,i++ do
+      for j=0,j<CORRY,j++ do
+        c[head].headdx[i,j]=$int2(buf+(i*CORRY+j)*4+0)
+        c[head].headdy[i,j]=$int2(buf+(i*CORRY+j)*4+2)
+      enddo
+    enddo
+    c[head].headok=1
+    if firsthead<0 firsthead=head
+    if len==2356 continue              // Only head legacy corrections
+    // Read extended data.
+    Memcpy(cext[head],buf+2356,256)
+    c[head].mode=cext[head].mode
+    c[head].caldate=cext[head].caldate
+    // Read head camera corrections, if any.
+    if len>=4968 && (cext[head].mode & CE_VALIDHCAM)==CE_VALIDHCAM then
+      for i=0,i<CORRX,i++ do
+        for j=0,j<CORRY,j++ do
+          c[head].hcamdx[i,j]=$int2(buf+2612+(i*CORRY+j)*4+0)
+          c[head].hcamdy[i,j]=$int2(buf+2612+(i*CORRY+j)*4+2)
+        enddo
+      enddo
+      c[head].hcamok=1
+    endif
+    // Read optional corrections, if any.
+    if (cext[head].mode & CE_VALID)!=0 then
+      for i=0,i<4,i++ do
+        if cext[head].optdata[i]==0 continue
+        Memcpy(copt[head][i],buf+cext[head].optdata[i],256)
+      enddo
+    endif
+    // Read cartesian corrections, if any.
+    if (cext[head].mode & CE_VALID)!=0 then
+      c[head].cartx0=cext[head].cartx0
+      c[head].cartnx=cext[head].cartnx
+      c[head].carty0=cext[head].carty0
+      c[head].cartny=cext[head].cartny
+      c[head].cartdistx=cext[head].cartdx
+      c[head].cartdisty=cext[head].cartdy
+      if cext[head].carthead!=0 then
+        // Cartesian head corrections (global or for left shuttle).
+        offs=cext[head].carthead
+        for i=0,i<c[head].cartnx,i++ do
+          ic=GRIDCX+c[head].cartx0+i
+          for j=0,j<c[head].cartny,j++ do
+            jc=GRIDCY+c[head].carty0+j
+            if ic>=0 && ic<GRIDX && jc>=0 && jc<GRIDY then
+              c[head].cartdx[ic,jc]=$float4(buf+offs+0)
+              c[head].cartdy[ic,jc]=$float4(buf+offs+4)
+            endif
+            offs=offs+8
+          enddo
+        enddo
+        c[head].cartok=1
+        if cext[head].carthead2!=0 then
+          // Cartesian head corrections (right shuttle).
+          offs=cext[head].carthead2
+          for i=0,i<c[head].cartnx,i++ do
+            ic=GRIDCX+c[head].cartx0+i
+            for j=0,j<c[head].cartny,j++ do
+              jc=GRIDCY+c[head].carty0+j
+              if ic>=0 && ic<GRIDX && jc>=0 && jc<GRIDY then
+                c[head].car2dx[ic,jc]=$float4(buf+offs+0)
+                c[head].car2dy[ic,jc]=$float4(buf+offs+4)
+              endif
+              offs=offs+8
+            enddo
+          enddo
+          c[head].car2ok=1
+        endif
+      endif
+      if cext[head].carthcam!=0 then
+        // Cartesian head camera corrections.
+        offs=cext[head].carthcam
+        for i=0,i<c[head].cartnx,i++ do
+          ic=GRIDCX+c[head].cartx0+i
+          for j=0,j<c[head].cartny,j++ do
+            jc=GRIDCY+c[head].carty0+j
+            if ic>=0 && ic<GRIDX && jc>=0 && jc<GRIDY then
+              c[head].ccamdx[ic,jc]=$float4(buf+offs+0)
+              c[head].ccamdy[ic,jc]=$float4(buf+offs+4)
+            endif
+            offs=offs+8
+          enddo
+        enddo
+        c[head].ccamok=1
+      endif
+    endif
+    // Shift head corrections and calculate best fit rotation.
+    Shiftandrotate(head)
+  enddo
+  // Read shuttle Y corrections, if any.
+  fna[patch]='s'
+  fna[patch+1]='y'
+  fna[patch+2]='\0'
+  Fnmerge(s,drv,dir,fna,ext)
+  f=Fopen(s,"rb")
+  if f!=NULL then
+    Memset(buf,0,Sizeof(csy))
+    len=Fread(buf,Sizeof(buf),f)
+    Fclose(f)
+    Memcpy(csy,buf,Sizeof(csy))
+    if len>Sizeof(csy) && (csy.mode & CSY_VALID)!=0 then
+      if csy.shycor0!=0 then
+        Memcpy(shycor[0],buf+csy.shycor0,Sizeof(shycor)/2)
+        if shycor[0].key!=0x00594853 shycor[0].ny=0
+      endif
+      if csy.shycor1!=0 then
+        Memcpy(shycor[1],buf+csy.shycor1,Sizeof(shycor)/2)
+        if shycor[1].key!=0x00595253 shycor[1].ny=0
+      endif
+    endif
+  endif
+  // I always display original data when data is first loaded.
+  change hcompensate mode=0
+  // Create buttons.
+  dx=(RIGHTX+DELTA)/2-DELTA
+  y=DELTA+162
+  yside=0
+  ycam=0
+  for j=0,j<NHEAD/2,j++ do
+    if lvalid!=0 && l.side[j]!=0 yside=8
+    if lvalid!=0 && l.cameras!=0 && j>=l.nfing ycam=8
+    for i=0,i<2,i++ do
+      x=GRAPHX+2*DELTA
+      if i==1 x=x+(RIGHTX+DELTA)/2
+      head=j*2+i
+      if c[head].headok==0 continue
+      k=0
+      if c[head].cartok k++            // Head, cartesian corrections
+      if c[head].car2ok k++            // Head, right cartesian corrections
+      if c[head].hcamok k++            // Head camera
+      if c[head].ccamok k++            // Head camera, cartesian corrections
+      if k==1 then
+        w=dx/2
+      else if k==2 then
+        w=dx/4
+      else if k==3 then
+        w=dx/5
+      else if k==4 then
+        w=dx/6
+      endif
+      dxcart=0; dxcar2=0; dxhcam=0; dxccam=0
+      if c[head].cartok dxcart=w
+      if c[head].car2ok dxcar2=w
+      if c[head].hcamok dxhcam=w
+      if c[head].ccamok dxccam=w
+      dxhead=dx-dxcart-dxcar2-dxhcam-dxccam
+      hhead[head]=control BUTTON
+        window=hmain
+        position=x,y+yside+ycam,dxhead,20
+        name=format("%i%c",j,(i==0?'L':'R'))
+        help=format("按下查看测试头%i%c的旧版更正",          \
+          j,(i==0?'L':'R'))
+        color=BLACK
+        bkcolor=GRAY
+      endc
+      if dxcart!=0 then
+        hcart[head]=control BUTTON
+          window=hmain
+          position=x+dxhead,y+yside+ycam,dxcart,20
+          name=(dxcar2==0?">":"L")
+          help=format("按以查看测试头%i%c%s的笛卡尔校正",    \
+            j,(i==0?'L':'R'),(dxcar2==0?"":" (left shuttle)"))
+          color=BLACK
+          bkcolor=LIGHTGRAY
+        endc
+      endif
+      if dxcar2!=0 then
+        hcar2[head]=control BUTTON
+          window=hmain
+          position=x+dxhead+dxcart,y+yside+ycam,dxcar2,20
+          name="R"
+          help=format("按以查看测试头%i%c%s的笛卡尔校正",    \
+            j,(i==0?'L':'R')," (right shuttle)")
+          color=BLACK
+          bkcolor=LIGHTGRAY
+        endc
+      endif
+      if dxhcam!=0 then
+        hhcam[head]=control BUTTON
+          window=hmain
+          position=x+dxhead+dxcart+dxcar2,y+yside+ycam,dxhcam,20
+          name="V"
+          help=format("按下查看摄像头%i%c的旧版更正",  \
+            j,(i==0?'L':'R'))
+          color=BLACK
+          bkcolor=GRAY
+        endc
+      endif
+      if dxccam!=0 then
+        hccam[head]=control BUTTON
+          window=hmain
+          position=x+dxhead+dxcart+dxcar2+dxhcam,y+yside+ycam,dxccam,20
+          name="C"
+          help=format(                                                         \
+            "Press to see cartesian corrections for head camera %i%c",         \
+            j,(i==0?'L':'R'))
+          color=BLACK
+          bkcolor=LIGHTGRAY
+        endc
+      endif
+    enddo
+    if c[j*2].headok!=0 || c[j*2+1].headok!=0 y=y+24
+  enddo
+  for i=0,i<2,i++ do
+    if shycor[i].ny==0 continue
+    x=GRAPHX+2*DELTA
+    if i==1 x=x+(RIGHTX+DELTA)/2
+    hshyc[i]=control BUTTON
+      window=hmain
+      position=x,y+yside+ycam+8,dx,20
+      name=format("ShY %s",i==0?"L":"R")
+      help=format("查看%s架板框的Y校正",                  \
+        i==0?"left":"right")
+      color=BLACK
+      bkcolor=GRAY
+    endc
+  enddo
+  // Select first available button.
+  if firsthead>=0 then
+    Selectsource(firsthead,0)
+  endif
+end
+
+function int main()
+  int i,x,y,buttons,prevbuttons,head
+  char s[260]
+  // Set parameters.
+  scaleindex=5
+  // Create controls.
+  hmain=control WINDOW
+    window=NULL
+    position=10,10,GRAPHX+RIGHTX+3*DELTA,GRAPHY+4*DELTA+48
+    name=format("校正文件查看器 v%s",VERSION)
+    help=" "
+    bkcolor=LIGHTGRAY
+    size=256
+  endc
+  hcorrname=control COMBOEDIT
+    window=hmain
+    position=DELTA,DELTA,GRAPHX,120
+    name="校正文件"
+    help="包含更正数据的文件原型"
+    mode=M_VSCROLL
+  endc
+  hgraph=control GRAPH
+    window=hmain
+    position=DELTA+1,2*DELTA+25,GRAPHX-2,GRAPHY-2
+    help="移动光标查看值"
+    color=BLACK
+    bkcolor=WHITE
+  endc
+  hinfo=control TEXT
+    window=hmain
+    position=DELTA,3*DELTA+24+GRAPHY,GRAPHX,24
+    text=format("Correction file viewer v%s",VERSION)
+    help="信息"
+    font=MEDIUMFONT
+  endc
+  hbrowse=control BUTTON
+    window=hmain
+    position=GRAPHX+2*DELTA,DELTA,RIGHTX,24
+    name="浏览"
+    help="选择用于校正文件的原型名称"
+  endc
+  draw window=hmain font=INFOFONT color=BLACK
+  draw at GRAPHX+2*DELTA+1,DELTA+52 text="Scale"
+  hscale=control TEXT
+    window=hmain
+    position=GRAPHX+2*DELTA+38,DELTA+32,RIGHTX-95,24
+    help="当前选择的比例尺，像素/毫米"
+    font=MEDIUMFONT
+    color=BLACK
+    bkcolor=WHITE
+    mode=M_BORDER|M_CENTERED
+  endc
+  hscscr=control VSCROLL
+    window=hmain
+    position=GRAPHX+2*DELTA+RIGHTX-57,DELTA+32,20,24
+    help="用于选定比例"
+    limits=1,-1
+  endc
+  draw at GRAPHX+2*DELTA+RIGHTX-35,DELTA+52 text="p/mm"
+  hcompensate=control CUSTOMBOX
+    window=hmain
+    position=GRAPHX+2*DELTA+1,DELTA+64,RIGHTX-1,20
+    name="转移补偿"
+    help="补偿移位和旋转"
+    font=INFOFONT
+  endc
+  hlistx=control CUSTOMBOX
+    window=hmain
+    position=GRAPHX+2*DELTA+1,DELTA+86,RIGHTX-1,20
+    name="X配置文件"
+    help="选中以显示水平线的配置文件"
+    font=INFOFONT
+  endc
+  hlisty=control CUSTOMBOX
+    window=hmain
+    position=GRAPHX+2*DELTA+1,DELTA+108,RIGHTX-1,20
+    name="Y配置文件"
+    help="显示垂直线的轮廓"
+    font=INFOFONT
+  endc
+  hsurface=control CUSTOMBOX
+    window=hmain
+    position=GRAPHX+2*DELTA+1,DELTA+130,RIGHTX-1,20
+    name="表面"
+    help="显示校准板的表面"
+    font=INFOFONT
+  endc
+  hlist=control GRAPH
+    window=hmain
+    position=GRAPHX+RIGHTX+3*DELTA+1,DELTA+1,LISTX-DELTA-2,GRAPHY+2*DELTA+46
+    color=BLACK
+    bkcolor=WHITE
+  endc
+  // Close button.
+  hexit=control BUTTON
+    window=hmain
+    position=GRAPHX+2*DELTA,GRAPHY+3*DELTA+24,RIGHTX,24
+    name="关闭"
+    help="按下以关闭此脚本"
+  endc
+  draw show
+  // Allocate general-purpose buffer.
+  Alloc(buf,131072)
+  // Show first correction table.
+  selectedhead=-1
+  selectedcart=-1
+  selectedcar2=-1
+  selectedhcam=-1
+  selectedccam=-1
+  selectedshyc=-1
+  confirm hcorrname
+  Text(hcorrname,s)
+  Readdata(s)
+  redraw=1
+  prevbuttons=0
+  // Main loop.
+  while 1 do
+    // Check for mouse movements, but only if image is defined.
+    if stepx!=0.0 && stepy!=0.0 then
+      i=Mousexy(hgraph,&x,&y,&buttons)
+      if i==1 then
+        x=Floor((x-basex+stepx/2.0)/stepx)
+        y=Floor((basey-y+stepy/2.0)/stepy)
+        if selectedcart>=0 || selectedcar2>=0 || selectedccam>=0 then
+          x=Max(-GRIDCX,Min(x,GRIDCX))
+          y=Max(-GRIDCY,Min(y,GRIDCY))
+        else if selectedshyc>=0 then
+          x=0
+          y=Max(-shycor[selectedshyc].ny,Min(-y,shycor[selectedshyc].ny))
+        else
+          x=Max(-CENTERX,Min(x,CENTERX))
+          y=Max(-CENTERY,Min(y,CENTERY))
+        endif
+        if x!=pointx || y!=pointy then
+          pointx=x                     // Change selection
+          pointy=y
+          redraw=1
+        endif
+        if (buttons & 1)!=0 && (prevbuttons & 1)==0 then
+          if refvalid!=0 && refx==pointx && refy==pointy then
+            refvalid=0                 // Remove reference
+          else
+            refx=pointx                // Set reference
+            refy=pointy
+            refvalid=1
+          endif
+          redraw=1
+        endif
+      endif
+      prevbuttons=buttons
+    endif
+    // Check controls.
+    if Pressed(hexit) then
+      break
+    else if Pressed(hbrowse) then
+      change hinfo text=""
+      confirm hcorrname
+      Text(hcorrname,s)
+      if SYS.Browse(hmain,s,"Specify correction files",0)!=0 then
+        change hcorrname text=s
+        Readdata(s)
+      endif
+    else if Pressed(hscscr) then
+      scaleindex=scaleindex+Status(hscscr)
+      change hscscr select=0
+      redraw=1
+    else if Pressed(hcompensate) then
+      if Status(hcompensate) then
+        Memcpy(c,shr,Sizeof(c))
+      else
+        Memcpy(c,raw,Sizeof(c))
+      endif
+      redraw=1
+    else if Pressed(hlistx) then
+      if Status(hlistx)!=0 then
+        change hlisty mode=0
+        change hsurface mode=0
+        list=1
+        change hmain position=*,*,GRAPHX+RIGHTX+3*DELTA+LISTX,GRAPHY+4*DELTA+48
+        redraw=1
+      else
+        change hlistx mode=0
+        change hlisty mode=0
+        change hsurface mode=0
+        list=0
+        change hmain position=*,*,GRAPHX+RIGHTX+3*DELTA,GRAPHY+4*DELTA+48
+      endif
+    else if Pressed(hlisty) then
+      if Status(hlisty)!=0 then
+        change hlistx mode=0
+        change hsurface mode=0
+        list=2
+        change hmain position=*,*,GRAPHX+RIGHTX+3*DELTA+LISTX,GRAPHY+4*DELTA+48
+        redraw=1
+      else
+        change hlistx mode=0
+        change hlisty mode=0
+        change hsurface mode=0
+        list=0
+        change hmain position=*,*,GRAPHX+RIGHTX+3*DELTA,GRAPHY+4*DELTA+48
+      endif
+    else if Pressed(hsurface) then
+      if Status(hsurface)!=0 then
+        change hlistx mode=0
+        change hlisty mode=0
+        list=3
+        change hmain position=*,*,GRAPHX+RIGHTX+3*DELTA+LISTX,GRAPHY+4*DELTA+48
+        redraw=1
+      else
+        change hlistx mode=0
+        change hlisty mode=0
+        change hsurface mode=0
+        list=0
+        change hmain position=*,*,GRAPHX+RIGHTX+3*DELTA,GRAPHY+4*DELTA+48
+      endif
+    endif
+    for head=0,head<NHEAD,head++ do
+      if hhead[head]!=NULL && Pressed(hhead[head]) then
+        change hinfo text=""
+        Selectsource(head,0)
+      else if hcart[head]!=NULL && Pressed(hcart[head]) then
+        change hinfo text=""
+        Selectsource(head,1)
+      else if hcar2[head]!=NULL && Pressed(hcar2[head]) then
+        change hinfo text=""
+        Selectsource(head,2)
+      else if hhcam[head]!=NULL && Pressed(hhcam[head]) then
+        change hinfo text=""
+        Selectsource(head,3)
+      else if hccam[head]!=NULL && Pressed(hccam[head]) then
+        change hinfo text=""
+        Selectsource(head,4)
+      endif
+    enddo
+    for i=0,i<2,i++ do
+      if hshyc[i]!=NULL && Pressed(hshyc[i]) then
+        change hinfo text=""
+        Selectsource(32+i,5)
+      endif
+    enddo
+    // Redraw screen.
+    if redraw then
+      if scaleindex<0 then
+        scaleindex=0
+      else if scaleindex>=NSCALE then
+        scaleindex=NSCALE-1
+      endif
+      change hscale text=format("%g",scales[scaleindex])
+      Redraw()
+      redraw=0
+    endif
+    wait
+  enddo
+  // Free resources.
+  Free(buf)
+end
+

@@ -1,0 +1,527 @@
+#include "ls.icl"                  // Standard functions
+#include "or.icl"                // A2 command names
+#cmdbuff 2
+#multinst
+
+#define VERSION        "1.01"
+#define DESCRIPTION    "S1 Z microstep viewer"
+
+// 1.01: Option to gather microstep data.
+
+#define NMICRO         512             // Number of microsteps in data
+#define WIDTH          640             // Full width of client area
+#define HEIGHT         400             // Full height of client area
+#define VIEWDX         520             // Width of data viewer (client area)
+#define MSGDY          22              // Height of message string
+#define BTNDY          22              // Height of buttons
+#define INFDY          18              // Height of info lines
+#define BORDER         5               // Distance between controls
+
+#define ZMIN           17000           // Limits to learn microstep
+#define ZMAX           20000
+
+handle           hmain                 // Main window
+handle           hmsg                  // Message string
+handle           hview                 // Data viewer
+handle           hhead[32]             // Head selection buttons
+handle           hinfo[4]              // Data parameters
+handle           hmeasure              // Measure new microstep
+handle           hexit                 // Close script
+
+int              selected              // Selected head
+int              update                // Request to re-read data
+int              redraw                // Request to redraw graphics
+float            data[NMICRO]          // Microstep data
+int              datavalid             // Whether data is valid
+float            newdata[NMICRO]       // New microstep data
+int              newvalid              // Whether new data is valid
+int              cursor                // Position of data cursor
+
+// Service function, displays formatted message.
+function int Message(int color,format f)
+  change hmsg color=color
+  change hmsg text=f
+end
+
+// Service function, reads microstep data from the specified controller into
+// data or newdata.
+function int Getmicrostep(int head,int new)
+  int i,t
+  char buf[32]
+  for i=-1,i<NMICRO,i++ do             // First parameter is validity flag
+    $A[0].length=0
+    buf[0]=S_DEBUG
+    buf[1]=0x25                        // Get individual movement parameter
+    buf[2]=head
+    $uint2(buf+3)=65+i
+    SYS.Sendimm(0,5,buf)
+    t=Time()
+    // Note that wait in this loop would make routine extremely slow.
+    while 1 do
+      if $A[0].length==0 then
+        if Time()-t>3000 then
+          Message(LIGHTRED," Timeout while waiting for data from head")
+          if new then
+            newvalid=0
+          else
+            datavalid=0
+          endif
+          return -1
+        endif
+      else if $A[0].command==S_DEBUG then
+        if new then
+          if i<0 then
+            newvalid=$int4($A[0]+5)
+          else
+            newdata[i]=$float4($A[0]+5)
+          endif
+        else
+          if i<0 then
+            datavalid=$int4($A[0]+5)
+          else
+            data[i]=$float4($A[0]+5)
+          endif
+        endif
+        break
+      else
+        Message(LIGHTRED," Invalid answer from head (check load status?)")
+        if new then
+          newvalid=0
+        else
+          datavalid=0
+        endif
+        return -1
+      endif
+    enddo
+  enddo
+end
+
+// Service function, draws data and cursor in the data viewer window.
+function int Drawdata()
+  int x,y,x0,y0
+  x0=(VIEWDX-NMICRO)/2
+  y0=(HEIGHT-3*BORDER-MSGDY-2)/2
+  // Clear window.
+  draw window=hview color=WHITE bkcolor=WHITE mode=M_LEFT clear
+  // Draw grid.
+  draw color=LIGHTGRAY
+  for x=0,x<=NMICRO,x=x+NMICRO/16 do
+     draw at x+x0,5 to x+x0,2*y0-4
+  enddo
+  for y=0,y<=y0-5,y=y+10 do
+    draw at x0,y0+y to x0+NMICRO,y0+y
+    draw at x0,y0-y to x0+NMICRO,y0-y
+  enddo
+  // Draw axii.
+  draw color=GRAY
+  draw at x0,5 to x0,2*y0-4
+  draw at x0,y0 to x0+NMICRO,y0
+  // Draw head name.
+  draw color=PINK font=LARGEFONT at 10,40
+  draw text=format("%i%s",selected/2,selected & 1?"R":"L")
+  // Draw data.
+  draw color=BLACK at x0,y0-data[0]
+  for x=1,x<NMICRO,x++ do
+    draw to x+x0,y0-data[x]
+  enddo
+  // Draw new data, if available.
+  if newvalid then
+    draw color=LIGHTRED at x0,y0-newdata[0]
+    for x=1,x<NMICRO,x++ do
+      draw to x+x0,y0-newdata[x]
+    enddo
+  endif
+  // Draw cursor.
+  draw color=STRANGE at x0+cursor,5 to x0+cursor,2*y0-4
+  // Draw warning if data unavailable.
+  if datavalid==0 then
+    draw mode=M_CENTERED color=LIGHTRED font=MEDIUMFONT
+    draw at VIEWDX/2,2*y0-12 text="Invalid data!"
+  endif
+  draw show
+end
+
+// Check for mouse movements and redraws graphics.
+function int Checkmouse()
+  int i,j,x,y,buttons
+  // Check position of data cursor.
+  i=Mousexy(hview,&x,&y,&buttons)
+  if i==1 && (buttons & 1)!=0 then
+    j=Min(Max(0,x-(VIEWDX-NMICRO)/2),NMICRO-1)
+    if j!=cursor then
+      cursor=j
+      redraw=1
+    endif
+  endif
+  // Redraw data.
+  if redraw then
+    change hinfo[0] text=format("Point %i",cursor)
+    change hinfo[1] text=format("Z = %.4f mm",(1.0/NMICRO)*cursor)
+    change hinfo[2] text=format("Corr = %.1f um",data[cursor])
+    if newvalid then
+      change hinfo[3] text=format("Corr = %.1f um",newdata[cursor])
+    else
+      change hinfo[3] text=""
+    endif
+    Drawdata()
+    redraw=0
+  endif
+end
+
+// Measures new microstep. Returns -1 if user pressed Exit and 0 in any other
+// case.
+function int Measure()
+  int i,n,nhead
+  float x,y,ymin,ymax,zmin,zmax
+  char s[256],buf[64]
+  handle hcontinue,hcancel
+  nhead=$LAY.nfing*2
+  // Disable buttons.
+  disable hmeasure
+  for i=0,i<nhead,i++ do
+    disable hhead[i]
+  enddo
+  change hinfo[0] text=""
+  change hinfo[1] text=""
+  change hinfo[2] text=""
+  change hinfo[3] text=""
+  // Ask user to remove board.
+  Message(BLACK," Getting new microstep for head %i%s",                        \
+    selected/2,selected & 1?"R":"L")
+  draw window=hview color=WHITE bkcolor=WHITE clear
+  draw mode=M_CENTERED font=LARGEFONT color=LIGHTRED
+  draw at VIEWDX/2,65 text="ATTENTION!"
+  draw mode=M_CENTERED font=MEDIUMFONT color=RED
+  draw at VIEWDX/2,110 text="Please remove board, if any, from the shuttle"
+  draw at VIEWDX/2,132 text="and assure that the middle tester area is clear."
+  draw at VIEWDX/2,154 text="Please press 'Continue' when ready."
+  draw show
+  hcontinue=control BUTTON
+    window=hview
+    position=VIEWDX/2-85,220,80,25
+    text="继续"
+    help="按下继续执行新的微步"
+  endc
+  hcancel=control BUTTON
+    window=hview
+    position=VIEWDX/2+5,220,80,25
+    text="Cancel"
+    help="按可取消操作"
+  endc
+  while 1 do
+    if Pressed(hexit) return -1
+    if Pressed(hcontinue) break
+    if Pressed(hcancel) then
+      destroy hcontinue
+      destroy hcancel
+      goto finish
+    endif
+    wait
+  enddo
+  // Move fingers.
+  ymin=+1.0e99
+  ymax=-1.0e99
+  for i=0,i<$LAY.nfing,i++ do
+    ymin=Min(ymin,$LAY.bottom[i]/1000.0)
+    ymax=Max(ymax,$LAY.top[i]/1000.0)
+  enddo
+  x=$LAY.xoffset/1000.0
+  y=(ymin+ymax)/2.0
+  y=Max(y,$LAY.bottom[selected/2]/1000.0+15.0)
+  y=Min(y,$LAY.top[selected/2]/1000.0-15.0)
+  for i=0,i<nhead,i++ do
+    if i==selected then
+      sprintf(s,"M %i(%f,%fH30) NOP",i,x,y)
+      SERV.Cmdimm(0,s)
+    else
+      sprintf(s,"M %i(Z) NOP",i)
+      SERV.Cmdimm(1,s)
+    endif
+  enddo
+  draw window=hview color=WHITE bkcolor=WHITE clear
+  draw mode=M_CENTERED font=MEDIUMFONT color=RED at VIEWDX/2,110
+  draw text="Heads are moving, please wait..."
+  draw show
+  disable hcontinue
+  while (1) do
+    if $A[0].length>0 break
+    if Pressed(hexit) return -1
+    if Pressed(hcancel) then
+      destroy hcontinue
+      destroy hcancel
+      goto finish
+    endif
+    wait
+  enddo
+  enable hcontinue
+  // Ask for the confirmation once again.
+  draw window=hview color=WHITE bkcolor=WHITE clear
+  draw mode=M_CENTERED font=MEDIUMFONT color=RED at VIEWDX/2,110
+  draw text="Please confirm that area under the finger is clear."
+  draw show
+  while 1 do
+    if Pressed(hexit) return -1
+    if Pressed(hcontinue) break
+    if Pressed(hcancel) then
+      destroy hcontinue
+      destroy hcancel
+      goto finish
+    endif
+    wait
+  enddo
+  destroy hcontinue
+  destroy hcancel
+  hcancel=control BUTTON
+    window=hview
+    position=VIEWDX/2-40,220,80,25
+    text="停止"
+    help="停止测试"
+  endc
+  // Set slow head movements (2 mm/s).
+  SERV.Cmdimm(1,"OUTPORT32 ALL 0x10010007,2")
+  // Make 15 hubs more or less between ZMIN and ZMAX. First hub is skipped.
+  for n=0,n<15,n++ do
+    zmin=ZMIN+200*(n%5)
+    zmax=ZMAX+200*(n%5)
+    if n==1 then
+      // Activate Z microstep calibration.
+      sprintf(s,"OUTPORT32 HEAD(%i) 0x10010003,1",selected)
+      SERV.Cmdimm(1,s)
+    endif
+    draw window=hview color=WHITE bkcolor=WHITE clear
+    draw mode=M_CENTERED font=MEDIUMFONT color=BLACK
+    draw at VIEWDX/2,110 text=format("Hubs so far: %i",n)
+    if n>3 draw at VIEWDX/2,132 text="Press Stop if enough data is gathered"
+    draw show
+    // Move down.
+    while 1 do
+      SYS.Killimm(0)
+      SYS.Killimm(1)
+      // This command prolongates Z up timeout, so I repeat it constantly.
+      sprintf(s,"OUTPORT32 HEAD(%i) 0x10010008,%i",selected,zmax)
+      SERV.Cmdimm(0,s)
+      sprintf(s,"INPORT32 HEAD(%i) 0x10000018",selected)
+      SERV.Cmdimm(1,s)
+      while 1 do
+        if $A[0].length>0 && $A[1].length>0 break
+        if Pressed(hexit) return -1
+        if Pressed(hcancel) goto stoplearn
+        wait
+      enddo
+      if $A[1].answer==S_INPORT32 && $uint4($A[1]+5)>zmax-50 break
+    enddo
+    // Move up. Speed is not important because microstep is not learned;
+    // nevertheless, to avoid excessive vibrations I do it slowly, too.
+    while 1 do
+      SYS.Killimm(0)
+      SYS.Killimm(1)
+      sprintf(s,"OUTPORT32 HEAD(%i) 0x10010008,%i",selected,zmin)
+      SERV.Cmdimm(0,s)
+      sprintf(s,"INPORT32 HEAD(%i) 0x10000018",selected)
+      SERV.Cmdimm(1,s)
+      while 1 do
+        if $A[0].length>0 && $A[1].length>0 break
+        if Pressed(hexit) return -1
+        if Pressed(hcancel) goto stoplearn
+        wait
+      enddo
+      if $A[1].answer==S_INPORT32 && $uint4($A[1]+5)<zmin+50 break
+    enddo
+  enddo
+stoplearn:
+  destroy hcancel
+  // Stop Z microstep calibration.
+  sprintf(s,"OUTPORT32 HEAD(%i) 0x10010003,0",selected)
+  SERV.Cmdimm(0,s)
+  while 1 do
+    if $A[0].length>0 break
+    if Pressed(hexit) return -1
+    wait
+  enddo
+  // Get new microstep.
+  Getmicrostep(selected,1)
+  Drawdata()
+  hcontinue=control BUTTON
+    window=hview
+    position=VIEWDX-170,HEIGHT-3*BORDER-MSGDY-32,80,25
+    text="Flash"
+    help="按下可将微步数据闪存到控制器"
+  endc
+  hcancel=control BUTTON
+    window=hview
+    position=VIEWDX-85,HEIGHT-3*BORDER-MSGDY-32,80,25
+    text="Discard"
+    help="按下可放弃新的微步"
+  endc
+  if newvalid then
+    Message(BLACK,"Microstep successfully measured")
+  else
+    disable hcontinue
+  endif
+  while 1 do
+    if Pressed(hcontinue) then
+      buf[0]=S_DEBUG
+      buf[1]=0x27                      // Flash data
+      buf[2]=selected
+      SYS.Sendimm(0,3,buf)
+      while 1 do
+        if $A[0].length>0 break
+        if Pressed(hexit) return -1
+        wait
+      enddo
+      if $uint1($A[0]+5)==0 then
+        Message(BLACK,"Microstep saved to flash")
+        break
+      else
+        Message(LIGHTRED,"Unable to flash microstep data")
+      endif
+    else if Pressed(hcancel) then
+      sprintf(s,"OUTPORT32 HEAD(%i) 0x10010004,1",selected)
+      SERV.Cmdimm(0,s)                 // Restore old flash data
+      delay 200
+      break
+    else if Pressed(hexit) then
+      return -1
+    endif
+    Checkmouse()
+    wait
+  enddo
+finish:
+  // Remove buttons, if any.
+  clear hview
+  // Stop Z microstep calibration.
+  SERV.Cmdimm(1,"OUTPORT32 ALL 0x10010003,0")
+  // Restore default Z port speed.
+  SERV.Cmdimm(1,"OUTPORT32 ALL 0x10010007,0")
+  // Enable buttons.
+  enable hmeasure
+  for i=0,i<nhead,i++ do
+    enable hhead[i]
+  enddo
+  Message(BLACK,"")
+  redraw=1
+  update=1
+  return 0
+end
+
+// Main program.
+function int main()
+  int i,x,y,dx,deltay,nhead
+  // Get number of controllers.
+  nhead=$LAY.nfing*2
+  // Create windows.
+  hmain=control WINDOW
+    window=NULL
+    position=10,10,WIDTH,HEIGHT
+    name=format("%s v%s",DESCRIPTION,VERSION)
+    help=" "
+    color=BLACK
+    bkcolor=LIGHTGRAY
+  endc
+  hmsg=control TEXT
+    window=hmain
+    position=BORDER,BORDER,VIEWDX+2,MSGDY
+    help="信息"
+    color=BLACK
+    bkcolor=WHITE
+    font=MEDIUMFONT
+    mode=M_BORDER
+  endc
+  hview=control GRAPH
+    window=hmain
+    position=BORDER+1,2*BORDER+MSGDY+1,VIEWDX,HEIGHT-3*BORDER-MSGDY-2
+    help="微步校正数据"
+    color=BLACK
+    bkcolor=WHITE
+  endc
+  deltay=0
+  for i=0,i<nhead,i++ do
+    x=2*BORDER+VIEWDX+2
+    dx=(WIDTH-2*BORDER-x)/2
+    if (i & 1)!=0 x=x+dx+BORDER
+    if $LAY.side[i/2]!=0 deltay=BORDER
+    y=BORDER+(BORDER+BTNDY)*(i/2)+deltay
+    hhead[i]=control BUTTON
+      window=hmain
+      position=x,y,dx,BTNDY
+      name=format("%i%s",i/2,i & 1?"R":"L")
+      help=format("按下可查看测试头%i%s的微步",i/2,i & 1?"R":"L")
+      color=BLACK
+      bkcolor=GRAY
+    endc
+  enddo
+  x=2*BORDER+VIEWDX+2
+  dx=WIDTH-3*BORDER-VIEWDX-2
+  y=3*BORDER+(BORDER+BTNDY)*(nhead/2)+deltay
+  for i=0,i<4,i++ do
+    hinfo[i]=control TEXT
+      window=hmain
+      position=x,y+INFDY*i,dx,INFDY
+      help=" "
+      color=(i==3?LIGHTRED:BLACK)
+      bkcolor=LIGHTGRAY
+      font=MAINFONT
+      mode=M_CENTERED
+    endc
+  enddo
+  hmeasure=control BUTTON
+    window=hmain
+    position=x,y+3*BTNDY+3*BORDER,dx,BTNDY
+    name="测量"
+    help="按下可获取新的微步"
+    color=BLACK
+    bkcolor=GRAY
+  endc
+  hexit=control BUTTON
+    window=hmain
+    position=x,HEIGHT-BORDER-BTNDY,dx,BTNDY
+    name="退出"
+    help="按下以关闭此脚本"
+    color=BLACK
+    bkcolor=GRAY
+  endc
+  // Prepare for work.
+  Message(BLACK," %s v%s",DESCRIPTION,VERSION)
+  update=1
+  redraw=1
+  // Main loop.
+  while 1 do
+    if Pressed(hmeasure) then
+      i=Measure()
+      if i<0 break
+    else if Pressed(hexit) then
+      break
+    endif
+    for i=0,i<nhead,i++ do
+      if Pressed(hhead[i]) then
+        selected=i
+        update=1
+        break
+      endif
+    enddo
+    // Update data.
+    if update!=0 then
+      // Highlight selected button.
+      for i=0,i<nhead,i++ do
+        if i==selected then
+          change hhead[i] color=LIGHTRED
+          change hhead[i] bkcolor=YELLOW
+        else
+          change hhead[i] color=BLACK
+          change hhead[i] bkcolor=GRAY
+        endif
+      enddo
+      // Discard new data, if any.
+      newvalid=0
+      // Request data.
+      Getmicrostep(selected,0)
+      redraw=1
+      update=0
+    endif
+    // Check for mouse movements and redraw image.
+    Checkmouse()
+    wait
+  enddo
+end
+
+

@@ -1,0 +1,1532 @@
+#include "ls.icl"
+#include "or.icl"
+#cmdbuff 4
+
+#define VERSION        "1.02"          // Actual software version
+#define DESCRIPTION    "A5/A6 SPS control"
+
+// 1.01: Support for A5 with manual shuttle.
+// 1.02: Support for A6 with cf shuttle.
+
+#define DX             768             // Width of card in main window
+#define DY             500             // Height of card in main window
+#define MODDY          200             // height of SPS module
+
+#define NINPUTS        100             // Maximal number of inputs in window
+#define NOUTPUTS       100             // Maximal number of outputs in window
+#define NANALOGS       10              // Maximal number of analog controls
+
+#define NN             76              // Length of description string
+#define ND             40              // Length of draw string
+
+// Following modes are supported by inputs and outputs:
+//   x - input or output is reserved;
+//   + - first output in a pair, next one must be turned off
+//   - - second output in a pair, previous one must be turned off
+//   z - zeroing pseodooutput, previous two must be turned off
+
+#define INMODE         0               // Position of mode input field
+#define INXHW          2               // Position of X input field, hardware
+#define INYHW          6               // Position of Y input field, hardware
+#define INXMOD         10              // Position of X input field, modules
+#define INYMOD         14              // Position of Y input field, modules
+#define INMOD          18              // Position of module field in input
+#define ININP          21              // Position of input field in input
+#define INNAME         24              // Position of name field in input
+#define INDESCR        41              // Position of description in input
+
+#define OUTMODE        0               // Position of mode output field
+#define OUTXHW         2               // Position of X output field, hardware
+#define OUTYHW         6               // Position of Y output field, hardware
+#define OUTXMOD        10              // Position of X output field, modules
+#define OUTYMOD        14              // Position of Y output field, modules
+#define OUTMOD         18              // Position of module field in output
+#define OUTOUT         21              // Position of input field in output
+#define OUTNAME        24              // Position of name field in output
+#define OUTDESCR       41              // Position of description in output
+
+#define GRAPHTYPE      0               // Position of type letter
+#define GRAPHFG        2               // Position of foreground colour letter
+#define GRAPHBG        3               // Position of background colour letter
+#define GRAPHX0        5               // Position of first X coordinate
+#define GRAPHY0        9               // Position of first Y coordinate
+#define GRAPHX1        13              // Position of second X coordinate
+#define GRAPHY1        17              // Position of second Y coordinate
+#define GRAPHTEXT      13              // Position of text
+
+#define IOX            0               // Position of X field in analog I/O
+#define IOY            4               // Position of Y field in analog I/O
+#define IOTYPE         8               // Position of type letter in analog I/O
+#define IOPORT         9               // Position of register in analog I/O
+#define IONAME         14              // Position of name field in analog I/O
+#define IODESCR        33              // Position of description in analog I/O
+
+#define SIGID          0               // Position of ID field in signature
+#define SIGTAB         3               // Tab name
+#define SIGSIG         30              // SPS signature
+
+typedef struct t_input                 // Descriptor of SPS input
+  char           name[32]              // Short name of the input
+  int            addr                  // SPS module*10+input
+ends
+
+typedef struct t_output                // Descriptor of SPS output
+  char           name[32]              // Short name of the output
+  int            addr                  // SPS module*10+output
+  int            ares1                 // First output to be reset on action
+  int            ares2                 // Second output to be reset on action
+  int            passive               // No action when pressed
+  int            laststate             // Last received state (0 or 1)
+ends
+
+typedef struct t_analog                // Description of analog input/output
+  char           name[32]              // Short name of the control
+  int            port                  // Associated register
+  int            out                   // Whether analog output
+ends
+
+handle           hmain                 // Main window
+handle           hcard                 // Tab window
+handle           hgraph                // Graph window in tab control
+handle           hstop                 // Stop SPS
+handle           hstart                // Start SPS
+handle           hexit                 // Close button
+
+int              modtype[16]           // Number and types of CAN modules
+char             signature[256]        // Printed module types
+int              instate[16]           // State of inputs (-1: undefined)
+int              outstate[16]          // State of outputs (-1: undefined)
+int              analogin[4]           // 4 analog inputs (-1: undefined)
+int              analogout             // Analog output (-1: undefined)
+int              autorestart           // Autorestart mode
+
+struct t_input   input[NINPUTS]        // Inputs in the actual window
+handle           hinput[NINPUTS]       // Handles of input controls
+int              ninputs               // Number of inputs in the actual window
+int              modimin,modimax       // Minimal and maximal input modules
+
+struct t_output  output[NOUTPUTS]      // Outputs in the actual window
+handle           houtput[NOUTPUTS]     // Handles of output buttons
+int              noutputs              // Number of outputs in the actual window
+int              modomin,modomax       // Minimal and maximal output modules
+
+struct t_analog  analog[NANALOGS]      // Analog I/Os in the actual window
+handle           hanalog[NANALOGS]     // Handles of analog controls
+int              nanalogs              // Number of analog I/Os in the window
+int              analogmin,analogmax   // Analog I/Os outside the NANO module
+int              useanalog             // Read analog I/Os on the NANO module
+
+int              tabid[32]             // Card tab identifiers
+int              ntabid                // Actual number of tabs
+int              cardpressed           // Card tab pressed
+
+////////////////////////////////////////////////////////////////////////////////
+////////////////////////////// SERVICE FUNCTIONS ///////////////////////////////
+
+// Service function, scans integer from the supplied string. On error, returns
+// 0, otherwise (signed) integer.
+function int Scanint(char *s)
+  int i,n,sign
+  sign=1
+  while s[n]==' ' do n++; enddo        // Skip leading spaces
+  if s[n]=='-' then                    // Get sign, if any
+    sign=-1; n++
+  else if s[n]=='+' then
+    n++
+  endif
+  while Isdigit(s[n]) do               // Get number
+    i=i*10+(s[n]-'0')
+    n++
+  enddo
+  return i*sign                        // Return answer
+end
+
+// Service function, scans continuous name from the supplied string. Returns
+// length of name.
+function int Scanname(char *s,char *name)
+  int n
+  while s[n]!=' ' && (Isalnum(s[n]) || s[n]=='/') do
+    name[n]=s[n]; n++
+  enddo
+  name[n]='\0'
+  return n                             // Return answer
+end
+
+// Displays message and waits till user presses button Close.
+function int Showmessage(char *s,format f)
+  clear hgraph
+  draw window=hgraph color=RED bkcolor=WHITE font=MEDIUMFONT
+  draw mode=M_CENTERED at DX/2-10,60 text=s
+  draw mode=M_LEFT color=BLACK at 30,100 wrap DX-30
+  draw text=f show
+  while 1 do
+    if Pressed(hexit) break
+    wait
+  enddo
+end
+
+
+////////////////////////////////////////////////////////////////////////////////
+////////////////////////////// INPUTS AND OUTPUTS //////////////////////////////
+
+// Reads number of CAN modules to modtype[0] and their types to modtype[1..15].
+// Returns 0 on success, 1 if types are unreadabe or incomplete, 2 if layout
+// is absent and -1 if user pressed button Close.
+function int Readmoduletypes()
+  int i,t,n,h
+  char buf[256]
+  for i=0,i<16,i++ do
+    // Reset array.
+    modtype[i]=0
+  enddo
+  for i=0,i<16,i++ do
+    // Check whether all modules are queried.
+    if i>0 && i>modtype[0] break
+    // Set pointer to module.
+    SYS.Killimm(0)
+    buf[0]=S_DEBUG
+    buf[1]=0x29                        // Write SPS registers multiple
+    $int2(buf+2)=2015                  // Register pointing to module array
+    $int2(buf+4)=1                     // Only one register to write
+    $int4(buf+6)=i                     // Contents of register
+    SYS.Sendimm(0,10,buf)
+    // Wait for answer, timeout 3 seconds.
+    t=Time()
+    while $A[0].length==0 do
+      if Time()-t>3000 return 1        // Timeout
+      if Pressed(hexit) return -1      // User has pressed Close
+      wait
+    enddo
+    if $A[0].answer!=S_DEBUG return 1  // Invalid answer
+    // Read number of modules (i=0) or module type (i=1..15).
+    buf[0]=S_DEBUG
+    buf[1]=0x28                        // Read SPS registers multiple
+    $int2(buf+2)=2016                  // Window to module array
+    $int2(buf+4)=1                     // Single register
+    SYS.Sendimm(0,6,buf)
+    // Wait for answer, timeout 3 seconds.
+    t=Time()
+    while $A[0].length==0 do
+      if Time()-t>3000 return 1        // Timeout
+      if Pressed(hexit) return -1      // User has pressed Close
+      wait
+    enddo
+    if $A[0].answer!=S_DEBUG || $A[0].length!=11 return 1
+    // Save answer.
+    modtype[i]=$int4($A[0]+7)
+  enddo
+  // Create tester signature.
+  h=($LAY.top[0]-$LAY.bottom[0])/1000
+  if h==155 then
+    n=Strcpy(signature,"A6")
+  else if h>=200 && h<=240 then
+    n=Strcpy(signature,"A5")
+  else
+    return 2
+  endif
+  for i=1,i<=modtype[0] && i<16,i++ do
+    n=n+sprintf(signature+n,"-%i",modtype[i])
+  enddo
+end
+
+// Determines minimal and maximal modules present on the screen. This
+// information is required to optimize the behaviour of routine that reads
+// actual state of inputs and outputs.
+function int Optimizeio()
+  int i
+  modimin=9999; modimax=0
+  for i=0,i<ninputs,i++ do
+    if input[i].addr<0 continue
+    modimin=Min(modimin,input[i].addr/10)
+    modimax=Max(modimax,input[i].addr/10)
+  enddo
+  modomin=9999; modomax=0
+  for i=0,i<noutputs,i++ do
+    if output[i].addr<0 continue
+    modomin=Min(modomin,output[i].addr/10)
+    modomax=Max(modomax,output[i].addr/10)
+  enddo
+  useanalog=0
+  analogmin=9999; analogmax=0
+  for i=0,i<nanalogs,i++ do
+    if analog[i].port>=2902 && analog[i].port<=2906 then
+      useanalog=1                      // Read analog I/Os on the NANO module
+    else
+      analogmin=Min(analogmin,analog[i].port)
+      analogmax=Max(analogmax,analog[i].port)
+    endif
+  enddo
+end
+
+// Reads actual state of inputs and outputs. Returns 1 if card tab was pressed
+// and -1 if user pressed Close button.
+function int Getiostate()
+  int i,j,t,ibase,icount,obase,ocount
+  char buf[256]
+  // Send request to read inputs.
+  SYS.Killimm(0)
+  ibase=modimin
+  icount=Max(1,modimax-modimin-1)
+  buf[0]=S_DEBUG
+  buf[1]=0x28                          // Read SPS registers multiple
+  $int2(buf+2)=2400+ibase              // Base regiser, 24 inputs per register
+  $int2(buf+4)=icount                  // Number of registers
+  SYS.Sendimm(0,6,buf)
+  // Send request to read outputs.
+  SYS.Killimm(1)
+  obase=modomin
+  ocount=Max(1,modomax-modomin-1)
+  buf[0]=S_DEBUG
+  buf[1]=0x28                          // Read SPS registers multiple
+  $int2(buf+2)=2500+obase              // Base regiser, 24 outputs per register
+  $int2(buf+4)=ocount                  // Number of registers
+  SYS.Sendimm(1,6,buf)
+  // Send request to read analog inputs/outputs on the base module.
+  SYS.Killimm(2)
+  if useanalog then
+    buf[0]=S_DEBUG
+    buf[1]=0x28                        // Read SPS registers multiple
+    $int2(buf+2)=2902                  // Base regiser
+    $int2(buf+4)=5                     // Number of registers
+    SYS.Sendimm(2,6,buf)
+  endif
+  // Wait for answers, timeout 1 second.
+  t=Time()
+  while (1) do
+    if Time()-t>1000 break
+    if Pressed(hcard) return 1
+    if Pressed(hexit) return -1
+    wait
+    if $A[0].length==0 continue
+    if $A[1].length==0 continue
+    if useanalog && $A[2].length==0 continue
+    break                              // All answers are here
+  enddo
+  // Get state of inputs.
+  if $A[0].answer==S_DEBUG && $A[0].length==7+icount*4 then
+    for i=0,i<icount,i++ do
+      t=$int4($A[0]+7+4*i)
+      for j=0,j<3,j++ do
+        if i+j>=16 continue
+        instate[ibase+i+j]=(t>>(j*8)) & 0xFF
+      enddo
+    enddo
+  else
+    for i=ibase,i<ibase+icount+3 && i<16,i++ do
+      instate[i]=-1                    // Undefine inputs
+    enddo
+  endif
+  // Get state of outputs.
+  if $A[1].answer==S_DEBUG && $A[1].length==7+ocount*4 then
+    for i=0,i<ocount,i++ do
+      t=$int4($A[1]+7+4*i)
+      for j=0,j<3,j++ do
+        if i+j>=16 continue
+        outstate[obase+i+j]=(t>>(j*8)) & 0xFF
+      enddo
+    enddo
+  else
+    for i=obase,i<obase+ocount+3 && i<16,i++ do
+      outstate[i]=-1                   // Undefine inputs
+    enddo
+  endif
+  // Get state of analog inputs/outputs on the base module.
+  if useanalog && $A[2].answer==S_DEBUG && $A[2].length==27 then
+    for i=0,i<4,i++ do
+      analogin[i]=$int4($A[2]+11+i*4)
+    enddo
+    analogout=$int4($A[2]+7)
+  else
+    for i=0,i<4,i++ do
+      analogin[i]=-1
+    enddo
+    analogout=-1
+  endif
+end
+
+// Updates actual state of all modules on the currently active page.
+function int Updateio()
+  int i,mod,inp,out,value,limit
+  // Update inputs.
+  for i=0,i<ninputs,i++ do
+    if input[i].addr<0 continue        // Pseudoinput
+    mod=input[i].addr/10
+    inp=input[i].addr%10
+    clear hinput[i]
+    draw window=hinput[i]
+    if instate[mod]==(-1) then         // State of input is undefined
+      draw color=DARKGRAY bkcolor=LIGHTGRAY
+    else if (instate[mod] & (1<<inp))==0 then
+      draw color=BLACK bkcolor=DARKGRAY
+    else
+      draw color=BLACK bkcolor=YELLOW
+    endif
+    draw at 6,6 fillellipse 12,12
+    draw show
+  enddo
+  // Update outputs.
+  for i=0,i<noutputs,i++ do
+    if output[i].addr<0 continue       // Pseudooutput
+    mod=output[i].addr/10
+    out=output[i].addr%10
+    if outstate[mod]==(-1) then        // State of output is undefined
+      change houtput[i] bkcolor=WHITE
+    else if (outstate[mod] & (1<<out))==0 then
+      output[i].laststate=0
+      change houtput[i] bkcolor=GRAY
+    else
+      output[i].laststate=1
+      change houtput[i] bkcolor=LIGHTRED
+    endif
+  enddo
+  // Update analog inputs/outputs on the base module.
+  for i=0,i<nanalogs,i++ do
+    if analog[i].port==2902 then
+      value=analogout
+      limit=255
+    else if analog[i].port>=2903 && analog[i].port<=2906 then
+      value=analogin[analog[i].port-2903]
+      limit=1023
+    else
+      value=-1
+      limit=0
+    endif
+    if value<0 then
+      change hanalog[i] text=""
+      change hanalog[i] limits=0,0
+    else
+      change hanalog[i] text=format("%i                                ",value)
+      change hanalog[i] limits=value,limit
+    endif
+  enddo
+end
+
+// Sets or resets specified SPS output.
+function int Setoutput(int addr,int state)
+  char buf[16]
+  buf[0]=S_DEBUG
+  buf[1]=0x1F                          // Low-level SPS command
+  $int4(buf+2)=autorestart             // Options
+  if state!=0 then
+    buf[6]='I'                         // Set output
+  else
+    buf[6]='J'                         // Reset output
+  endif
+  $xuint2(buf+7)=(addr/10)*8+(addr%10)
+  SYS.Sendimm(3,9,buf)
+end
+
+// Stops or restarts SPS.
+function int Stopsps(int stop)
+  char buf[16]
+  buf[0]=S_DEBUG
+  buf[1]=0x1F                          // Low-level SPS command
+  buf[6]='N'                           // Start/stop
+  if stop then
+    autorestart=0x00000001             // Disable SPS autorestart
+    buf[7]=0x02                        // Stop SPS
+  else
+    autorestart=0x00000000             // Enable SPS autorestart
+    buf[7]=0x01                        // Restart SPS
+  endif
+  $int4(buf+2)=autorestart             // Options
+  buf[8]=0xAA                          // Whole SPS, not the separate task
+  SYS.Sendimm(3,9,buf)
+end
+
+// Checks whether some output button was pressed and processes it.
+function int Processoutputs()
+  int i
+  for i=0,i<noutputs,i++ do
+    if Pressed(houtput[i])==0 continue
+    if output[i].ares1>=0 || output[i].ares2>=0 then
+      // Group of outputs.
+      if output[i].addr>=0 Setoutput(output[i].addr,1)
+      if output[i].ares1>=0 Setoutput(output[i].ares1,0)
+      if output[i].ares2>=0 Setoutput(output[i].ares2,0)
+    else
+      // Simple toggling output.
+      Setoutput(output[i].addr,!output[i].laststate)
+    endif
+  enddo
+end
+
+// Creates inputs according to supplied list of descriptions and fills control
+// structure input.
+function int Createinputs(char *ds,int bkcolor,int modview)
+  int i,j,x,y,mod,inp
+  char name[32]
+  i=ninputs; j=0
+  while 1 do
+    if i>=NINPUTS break                // Table full
+    if ds[j]=='\0' break               // End of description list
+    if modview then
+      x=Scanint(ds+j+INXMOD)           // X coordinate, module view
+      y=Scanint(ds+j+INYMOD)           // Y coordinate, module view
+    else
+      if ds[j+INMODE]=='x' then
+        j=j+NN; continue               // Reserved input
+      endif
+      x=Scanint(ds+j+INXHW)            // X coordinate, hardware view
+      y=Scanint(ds+j+INYHW)            // Y coordinate, hardware view
+    endif
+    mod=Scanint(ds+j+INMOD)            // Module
+    inp=Scanint(ds+j+ININP)            // Input on module
+    Scanname(ds+j+INNAME,name)         // Short input name
+    hinput[i]=control CHILD            // Create input control
+      window=hgraph
+      position=x-6,y-6,13,13
+      help=format("输入 I%i.%02i (%s%s%s)",mod,inp,name,                      \
+        ds[j+INDESCR]=='\0'?"":", ",ds+j+INDESCR)
+      color=bkcolor
+      bkcolor=bkcolor
+      size=128
+    endc
+    Strcpy(input[i].name,name)
+    input[i].addr=(mod-1)*10+inp-1     // Internally, mods/ins are 0-based
+    if modview then
+      draw window=hgraph color=BLACK font=SMALLFONT mode=M_LEFT
+      draw at x+8,y+6 text=(name[0]=='i'?name+1:name)
+    endif
+    i++; j=j+NN
+  enddo
+  ninputs=i
+end
+
+// Creates outputs according to supplied list of descriptions and fills control
+// structure output. If flag passive is set, buttons are disabled and pressing
+// them will cause no action.
+function int Createoutputs(char *ds,int passive,int modview)
+  int i,j,x,y,d,mod,out,mode,mod1,out1,mod2,out2,modnext,outnext
+  char name[32],s[256]
+  i=noutputs; j=0
+  while 1 do
+    if i>=NOUTPUTS break               // Table full
+    if ds[j]=='\0' break               // End of description list
+    mode=ds[j+OUTMODE]
+    if modview then
+      if mode=='z' then
+        j=j+NN; continue               // Zeroing pseudooutput
+      endif
+      x=Scanint(ds+j+OUTXMOD)          // X coordinate, module view
+      y=Scanint(ds+j+OUTYMOD)          // Y coordinate, module view
+    else
+      if mode=='x' then
+        j=j+NN; continue               // Reserved output
+      endif
+      x=Scanint(ds+j+OUTXHW)           // X coordinate, hardware view
+      y=Scanint(ds+j+OUTYHW)           // Y coordinate, hardware view
+    endif
+    mod=Scanint(ds+j+OUTMOD)           // Module
+    out=Scanint(ds+j+OUTOUT)           // Output on module
+    if (mode=='+' || mode=='-' || mode=='z') && j>=NN then
+      mod1=Scanint(ds+(j-NN)+OUTMOD)
+      out1=Scanint(ds+(j-NN)+OUTOUT)
+    else
+      mod1=0; out1=0
+    endif
+    if mode=='z' && j>=2*NN && ds[j-2*NN+OUTMODE]=='+' then
+      mod2=Scanint(ds+(j-2*NN)+OUTMOD)
+      out2=Scanint(ds+(j-2*NN)+OUTOUT)
+    else
+      mod2=0; out2=0
+    endif
+    Scanname(ds+j+OUTNAME,name)        // Short output name
+    // Determine button (half)size.
+    d=(modview==0 && (mode=='+' || mode=='-' || mode=='z' || mode=='t')?11:7)
+    // Create comment.
+    if modview==0 && mode=='z' && mod2>0 then
+      sprintf(s,"Press to reset %s O%i.%02i and O%i.%02i",                     \
+      ds+j+OUTDESCR,mod2,out2,mod1,out1)
+    else if modview==0 && mode=='z' then
+      sprintf(s,"Press to reset O%i.%02i (%s)",                                \
+      mod1,out1,ds+j+OUTDESCR)
+    else
+      sprintf(s,"Output O%i.%02i (%s%s%s)",mod,out,name,                       \
+      ds[j+OUTDESCR]=='\0'?"":", ",ds+j+OUTDESCR)
+    endif
+    // Create button.
+    houtput[i]=control BUTTON          // Create output control
+      window=hgraph
+      position=x-d,y-d,2*d+1,2*d+1
+      help=s
+      color=WHITE                      // Will be changed later
+    endc
+    // Fill control structure.
+    Strcpy(output[i].name,name)
+    output[i].addr=(mod-1)*10+out-1    // Internally, mods/ins are 0-based
+    if mode=='+' then
+      if ds[j+NN]=='\0' then
+        modnext=0; outnext=0
+      else
+        modnext=Scanint(ds+(j+NN)+OUTMOD)
+        outnext=Scanint(ds+(j+NN)+OUTOUT)
+      endif
+      output[i].ares1=(modnext-1)*10+outnext-1
+      output[i].ares2=-1
+    else if mode=='-' then
+      output[i].ares1=(mod1-1)*10+out1-1
+      output[i].ares2=-1
+    else if mode=='z' then
+      output[i].ares1=(mod1-1)*10+out1-1
+      output[i].ares2=(mod2-1)*10+out2-1
+    else
+      output[i].ares1=-1
+      output[i].ares2=-1
+    endif
+    output[i].passive=passive
+    // Name button.
+    if modview then
+      draw window=hgraph color=BLACK font=SMALLFONT mode=M_LEFT
+      draw at x+10,y+6 text=(name[0]=='o'?name+1:name)
+    else if mode=='z' then
+      draw window=hgraph color=BLACK font=SMALLFONT mode=M_CENTERED
+      draw at x,y+3*d+16 text=name
+    endif
+    i++; j=j+NN
+  enddo
+  noutputs=i
+end
+
+// Creates analog inputs and outputs according to supplied list of descriptions
+// and fills control structure analog.
+function int Createanalogs(char *ds,int modview)
+  int i,j,x,y,out,port
+  char name[32]
+  for i=nanalogs,i<NANALOGS,i++ do
+    j=(i-nanalogs)*NN
+    if ds[j]=='\0' break               // End of description list
+    x=Scanint(ds+j+IOX)                // X coordinate
+    y=Scanint(ds+j+IOY)                // Y coordinate
+    out=(Toupper(ds[j+IOTYPE])=='O')   // Whether output
+    port=Scanint(ds+j+IOPORT)          // Register
+    Scanname(ds+j+IONAME,name)         // Short analog I/O name
+    hanalog[i]=control PROGRESS        // Create indicator
+      window=hgraph
+      position=x,y,70,16
+      help=format("模拟 %s %i (%s, %s)",                                     \
+        out?"output":"input",port,name,ds+j+IODESCR)
+      color=BLACK
+      bkcolor=WHITE
+      font=MAINFONT
+      mode=M_LEFT|M_PERCENT
+      limits=0,0
+    endc
+    Strcpy(analog[i].name,name)
+    analog[i].port=port
+    analog[i].out=out
+    if modview then
+      draw window=hgraph color=BLACK font=SMALLFONT mode=M_LEFT
+      draw at x,y-1
+      if Memcmp(name,"ri",2)==0 || Memcmp(name,"ro",2)==0 then
+        draw text=name+2
+      else
+        draw text=name
+      endif
+    endif
+  enddo
+  nanalogs=i
+end
+
+
+////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////// DRAWING ROUTINES ///////////////////////////////
+
+// Draws mechanical fixture where all SPS modules are mounted. Coordinate y is
+// that of SPS module.
+function int Drawfixture(int y)
+  y=y+MODDY/2-30
+  draw window=hgraph color=BLACK bkcolor=BROWN
+  draw at 10,y fillrect DX-22,y+60
+  draw at 10,y+12 to DX-22,y+12
+  draw at 10,y+48 to DX-22,y+48
+end
+
+// Draws SPS module at specified position (left top corner).
+function int Drawspsmodule(int x,int y,int width,char *name)
+  draw window=hgraph color=BLACK bkcolor=LIGHTYELLOW
+  draw bkcolor=DARKGRAY at x,y fillrect x+5,y+MODDY
+  draw bkcolor=WHITEGREEN at x+4,y+4 fillrect x+width-4,y+MODDY-4
+  draw bkcolor=DARKGRAY at x+width-5,y fillrect x+width,y+MODDY
+  draw font=FIXEDSYS mode=M_CENTERED
+  draw at x+width/2,y+22 text=name
+end
+
+// Draws sequence of graphical primitives.
+function int Drawsequence(char *ds)
+  int j,fg,bg,x0,y0,x1,y1
+  draw window=hgraph mode=M_CENTERED
+  while 1 do
+    if ds[j]=='\0' break
+    // Get foreground color.
+    switch ds[j+GRAPHFG]
+      case 'W': fg=WHITE
+      case 'A': fg=GRAY
+      case 'L': fg=LIGHTGRAY
+      case 'R': fg=LIGHTRED
+      case 'G': fg=LIGHTGREEN
+      case 'B': fg=LIGHTBLUE
+      case 'Y': fg=YELLOW
+      default : fg=BLACK
+    endsw
+    // Get background color.
+    switch ds[j+GRAPHBG]
+      case 'K': bg=BLACK
+      case 'A': bg=GRAY
+      case 'L': bg=LIGHTGRAY
+      case 'R': bg=PINK
+      case 'G': bg=WHITEGREEN
+      case 'B': bg=WHITEBLUE
+      case 'Y': bg=LIGHTYELLOW
+      case ' ': bg=-1
+      default : bg=WHITE
+    endsw
+    // Get coordinates.
+    x0=Scanint(ds+j+GRAPHX0)
+    y0=Scanint(ds+j+GRAPHY0)
+    x1=Scanint(ds+j+GRAPHX1)
+    y1=Scanint(ds+j+GRAPHY1)
+    // Draw primitive.
+    draw color=fg at x0,y0
+    switch ds[j+GRAPHTYPE]
+      case 'L': draw to x1,y1
+      case 'R':
+        if bg<0 then
+          draw rect x1,y1
+        else
+          draw bkcolor=bg fillrect x1,y1
+        endif
+      case 'C':
+        if bg<0 then
+          draw ellipse x1,y1
+        else
+          draw bkcolor=bg fillellipse x1,y1
+        endif
+      case 'T': draw font=SMALLFONT text=ds+j+GRAPHTEXT
+      case 'M': draw font=MAINFONT text=ds+j+GRAPHTEXT
+    endsw
+    j=j+ND
+  enddo
+end
+
+
+////////////////////////////////////////////////////////////////////////////////
+//////////////// AUTOMATICAL BASE UNIT AND SHUTTLE, MODULE VIEW ////////////////
+
+// SPS inputs on A6 automate base unit.
+// M XHW YHW XMD YMD II.II Name             Description
+char a6autobasein[25][NN] = {                                                  \
+  "  709 237 160  64 01.01 iEOKeyFront      front emergency button OK",        \
+  "  467 237 160  82 01.02 iEOKeyBackside   back emergency button OK",         \
+  "  709 200 160 100 01.03 iEOCoverOpen     cover closed",                     \
+  "  575 237 160 118 01.04 iOutputOn        output unit on",                   \
+  "  501 311 160 136 01.05 iEOCompressAir   compressed air OK",                \
+  "    0   0 160 154 01.06 iEOMotorPat      motor protection in paternoster",  \
+  "    0   0 160 172 01.07 iEOKeyPater      paternoster emergency button",     \
+  "    0   0 160 190 01.08 iCheckRelPat     relaycheck paternoster",           \
+  "    0   0 395  64 02.01 iEOMotUnload     motor protection in unload unit",  \
+  "    0   0 395  82 02.02 iEOKeyUnload     emergency button in unload unit",  \
+  "    0   0 395 100 02.03 iEOMarkingUnit   output unit full",                 \
+  "    0   0 395 118 02.04 iCheckRelUnload  relaycheck unload unit",           \
+  "  605 237 395 136 02.05 iPowerOff        shutdown active",                  \
+  "    0   0 395 154 02.06 iPatActiv        paternoster active",               \
+  "    0   0 395 172 02.07 iUnlActiv        unloader active",                  \
+  "  635 237 395 190 02.08 iControlOn       control on",                       \
+  "  665 237 515  64 03.01 i2Hand           2-hand control active",            \
+  "    0   0 515  82 03.02 iKeyWidthAdjust  key in width adjustment position", \
+  "    0   0 515 100 03.03 iKeyCalibration  key in calibration position",      \
+  "    0   0 515 118 03.04 iSwWidTogether   width reduction button",           \
+  "    0   0 515 136 03.05 iSwWidSpread     width spreading button",           \
+  "    0   0 515 154 03.06 iLinePowerOff    line power off",                   \
+  "    0   0 515 172 03.07 iLinePowerOn     line power on",                    \
+  "    0   0 515 190 03.08 iHeadPowerOff    heads power off",                  \
+  "" }
+
+// SPS inputs on A6 automatical shuttle.
+// M XHW YHW XMD YMD II.II Name             Description
+char a6autoshuttlein[25][NN] = {                                               \
+  "  321 305  40 284 05.01 iTstBandOutRi    band under the PCB right",         \
+  "  101 305  40 302 05.02 iTstBandOutLe    band under the PCB left",          \
+  "  321 330  40 320 05.03 iTstBandInRi     band moved out right",             \
+  "  101 330  40 338 05.04 iTstBandInLe     band moved out left",              \
+  "  344 317  40 356 05.05 iTstProdDownRi   product is down right",            \
+  "   78 317  40 374 05.06 iTstProdDownLe   product is down left",             \
+  "  303 321  40 392 05.07 iTstClampInRi    sideclamp pushed out right",       \
+  "  119 321  40 410 05.08 iTstClampInLe    sideclamp pushed out left",        \
+  "  287 321 285 284 06.01 iTstCatRiStPos   sidecatch pushed in right",        \
+  "  135 321 285 302 06.02 iTstCatLeStPos   sidecatch pushed in left",         \
+  "  171 341 285 320 06.03 iTstPusherUp     pusher is up",                     \
+  "  171 361 285 338 06.04 iTstPusherDown   pusher is down",                   \
+  "  211 321 285 356 06.05 iTstPusherBack   pusher is back",                   \
+  "  211 298 285 374 06.06 iTstPushInFront  pusher is in front",               \
+  "   68  68 285 392 06.07 iTstStoppUp      stopper is up",                    \
+  "   68  89 285 410 06.08 iTstStoppDown    stopper is down",                  \
+  "  211 347 520 284 07.01 iTstFirstLight   inlet sensor",                     \
+  "  211 240 520 302 07.02 iTstSecondLight  second light sensor",              \
+  "  211  52 520 320 07.03 iTstOutletSens   outlet sensor",                    \
+  "x   0   0 520 338 07.04 reserved",                                          \
+  "x   0   0 520 356 07.05 reserved",                                          \
+  "x   0   0 520 374 07.06 reserved",                                          \
+  "x   0   0 520 392 07.07 reserved",                                          \
+  "x   0   0 520 410 07.08 reserved",                                          \
+  "" }
+
+// SPS outputs on A6 automate base unit.
+// M XHW YHW XMD YMD OO.OO Name             Description
+char a6autobaseout[18][NN] = {                                                 \
+  "  635 267 260  64 01.01 oControlOn       turn PLC on",                      \
+  "  675  53 260  82 01.02 oIndicatorRed    red traffic light",                \
+  "  675  78 260 100 01.03 oIndicatorYellow yellow traffic light",             \
+  "  675 103 260 118 01.04 oIndicatorGreen  green traffic light",              \
+  "x   0   0 260 136 01.05 reserved",                                          \
+  "    0   0 260 154 01.06 oTstMotorEnable  enable shuttle band",              \
+  "    0   0 260 172 01.07 oRelPatEmergBrid bridge emergency on paternoster",  \
+  "    0   0 260 190 01.08 oRelUnEmergBridg bridge emergency on unload unit",  \
+  "+ 131 385 637  64 04.01 oWidthSpreading  spread width",                     \
+  "- 131 429 637  82 04.02 oWidthTogether   reduce width",                     \
+  "z 131 407               Width            width spread/reduce outputs",      \
+  "t  91 385 637 100 04.03 oEnableWidthAdj  enable width adjustment",          \
+  "t  51 385 637 118 04.04 oWidthFastStop   fast stop width adjustment",       \
+  "    0   0 637 136 04.05 oLinePower       turn automation power on",         \
+  "    0   0 637 154 04.06 oResultGood      open good compartment",            \
+  "    0   0 637 172 04.07 oResultBad       open bad compartment",             \
+  "    0   0 637 190 04.08 oVacuumboxOff    turn off vacuum",                  \
+  "" }
+
+// SPS outputs on A6 automatical shuttle.
+// M XHW YHW XMD YMD OO.OO Name             Description
+char a6autoshuttleout[33][NN] = {                                              \
+  "+ 291 385 140 284 05.01 oTstBandOut      move bands away",                  \
+  "- 291 429 140 302 05.02 oTstBandIn       move bands under the PCB",         \
+  "z 291 407               Bands            bands in/out outputs",             \
+  "+ 171 385 140 320 05.03 oTstPusherUp     move pusher up",                   \
+  "- 171 429 140 338 05.04 oTstPusherDown   move pusher down",                 \
+  "z 171 407               Up/Dn            pusher up/down outputs",           \
+  "+ 211 385 140 356 05.05 oTstPusherFront  move pusher to the front",         \
+  "- 211 429 140 374 05.06 oTstPusherBack   move pusher back",                 \
+  "z 211 407               Push             pusher front/back outputs",        \
+  "+ 331 385 140 392 05.07 oTstClampOut     push sideclamp out",               \
+  "- 331 429 140 410 05.08 oTstClampIn      push sideclamp in",                \
+  "z 331 407               Clamp            clamps in/out outputs",            \
+  "+ 451 385 385 284 06.01 oTstStopperUp    move stopper up",                  \
+  "- 451 429 385 302 06.02 oTstStopperDown  move stopper down",                \
+  "z 451 407               Stopper          stopper up/down outputs",          \
+  "+ 371 385 385 320 06.03 oTstPCBLift      lift product",                     \
+  "- 371 429 385 338 06.04 oTstPCBUnlift    move product down",                \
+  "z 371 407               Lift             lift up/down outputs",             \
+  "+ 251 385 385 356 06.05 oTstPusClamFront catch in front",                   \
+  "- 251 429 385 374 06.06 oTstPusClamBack  catch back",                       \
+  "z 251 407               Catcher          catch in/back outputs",            \
+  "+ 411 385 385 392 06.07 oTstCatchOut     move sidecatch pusher out",        \
+  "- 411 429 385 410 06.08 oTstCatchIn      move sidecatch pusher in",         \
+  "z 411 407               Side             sidecatch in/out outputs",         \
+  "    0   0 620 284 07.01 oPatStopperUp    move paternoster stopper up",      \
+  "    0   0 620 302 07.02 oPatStopperDown  move paternoster stopper down",    \
+  "x   0   0 620 320 07.03 oValveReserve3   reserved valve 3",                 \
+  "x   0   0 620 338 07.04 oValveReserve4   reserved valve 4",                 \
+  "x   0   0 620 356 07.05 reserved",                                          \
+  "x   0   0 620 374 07.06 reserved",                                          \
+  "x   0   0 620 392 07.07 reserved",                                          \
+  "x   0   0 620 410 07.08 reserved",                                          \
+  "" }
+
+// Analog inputs and outputs on the NANO_D module, SPS module view.
+// XXX YYY IRRRR Name               Description
+char a6autobaseanalogmod[5][NN] = {                                            \
+  " 40  70 I2903 riSpeedTestband    speed of transporting band",               \
+  " 40 100 I2905 riPatMotorLeTurns  rotation of left paternoster motor",       \
+  " 40 130 I2906 riPatMotorRiTurns  rotation of right paternoster motor",      \
+  " 40 180 O2902 roMotBandWidth     speed of width adjustment",                \
+  "" }
+
+// Creates modular view of A6 automatical base unit and shuttle.
+function int Drawa6automainmod()
+  // Remove old controls.
+  clear hgraph
+  ninputs=0
+  noutputs=0
+  nanalogs=0
+  // Base unit modules.
+  Drawfixture(20)
+  Drawspsmodule(20,20,355,"NANO-D 70-A1")
+  Drawspsmodule(375,20,120,"N-ID8 70-A2")
+  Drawspsmodule(495,20,120,"N-ID8 70-A3")
+  Drawspsmodule(615,20,120,"N-OD8 70-A4")
+  Createinputs(a6autobasein,WHITEGREEN,1)
+  Createoutputs(a6autobaseout,1,1)
+  Createanalogs(a6autobaseanalogmod,1)
+  // Shuttle modules.
+  Drawfixture(240)
+  Drawspsmodule(20,240,235,"N-IO16 71-A6")
+  Drawspsmodule(265,240,235,"N-IO16 71-A7")
+  Drawspsmodule(500,240,235,"N-IO16 71-A8")
+  Createinputs(a6autoshuttlein,WHITEGREEN,1)
+  Createoutputs(a6autoshuttleout,1,1)
+  // Update controls.
+  Optimizeio()
+  Updateio()
+  draw window=hgraph show
+end
+
+// Automatical shuttle on A6 tester.
+// T FB X00 Y00 X01 Y01
+char drawa6autoshuttle[37][ND] = {    \
+  "R AW  35 270 386 277",             \// Shuttle: supporting rod
+  "R AW  85  40 155 360",             \// Shuttle: left slider
+  "R AW 145  40 155 360",             \// Shuttle: left slider
+  "R AW 266  40 336 360",             \// Shuttle: right slider
+  "R AW 266  40 276 360",             \// Shuttle: right slider
+  "R KW  69 280  86 326",             \// Left lifting cylinder
+  "R KW  90 294 111 340",             \// Left band cylinder
+  "R KW 110 284 127 330",             \// Left clamp cylinder
+  "R KW 126 284 143 330",             \// Left sidecatch cylinder
+  "R KW 278 284 295 330",             \// Right sidecatch cylinder
+  "R KW 294 284 311 330",             \// Right clamp cylinder
+  "R KW 310 294 331 340",             \// Right band cylinder
+  "R KW 335 280 352 326",             \// Right lifting cylinder
+  "R AW  45  55  91 101",             \// Stopper: cylinder
+  "R AW 201  60 220 155",             \// Stopper: brick
+  "R AW  90  60 220  96",             \// Stopper: arm
+  "R KW 201 250 220 330",             \// Shuttle: pusher
+  "R K   35  40 386 360",             \// Shuttle: base contour
+  "R KW 160 330 181 370",             \// Pusher up/down
+  "R KA 658  37 691  41",             \// Traffic lights: top hat
+  "R KR 660  40 689  66",             \// Traffic lights: red lamp
+  "R KY 660  65 689  91",             \// Traffic lights: yellow lamp
+  "R KG 660  90 689 116",             \// Traffic lights: green lamp
+  "R KA 658 115 691 119",             \// Traffic lights: bottom
+  "R KW 670 118 679 141",             \// Traffic lights: handle
+  "R KW 450 140 725 360",             \// Tester: main contour
+  "L K  450 220 725 220",             \// Tester: cover
+  "R KW 485 160 690 200",             \// Tester: window
+  "C KW 466 236  24  24",             \// Tester: left emergency switch
+  "C KW 708 236  24  24",             \// Tester: right emergency switch
+  "C AW 500 335  15  15",             \// Air: tube bottom
+  "R AW 493 320 508 335",             \// Air: tube
+  "R WW 494 320 507 336",             \// Air: tube
+  "R AW 495 291 506 320",             \// Air: thrush
+  "C AW 500 310  25  25",             \// Air: manometer
+  "T K  500 357 Air"    ,             \// Air: label
+  "" }
+
+function int Drawa6autoshuttle()
+  // Remove old controls.
+  clear hgraph
+  ninputs=0
+  noutputs=0
+  nanalogs=0
+  // Draw shuttle and place controls.
+  Drawsequence(drawa6autoshuttle)
+  Createinputs(a6autobasein,WHITE,0)
+  Createinputs(a6autoshuttlein,WHITE,0)
+  Createoutputs(a6autobaseout,1,0)
+  Createoutputs(a6autoshuttleout,1,0)
+  // Update controls.
+  Optimizeio()
+  Updateio()
+  draw window=hgraph show
+end
+
+
+////////////////////////////////////////////////////////////////////////////////
+//////////////////// AUTOMATION EXTENTION UNIT, MODULE VIEW ////////////////////
+
+// SPS inputs on A6 unloading unit.
+// M XHW YHW XMD YMD II.II Name             Description
+char a6autounlin[25][NN] = {                                                   \
+  "   40  64  40  64 09.01 iUnlMarkBegin    band begin marker",                \
+  "   40  82  40  82 09.02 iUnlBegin        band begin unloader",              \
+  "   40 100  40 100 09.03 iUnlbadExLeDo    left bad stacker",                 \
+  "   40 118  40 118 09.04 iUnlbadExRiDo    right bad stacker",                \
+  "   40 136  40 136 09.05 iUnlGoodExLeDo   left good stacker down",           \
+  "   40 154  40 154 09.06 iUnlGoodExRiDo   right good stacker down",          \
+  "   40 172  40 172 09.07 iUnlGoodExLeUp   left good stacker up",             \
+  "   40 190  40 190 09.08 iUnlGoodExRiUp   right good stacker up",            \
+  "  275  64 275  64 10.01 iUnlMarkLaid     marker laid on",                   \
+  "  275  82 275  82 10.02 iUnlBadLaid      bad pile laid on",                 \
+  "  275 100 275 100 10.03 iUnlGoodLaid     good pile laid on",                \
+  "  275 118 275 118 10.04 iUnlMarkStLeUp   left marker stopper up",           \
+  "  275 136 275 136 10.05 iUnlMarkStRiUp   right marker stopper up",          \
+  "  275 154 275 154 10.06 iUnlBadStLeUp    left bad stopper up",              \
+  "  275 172 275 172 10.07 iUnlBadStRiUp    Right bad stopper up",             \
+  "x 275 190 275 190 10.08 reserved",                                          \
+  "  395  64 395  64 11.01 iUnlGoStopLeUp   left good stopper up",             \
+  "  395  82 395  82 11.02 iUnlGoStopRiUp   right good stopper up",            \
+  "  395 100 395 100 11.03 iUnlBadFull      bad pile full",                    \
+  "  395 118 395 118 11.04 iUnlBadHaFull    bad pile half full",               \
+  "  395 136 395 136 11.05 iUnlBadBoFull    bad pile full below",              \
+  "  395 154 395 154 11.06 iUnlGoodFull     good pile full",                   \
+  "  395 172 395 172 11.07 iUnlGoodHaFull   good pile half full",              \
+  "  395 190 395 190 11.08 iUnlGoodBoFull   good pile full below",             \
+  "" }
+
+// SPS inputs on A6 marking unit and paternoster.
+// M XHW YHW XMD YMD II.II Name             Description
+char a6autopaterinmod[33][NN] = {                                              \
+  "   40 284  40 284 12.01 iMarkReference   reference marker",                 \
+  "   40 302  40 302 12.02 iServoBTB        error in servocontroller",         \
+  "   40 320  40 320 12.03 iPapRecogn       paper sucked",                     \
+  "   40 338  40 338 12.04 iPapTop          paper cylinder up",                \
+  "   40 356  40 356 12.05 iPapBottom       paper cylinder down",              \
+  "x  40 374  40 374 12.06 reserved",                                          \
+  "x  40 392  40 392 12.07 reserved",                                          \
+  "x  40 410  40 410 12.08 reserved",                                          \
+  "  275 284 275 284 13.01 iPatFastUpOK     paternoster fast up",              \
+  "  275 302 275 302 13.02 iPatbandBegin    paternoster band begin",           \
+  "  275 320 275 320 13.03 iPatBandEnd      paternoster waiting position",     \
+  "  275 338 275 338 13.04 iPatRollLeft     left roller bar in",               \
+  "  275 356 275 356 13.05 iPatRollRight    right roller bar in",              \
+  "  275 374 275 374 13.06 iPatClaPCBExis   product to catch exists",          \
+  "  275 392 275 392 13.07 iPatClaBackRi    catch on the right back",          \
+  "  275 410 275 410 13.08 iPatClaBackLe    catch on the left back",           \
+  "  395 284 395 284 14.01 iPatStPosLeft    left paternoster stop position",   \
+  "  395 302 395 302 14.02 iPatStPosRight   right paternoster stop position",  \
+  "  395 320 395 320 14.03 iPatVacuum       vacuum OK",                        \
+  "  395 338 395 338 14.04 iPatPusherBack   paternoster pusher back",          \
+  "  395 356 395 356 14.05 iPatPusherFront  paternoster pusher in front pos",  \
+  "  395 374 395 374 14.06 iPatLaserLeft    left paternoster laser sensor",    \
+  "  395 392 395 392 14.07 iPatLaserRight   right paternoster laser sensor",   \
+  "x 395 410 395 410 14.08 reserved",                                          \
+  "  525 284 525 284 16.01 iPatSuctLeOff    left suction plate cylinder out",  \
+  "  525 302 525 302 16.02 iPatSuctLeOn     left suction plate cylinder in",   \
+  "  525 320 525 320 16.03 iPatFreeLeOff    left free suction plate out",      \
+  "  525 338 525 338 16.04 iPatFreeLeOn     left free suction plate in",       \
+  "  525 356 525 356 16.05 iPatSuctRiOff    right suction plate cylinder out", \
+  "  525 374 525 374 16.06 iPatSuctRiOn     right suction plate cylinder in",  \
+  "  525 392 525 392 16.07 iPatFreeRiOff    right free suction plate out",     \
+  "  525 410 525 410 16.08 iPatFreeRiOn     right free suction plate in",      \
+  "" }
+
+// SPS outputs on A6 unloading unit.
+// M XHW YHW XMD YMD OO.OO Name             Description
+char a6autounlout[9][NN] = {                                                   \
+  "  140  64 140  64 09.01 oEnableLine      enable bands",                     \
+  "  140  82 140  82 09.02 oUnStopperMark   lift stopper in marking unit",     \
+  "  140 100 140 100 09.03 oUnStopperBad    lift stopper in bad stacker",      \
+  "  140 118 140 118 09.04 oUnStopperGood   lift stopper in good stacker",     \
+  "  140 136 140 136 09.05 oUnLiftBadRight  run right motor in bad pile",      \
+  "  140 154 140 154 09.06 oUnLiftBadLeft   run left motor in bad pile",       \
+  "  140 172 140 172 09.07 oUnLiftGoRight   run right motor in good pile",     \
+  "  140 190 140 190 09.08 oUnLiftGoLeft    run left motor in good pile",      \
+  "" }
+
+// SPS outputs on A6 marking unit and paternoster.
+// M XHW YHW XMD YMD OO.OO Name             Description
+char a6autopaterout[17][NN] = {                                                \
+  "  140 284 140 284 12.01 oPapVacuum       turn paper vacuum on",             \
+  "  140 302 140 302 12.02 oPapSuctPlate    move paper suction unit down",     \
+  "x 140 320 140 320 12.03 reserved",                                          \
+  "  140 338 140 338 12.04 oInkjetStart     start inkjet printer",             \
+  "  140 356 140 356 12.05 oInkPrintDir     inkjet printing direction",        \
+  "  140 374 140 374 12.06 oServoReset      reset servo axis",                 \
+  "  140 392 140 392 12.07 oEnableMarking   enable marking axle",              \
+  "  140 410 140 410 12.08 oPatVacuumPump   turn vacuum pump on",              \
+  "  625 284 625 284 16.01 oPatStartLeft    enable left paternoster brake",    \
+  "  625 302 625 302 16.02 oPatStartRight   enable right paternoster brake",   \
+  "  625 320 625 320 16.03 oPatPusher       activate pusher cylinder",         \
+  "  625 338 625 338 16.04 oPatSuctCylTop   move suction plate up",            \
+  "  625 356 625 356 16.05 oPatSuctCylBot   move suction plate down",          \
+  "  625 374 625 374 16.06 oPatRoller       roller bar",                       \
+  "  625 392 625 392 16.07 oPatClamp        product clamping",                 \
+  "  625 410 625 410 16.08 oPatSuctionOn    turn vacuum on",                   \
+  "" }
+
+function int Drawa6autoextmod()
+  // Remove old controls.
+  clear hgraph
+  ninputs=0
+  noutputs=0
+  nanalogs=0
+  // Unloading unit.
+  Drawfixture(20)
+  Drawspsmodule(20,20,235,"N-IO16 72-A8")
+  Drawspsmodule(255,20,120,"N-ID8 72-A9")
+  Drawspsmodule(375,20,120,"N-ID8 72-A10")
+  Createinputs(a6autounlin,WHITEGREEN,1)
+  Createoutputs(a6autounlout,1,1)
+  // Marking unit and paternoster.
+  Drawfixture(240)
+  Drawspsmodule(20,240,235,"N-IO16 72-A12")
+  Drawspsmodule(255,240,120,"N-ID8 72-A13")
+  Drawspsmodule(375,240,120,"N-ID8 72-A14")
+  Drawspsmodule(505,240,235,"N-IO16 72-A16")
+  Createinputs(a6autopaterinmod,WHITEGREEN,1)
+  Createoutputs(a6autopaterout,1,1)
+  // Update controls.
+  Optimizeio()
+  Updateio()
+  draw window=hgraph show
+end
+
+
+////////////////////////////////////////////////////////////////////////////////
+///////////////////////// A6 MANUAL STRETCHING SHUTTLE /////////////////////////
+
+// SPS inputs on A6 manual tester.
+// M XHW YHW XMD YMD II.II Name             Description
+char a6manstdin[17][NN] = {                                                    \
+  "  709 237  60  64 01.01 iEOKeyFront      front emergency button pushed",    \
+  "  467 237  60  82 01.02 iEOKeyBackside   back emergency button pushed",     \
+  "  709 200  60 100 01.03 iEOCoverOpen     cover open",                       \
+  "  575 237  60 118 01.04 iOutputOn        output unit on",                   \
+  "  501 311  60 136 01.05 iEOCompressAir   compressed air on",                \
+  "  605 237  60 154 01.06 iPowerOff        shutdown active",                  \
+  "  635 237  60 172 01.07 iControlOn       control on",                       \
+  "  605 260  60 190 01.08 iKeyBrake        brake release key",                \
+  "  665 237 295  64 02.01 i2Hand           2-hand control active",            \
+  "  171 298 295  82 02.02 iPusherUp        pusher up",                        \
+  "  171 321 295 100 02.03 iPusherDown      pusher down",                      \
+  "  211 321 295 118 02.04 iPusherOut       pusher out",                       \
+  "  211 242 295 136 02.05 iPCB             board over the pusher",            \
+  "  370 298 295 154 02.06 iTstCloseSensor  close sensor",                     \
+  "  370 321 295 172 02.07 iTstOpenSensor   open sensor",                      \
+  "x 280 190 295 190 02.08 reserved",                                          \
+  "" }
+
+// SPS outputs on A6 manual tester.
+// M XHW YHW XMD YMD OO.OO Name             Description
+char a6manstdout[31][NN] = {                                                   \
+  "  635 260 160  64 01.01 oControlOn       turn PLC on",                      \
+  "  675  53 160  82 01.02 oIndicatorRed    red traffic light",                \
+  "  675  78 160 100 01.03 oIndicatorYellow yellow traffic light",             \
+  "  675 103 160 118 01.04 oIndicatorGreen  green traffic light",              \
+  "x 485 400 160 136 01.05 reserved",                                          \
+  "x 505 400 160 154 01.06 reserved",                                          \
+  "x 525 400 160 172 01.07 reserved",                                          \
+  "x 545 400 160 190 01.08 reserved",                                          \
+  "+ 371 385 417  64 03.01 oLock            lock shuttle",                     \
+  "- 371 429 417  82 03.02 oUnlock          unlock shuttle",                   \
+  "z 371 407               Lock             shuttle lock/unlock outputs",      \
+  "+ 171 385 417 100 03.03 oPusherUp        move pusher up",                   \
+  "- 171 429 417 118 03.04 oPusherDown      move pusher down",                 \
+  "z 171 407               Up/Dn            pusher up/down outputs",           \
+  "+ 211 385 417 154 03.06 oPusherIn        move pusher to the front",         \
+  "- 211 429 417 136 03.05 oPusherOut       move pusher back",                 \
+  "z 211 407               In/Out           pusher front/back outputs",        \
+  "+ 291 385 417 172 03.07 oPress           clamp product",                    \
+  "- 291 429 417 190 03.08 oUnpress         unstretch product",                \
+  "z 291 407               Press            clamp/unstretch outputs",          \
+  "+ 331 385 537  64 04.01 oPull            stretch product",                  \
+  "- 331 429 537  82 04.02 oPush            unclamp product",                  \
+  "z 331 407               Stretch          stretch/unclamp outputs",          \
+  "+ 251 385 537 100 04.03 oFixForward      catch product in front",           \
+  "- 251 429 537 118 04.04 oUnfix           move catcher out",                 \
+  "z 251 407               Fix              catcher outputs",                  \
+  "x 565 400 537 136 04.05 reserved",                                          \
+  "x 585 400 537 154 04.06 reserved",                                          \
+  "x 605 400 537 172 04.07 reserved",                                          \
+  "x 625 400 537 190 04.08 reserved",                                          \
+  "" }
+
+// Manual shuttle on A6 tester.
+// T FB X00 Y00 X01 Y01
+char drawa6manshuttle[25][ND] = {     \
+  "L A   75  40  75 360",             \// Shuttle: left line
+  "L A  346  40 346 360",             \// Shuttle: right line
+  "R AW  35 270 386 277",             \// Shuttle: supporting rod
+  "R AW 145  40 155 360",             \// Shuttle: left slider
+  "R AW 266  40 276 360",             \// Shuttle: right slider
+  "R KW 201 250 220 330",             \// Shuttle: pusher
+  "R K   35  40 386 360",             \// Shuttle: base contour
+  "R KA 658  37 691  41",             \// Traffic lights: top hat
+  "R KR 660  40 689  66",             \// Traffic lights: red lamp
+  "R KY 660  65 689  91",             \// Traffic lights: yellow lamp
+  "R KG 660  90 689 116",             \// Traffic lights: green lamp
+  "R KA 658 115 691 119",             \// Traffic lights: bottom
+  "R KW 670 118 679 141",             \// Traffic lights: handle
+  "R KW 450 140 725 360",             \// Tester: main contour
+  "L K  450 220 725 220",             \// Tester: cover
+  "R KW 485 160 690 200",             \// Tester: window
+  "C KR 466 236  24  24",             \// Tester: left emergency switch
+  "C KR 708 236  24  24",             \// Tester: right emergency switch
+  "C AW 500 335  15  15",             \// Air: tube bottom
+  "R AW 493 320 508 335",             \// Air: tube
+  "R WW 494 320 507 336",             \// Air: tube
+  "R AW 495 291 506 320",             \// Air: thrush
+  "C AW 500 310  25  25",             \// Air: manometer
+  "T K  500 357 Air"    ,             \// Air: label
+  "" }
+
+function int Drawa6manualstdshuttle()
+  // Remove old controls.
+  clear hgraph
+  ninputs=0
+  noutputs=0
+  nanalogs=0
+  // Draw shuttle and place controls.
+  Drawsequence(drawa6manshuttle)
+  Createinputs(a6manstdin,WHITE,0)
+  Createoutputs(a6manstdout,1,0)
+  // Update controls.
+  Optimizeio()
+  Updateio()
+  draw window=hgraph show
+end
+
+function int Drawa6manualstdmod()
+  // Remove old controls.
+  clear hgraph
+  ninputs=0
+  noutputs=0
+  nanalogs=0
+  // Draw modules.
+  Drawfixture(20)
+  Drawspsmodule(20,20,255,"NANO-B 4-A1")
+  Drawspsmodule(275,20,120,"N-ID8 4-A2")
+  Drawspsmodule(395,20,120,"N-OD8 4-A3")
+  Drawspsmodule(515,20,120,"N-OD8 4-A4")
+  Createinputs(a6manstdin,WHITEGREEN,1)
+  Createoutputs(a6manstdout,1,1)
+  // Update controls.
+  Optimizeio()
+  Updateio()
+  draw window=hgraph show
+end
+
+
+////////////////////////////////////////////////////////////////////////////////
+//////////////////////////////// A5 STANDARD SF ////////////////////////////////
+
+// SPS inputs on A5 standard tester with cf shuttle.
+// M XHW YHW XMD YMD II.II Name             Description
+char a5mansfstdin[17][NN] = {                                                  \
+  "  674 257  60  64 01.01 iEOKey           emergency button",                 \
+  "  699 185  60  82 01.02 iEOCoverOpen     cover open",                       \
+  "  699 272  60 100 01.03 iPowerOff        shutdown active",                  \
+  "  699 242  60 118 01.04 iControlOn       control on",                       \
+  "  649 242  60 136 01.05 iKeyBrake        brake release key",                \
+  "   85 300  60 154 01.06 iTstCloseSensor  close sensor",                     \
+  "   85 280  60 172 01.07 iTstOpenSensor   open sensor",                      \
+  "x 605 260  60 190 01.08 reserved",                                          \
+  "  338 325 295  64 02.01 iShuttleUp       shuttle secure up",                \
+  "  338 345 295  82 02.02 iShuttleDown     shuttle secure down",              \
+  "  649 272 295 100 02.03 iCoverKey        shuttle key",                      \
+  "x 211 321 295 118 02.04 reserved",                                          \
+  "x 211 242 295 136 02.05 reserved",                                          \
+  "x 370 298 295 154 02.06 reserved",                                          \
+  "x 370 321 295 172 02.07 reserved",                                          \
+  "x 280 190 295 190 02.08 reserved",                                          \
+  "" }
+
+// SPS outputs on A5 standard tester with cf shuttle.
+// M XHW YHW XMD YMD OO.OO Name             Description
+char a5mansfstdout[23][NN] = {                                                 \
+  "  674 292 160  64 01.01 oControlOn       turn PLC on",                      \
+  "  665  53 160  82 01.02 oIndicatorRed    red traffic light",                \
+  "  665  78 160 100 01.03 oIndicatorYellow yellow traffic light",             \
+  "  665 103 160 118 01.04 oIndicatorGreen  green traffic light",              \
+  "+ 338 385 160 136 01.05 oUnlock          unlock shuttle brake",             \
+  "z 338 407               Unlock           lock shuttle again",               \
+  "+ 238 385 160 154 01.06 oShuttleAdjust   adjust shuttle",                   \
+  "z 238 407               Adjust           finish adjust",                    \
+  "x 525 400 160 172 01.07 reserved",                                          \
+  "x 545 400 160 190 01.08 reserved",                                          \
+  "+ 458 385 417  64 03.01 oGood            open good compartment",            \
+  "z 458 407               Good             close good compartment",           \
+  "+ 508 385 417  82 03.02 oBad             open bad compartment",             \
+  "z 508 407               Bad              close bad compartment",            \
+  "  699 205 417 100 03.03 oUnlockCover     unlock cover",                     \
+  "+ 558 385 417 118 03.04 oVacuumOff       turn vacuum OFF",                  \
+  "z 558 407               Vacuum           turn vacuum ON",                   \
+  "+ 288 385 417 136 03.05 oShuttleFineAdj  fine shuttle adjust",              \
+  "z 288 407               FineAdj          finish fine adjust",               \
+  "x 211 385 417 154 03.06 LightTop         top illumination",                 \
+  "x 291 385 417 172 03.07 LightBottom      bottom illumination",              \
+  "x 291 429 417 190 03.08 reserved",                                          \
+  "" }
+
+// Manual A5 tester with cf shuttle.
+// T FB X00 Y00 X01 Y01
+char drawa5sfstd[19][ND] = {          \
+  "R AW  95 110 326 310",             \// Shuttle: inner contour
+  "R K   45  60 376 360",             \// Shuttle: base contour
+  "R KA 648  37 681  41",             \// Traffic lights: top hat
+  "R KR 650  40 679  66",             \// Traffic lights: red lamp
+  "R KY 650  65 679  91",             \// Traffic lights: yellow lamp
+  "R KG 650  90 679 116",             \// Traffic lights: green lamp
+  "R KA 648 115 681 119",             \// Traffic lights: bottom
+  "R KW 660 118 669 141",             \// Traffic lights: handle
+  "R KW 440 140 715 360",             \// Tester: main contour
+  "L K  440 220 715 220",             \// Tester: cover
+  "R KW 475 160 680 200",             \// Tester: window
+  "C KR 673 256  24  24",             \// Tester: emergency switch
+  "" }
+
+function int Drawa5stdsf()
+  // Remove old controls.
+  clear hgraph
+  ninputs=0
+  noutputs=0
+  nanalogs=0
+  // Draw shuttle and place controls.
+  Drawsequence(drawa5sfstd)
+  Createinputs(a5mansfstdin,WHITE,0)
+  Createoutputs(a5mansfstdout,1,0)
+  // Update controls.
+  Optimizeio()
+  Updateio()
+  draw window=hgraph show
+end
+
+function int Drawa5stdmodsf()
+  // Remove old controls.
+  clear hgraph
+  ninputs=0
+  noutputs=0
+  nanalogs=0
+  // Draw modules.
+  Drawfixture(20)
+  Drawspsmodule(20,20,255,"NANO-A 12-K10")
+  Drawspsmodule(275,20,120,"N-ID8 12-K11")
+  Drawspsmodule(395,20,120,"N-OD8 12-K12")
+  Createinputs(a5mansfstdin,WHITEGREEN,1)
+  Createoutputs(a5mansfstdout,1,1)
+  // Update controls.
+  Optimizeio()
+  Updateio()
+  draw window=hgraph show
+end
+
+
+////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////// A5 STANDARD //////////////////////////////////
+
+// SPS inputs on A5 standard tester with manual shuttle.
+// M XHW YHW XMD YMD II.II Name             Description
+char a5manstdin[9][NN] = {                                                     \
+  "  699 242  60  64 01.01 iControlOn       control on",                       \
+  "  674 257  60  82 01.02 iEOKey           emergency button",                 \
+  "  699 185  60 100 01.03 iEOCoverOpen     cover open",                       \
+  "  649 242  60 118 01.04 iKeyBrake        brake release key",                \
+  "  699 267  60 136 01.05 iControlOff      control off",                      \
+  "   85 300  60 154 01.06 iShuttleClose    shuttle close sensor",             \
+  "x 605 260  60 172 01.07 reserved",                                          \
+  "x 605 260  60 190 01.08 reserved",                                          \
+  "" }
+
+// SPS outputs on A5 standard tester with manual shuttle.
+// M XHW YHW XMD YMD OO.OO Name             Description
+char a5manstdout[11][NN] = {                                                   \
+  "  674 292 160  64 01.01 oControlOn       turn PLC on",                      \
+  "+ 338 385 160  82 01.02 oUnlock          unlock shuttle brake",             \
+  "z 338 407               Unlock           lock shuttle again",               \
+  "  665  53 160 100 01.03 oIndicatorRed    red traffic light",                \
+  "  665  78 160 118 01.04 oIndicatorYellow yellow traffic light",             \
+  "  665 103 160 136 01.05 oIndicatorGreen  green traffic light",              \
+  "+ 558 385 417 154 01.06 oVacuumOff       turn vacuum OFF",                  \
+  "z 558 407               Vacuum           turn vacuum ON",                   \
+  "x 525 400 160 172 01.07 reserved",                                          \
+  "x 545 400 160 190 01.08 reserved",                                          \
+  "" }
+
+// A5 tester with manual shuttle.
+// T FB X00 Y00 X01 Y01
+char drawa5std[19][ND] = {            \
+  "R AW  95 110 326 310",             \// Shuttle: inner contour
+  "R K   45  60 376 360",             \// Shuttle: base contour
+  "R KA 648  37 681  41",             \// Traffic lights: top hat
+  "R KR 650  40 679  66",             \// Traffic lights: red lamp
+  "R KY 650  65 679  91",             \// Traffic lights: yellow lamp
+  "R KG 650  90 679 116",             \// Traffic lights: green lamp
+  "R KA 648 115 681 119",             \// Traffic lights: bottom
+  "R KW 660 118 669 141",             \// Traffic lights: handle
+  "R KW 440 140 715 360",             \// Tester: main contour
+  "L K  440 220 715 220",             \// Tester: cover
+  "R KW 475 160 680 200",             \// Tester: window
+  "C KR 673 256  24  24",             \// Tester: emergency switch
+  "" }
+
+function int Drawa5std()
+  // Remove old controls.
+  clear hgraph
+  ninputs=0
+  noutputs=0
+  nanalogs=0
+  // Draw shuttle and place controls.
+  Drawsequence(drawa5std)
+  Createinputs(a5manstdin,WHITE,0)
+  Createoutputs(a5manstdout,1,0)
+  // Update controls.
+  Optimizeio()
+  Updateio()
+  draw window=hgraph show
+end
+
+function int Drawa5stdmod()
+  // Remove old controls.
+  clear hgraph
+  ninputs=0
+  noutputs=0
+  nanalogs=0
+  // Draw modules.
+  Drawfixture(20)
+  Drawspsmodule(20,20,255,"NANO-A")
+  Createinputs(a5manstdin,WHITEGREEN,1)
+  Createoutputs(a5manstdout,1,1)
+  // Update controls.
+  Optimizeio()
+  Updateio()
+  draw window=hgraph show
+end
+
+
+////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////// MAIN ROUTINE /////////////////////////////////
+
+// Tab selections for different tester signatures.
+// ID Tabname                    Signature
+char siglist[15][NN] = {                                                       \
+  "01 Shuttle                    A6-1-0-0",                                    \
+  "02 SPS module view            A6-1-0-0",                                    \
+  "03 Shuttle                    A6-1-1-0-2-2-2-5-2-1-1-128-2-1-1-4",          \
+  "04 Main module view           A6-1-1-0-2-2-2-5-2-1-1-128-2-1-1-4",          \
+  "05 Extention module view      A6-1-1-0-2-2-2-5-2-1-1-128-2-1-1-4",          \
+  "03 Shuttle                    A6-1-1-0-2-2-2-254-2-1-1-128-2-1-1-4",        \
+  "04 Main module view           A6-1-1-0-2-2-2-254-2-1-1-128-2-1-1-4",        \
+  "05 Extention module view      A6-1-1-0-2-2-2-254-2-1-1-128-2-1-1-4",        \
+  "06 A5 manual cf               A5-1-0",                                      \
+  "07 Module view                A5-1-0",                                      \
+  "06 A6 manual cf               A6-1-0",                                      \
+  "07 Module view                A6-1-0",                                      \
+  "08 A5 manual                  A5",                                          \
+  "09 Module view                A5",                                          \
+  "" }
+
+function int main()
+  int i,j,card,newcard
+  char tabname[256]
+  hmain=control WINDOW
+    window=NULL
+    position=10,10,DX+10,DY+37
+    name=format("A5/A6 SPS状态查看器v%s",VERSION)
+    help=" "
+    bkcolor=GRAY
+  endc
+  hstop=control BUTTON
+    window=hmain
+    position=5,DY+10,90,22
+    name="停止SPS"
+    help="按下可以暂停SPS程序"
+  endc
+  hstart=control BUTTON
+    window=hmain
+    position=100,DY+10,90,22
+    name="重启 SPS"
+    help="按下可以重启SPS程序"
+  endc
+  hexit=control BUTTON
+    window=hmain
+    position=DX-65,DY+10,70,22
+    name="关闭"
+    help="关闭SPS状态查看器"
+  endc
+  hcard=control CARD
+    window=hmain
+    position=5,5,DX,DY
+    help="选择要监视的单元"
+    font=INFOFONT
+  endc
+  hgraph=control GRAPH
+    window=hcard
+    position=6,29,DX-12,DY-35
+    help=" "
+    color=BLACK
+    bkcolor=WHITE
+  endc
+  // Determine type of SPS/tester.
+  i=Readmoduletypes()
+
+//i=0
+//Strcpy(signature,"A5")
+
+  if i<0 return                        // User pressed button Close
+  if i==1 then
+    Showmessage("Unable to communicate with SPS!",                             \
+      "Script is unable to determine the type of the SPS. Most probable "      \
+      "reasons are disabled hardware or busy crate computer. Press Close to "  \
+      "finish the script. ")
+    return
+  else if i==2 then
+    Showmessage("Unable to determine type of tester!",                         \
+      "Script is unable to determine whether you have A5 or A6 flying "        \
+      "tester. Please load layout or get it from the tester. If this will "    \
+      "not help, contact atg for actualized version. Press Close to finish "   \
+      "the script. ")
+    return
+  endif
+  // Walk list of signatures and add tabs to the card window.
+  ntabid=0
+  for i=0,1,i++ do
+    if siglist[i,0]=='\0' break        // End of signature list
+    if Strcmp(siglist[i]+SIGSIG,signature)==0 then
+      j=SIGSIG-SIGTAB
+      Memcpy(tabname,siglist[i]+SIGTAB,j);
+      while j>0 && tabname[j-1]==' ' do j--; enddo
+      tabname[j]='\0'
+      add hcard text=tabname
+      tabid[ntabid]=Scanint(siglist[i]+SIGID)
+      ntabid++
+    endif
+  enddo
+  if ntabid==0 then                    // No data for this tester
+    Showmessage("Unrecognized tester!",                                        \
+      "Tester with actual set of SPS modules is not known to this script. "    \
+      "Please contact atg to receive the actualized version. Report the "      \
+      "following SPS module signature:\n\n   %s\n\nPress Close to finish "     \
+      "the script. ",signature)
+    return
+  endif
+  // Mark state of all inputs and outputs as undefined.
+  for i=0,i<16,i++ do
+    instate[i]=-1
+    outstate[i]=-1
+  enddo
+  for i=0,i<4,i++ do
+    analogin[i]=-1
+  enddo
+  analogout=-1
+  card=-1
+  cardpressed=1
+  // Main loop.
+  while 1 do
+    if Pressed(hexit) then
+      break
+    else if Pressed(hstop) then
+      Stopsps(1)
+    else if Pressed(hstart) then
+      Stopsps(0)
+    else if Pressed(hcard) || cardpressed then
+      cardpressed=0
+      newcard=Status(hcard)
+      if newcard==card continue
+      card=newcard
+      switch tabid[card]
+      case 1:                          // A6 manual stretch shuttle
+        Drawa6manualstdshuttle()
+      case 2:                          // A6 manual stretch (modules)
+        Drawa6manualstdmod()
+      case 3:                          // A6 auto shuttle
+        Drawa6autoshuttle()
+      case 4:                          // A6 auto base unit (modules)
+        Drawa6automainmod()
+      case 5:                          // A6 auto extention (modules)
+        Drawa6autoextmod()
+      case 6:                          // A5 standard cf
+        Drawa5stdsf()
+      case 7:                          // A5 standard cf (modules)
+        Drawa5stdmodsf()
+      case 8:                          // A5 standard
+        Drawa5std()
+      case 9:                          // A5 standard (modules)
+        Drawa5stdmod()
+      endsw
+    endif
+    i=Getiostate()
+    if i==1 cardpressed=1
+    if i<0 break                       // Close button was pressed
+    Updateio()
+    Processoutputs()
+    wait
+  enddo
+end
+

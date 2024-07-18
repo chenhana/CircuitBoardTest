@@ -1,0 +1,1064 @@
+#include "ls.icl"
+
+#define VERSION        "1.01"
+#define DESCRIPTION    "Parameters of the Test Player"
+
+// 1.01: Bugfix for values consisting of the single word.
+
+// Special keywords (case insensitive)
+//
+// description: '$' acts as a line feed
+//
+// value:       bool  0/1  yes/no  on/off  int  integer  float  file
+//              absolute file  relative file  path  absolute path
+//              relative path  string  don't change  obsolete
+//
+// default:     none  varies
+
+#define NGROUP         64              // Max number of groups
+#define NKEY           512             // Max total number of keys
+#define NVAL           5               // Max number of predefined values
+#define SNAME          80              // Max length of short name
+#define LNAME          260             // Max length of long name
+#define NTEXT          512             // Max length of comment or text
+
+#define MAINDX         800             // Width of client area of main window
+#define MAINDY         600             // Height of client area of main window
+#define LISTDX         220             // Width of item list
+#define BTNDX          80              // Width of pushbuttons
+#define SBTNX1         60              // Width of first short pushbutton
+#define SBTNX2         40              // Width of second short pushbutton
+#define BTNDY          24              // Height of pushbuttons
+
+#define VT_UNDEF       0               // Undefined key value type
+#define VT_BOOL        1               // Boolean key (0/1)
+#define VT_YESNO       2               // Boolean key (no/yes)
+#define VT_ONOFF       3               // Boolean key (off/on)
+#define VT_INT         4               // Integer key
+#define VT_FLOAT       5               // Floting key
+#define VT_FILE        6               // File name
+#define VT_RELFILE     7               // File name relative to TP
+#define VT_PATH        8               // Path
+#define VT_RELPATH     9               // Relative path
+#define VT_STRING     10               // Text string
+#define VT_NOCHG      11               // Key cannot be changed by user
+
+typedef struct t_group                 // Descriptor of the group
+  char           name[SNAME]           // Group name, as in .ini
+  char           meaning[LNAME]        // Extended group name
+  int            pos                   // Position in the list
+ends
+
+typedef struct t_key                   // Descriptor of the initialization key
+  char           name[SNAME]           // Key name, as in .ini
+  int            group                 // The group this key belongs to
+  int            pos                   // Position in the list
+  int            type                  // Type of the value, one of VT_xxx
+  char           descr[NTEXT]          // Associated description
+  char           note[LNAME]           // Associated note
+  char           caveat[LNAME]         // Associated caveat
+  char           example[SNAME]        // Associated example
+  char           val[NVAL][SNAME]      // Predefined values as text
+  char           valexpl[NVAL][LNAME]  // Meaning of predefined values
+  int            nvalue                // Number of predefined values
+  char           default[LNAME]        // Default value as text
+ends
+
+handle           hmain                 // Main window
+handle           hlist                 // List of items
+handle           hfindtxt              // Text to search
+handle           hfind                 // Search button
+handle           hgroup                // Meaning of the selected group
+handle           hitem                 // Item name
+handle           hdescr                // Item description
+handle           hexit                 // Close button
+
+handle           hvar                  // Child with variable controls
+handle           hactual               // Actual value
+handle           hdef                  // Default value
+handle           hsetdef               // Set default button
+handle           hnew                  // New value
+handle           hbronew               // Browse new value
+handle           hsetnew               // Set new value
+handle           hval[NVAL]            // Predefined values
+handle           hsetval[NVAL]         // Set predefined value
+
+char             fconfig[LNAME]        // Path to fconfig.ini
+char             fconfigdef[LNAME]     // Path to fconfig_default.ini
+char             tppath[LNAME]         // Path to Test Player with backslash
+struct t_group   group[NGROUP]         // Groups
+int              ngroup                // Actual number of parsed groups
+int              currgroup             // Currently parsed group
+struct t_key     key[NKEY]             // Keys
+int              nkey                  // Actual number of parsed keys
+
+int              selection             // Position of the selected list item
+int              selectedgroup         // Index of selected group or -1 if none
+int              selecteditem          // Index of selected item or -1 if none
+
+handle           kernel32              // Handle of kernel32.dll
+handle           shlwapi               // Handle of shlwapi.dll
+
+// Displays modal "dialog box" with error message.
+function int Error(char *s1,char *s2)
+  handle herr,hdummy,hok
+  herr=control WINDOW
+    window=hmain
+    position=0,0,250,135
+    name="错误"
+    mode=M_MODAL
+    bkcolor=YELLOW
+  endc
+  hok=control BUTTON
+    window=herr
+    position=85,100,80,24
+    name="确定"
+    help="按下可以确认错误消息"
+  endc
+  hdummy=control ICON
+    window=herr
+    position=5,30,36,36
+    name="EXCLAM"
+    bkcolor=YELLOW
+  endc
+  hdummy=control TEXT
+    window=herr
+    position=41,20,200,24
+    name=s1
+    bkcolor=YELLOW
+    mode=M_CENTERED
+  endc
+  hdummy=control TEXT
+    window=herr
+    position=41,45,200,54
+    name=s2
+    bkcolor=YELLOW
+    mode=M_CENTERED
+  endc
+  while Pressed(hok)==0 do; enddo
+  destroy herr
+end
+
+// Calculates number of leading spaces in the string s.
+function int Skipspaces(char *s)
+  int n
+   while s[n]==' ' || s[n]=='\t' do
+     n++
+   enddo
+   return n
+end
+
+// Calculates number of leading spaces and some punctuations in the string s.
+function int Skipnoise(char *s)
+  int n
+   while s[n]==' ' || s[n]=='\t' || s[n]==':' do
+     n++
+   enddo
+   return n
+end
+
+// Given item value, suggests its type. Returns one of VT_xxx or VT_UNDEF on
+// error or if there is no suggestion. This is the last resort; better
+// specify item type explicitly.
+function int Suggesttype(char *value)
+  int i,j,k,haspoint,hasback,hasletter
+  char drv[LNAME],dir[LNAME],nam[LNAME],ext[LNAME]
+  i=Skipspaces(value)
+  if value[i]=='\0' return VT_UNDEF    // Empty value, no suggestion
+  // Check for decimal points, backslashes and letters.
+  for j=i,value[j]!='\0',j++ do
+    if value[j]=='.' then
+      haspoint=1+hasletter
+    else if value[j]=='\\' then
+      hasback=1
+    else if Isalpha(value[j]) then
+      hasletter++
+    endif
+  enddo
+  // Simple cases.
+  if value[i]=='-' && Isdigit(value[i+1]) && hasletter==0 then
+    if haspoint==0 return VT_INT       // Negative integer number
+    return VT_FLOAT                    // Negative floating-point number
+  endif
+  if Isdigit(value[i]) && hasletter==0 && sscanf(value+i,"%i",&k)==1 then
+    if haspoint!=0 return VT_FLOAT     // Positive floating-point number
+    if k>1 return VT_INT               // Positive integer number, not boolean
+  endif
+  if (hasback!=0 || haspoint!=0) && hasletter!=0 then
+    Fnsplit(value+i,drv,dir,nam,ext)
+    if ext[0]=='\0' return VT_PATH     // Directory
+    return VT_FILE                     // File name
+  endif
+  // Special boolean cases.
+  for k=0,value[i+k]!='\0',k++ do
+    if Isalpha(value[i+k])==0 && Isdigit(value[i+k])==0 break
+  enddo
+  if Strnicmp(value+i,"yes",k)==0 || Strnicmp(value+i,"no",k)==0 then
+    return VT_YESNO                    // Boolean key (yes/no)
+  else if Strnicmp(value+i,"on",k)==0 || Strnicmp(value+i,"off",k)==0 then
+    return VT_ONOFF                    // Boolean key (on/off)
+  endif
+  // No suggestion.
+  return VT_UNDEF
+end
+
+// Adds new item (of type t_key) to the list of items and clears descriptor.
+// OllyTest does not support passing of the structures as parameters. Returns 0
+// on success and -1 on error.
+function int Addnewitem(char *k)
+  struct t_key dummy
+  if nkey>=NKEY then
+    Error("Too many keys in default initialization file",fconfigdef)
+    return -1
+  endif
+  Memcpy(dummy,k,Sizeof(dummy))
+  // Check if standard values are required.
+  if dummy.nvalue==0 then
+    if dummy.type==VT_BOOL then
+      Strcpy(dummy.val+SNAME*0,"0")
+      Strcpy(dummy.valexpl+LNAME*0,"disable this feature")
+      Strcpy(dummy.val+SNAME*1,"1")
+      Strcpy(dummy.valexpl+LNAME*1,"enable this feature")
+      dummy.nvalue=2
+    else if dummy.type==VT_YESNO then
+      Strcpy(dummy.val+SNAME*0,"yes")
+      Strcpy(dummy.valexpl+LNAME*0,"enable this feature")
+      Strcpy(dummy.val+SNAME*1,"no")
+      Strcpy(dummy.valexpl+LNAME*1,"disable this feature")
+      dummy.nvalue=2
+    else if dummy.type==VT_ONOFF then
+      Strcpy(dummy.val+SNAME*0,"on")
+      Strcpy(dummy.valexpl+LNAME*0,"turn on this feature")
+      Strcpy(dummy.val+SNAME*1,"off")
+      Strcpy(dummy.valexpl+LNAME*1,"turn off this feature")
+      dummy.nvalue=2
+    endif
+  endif
+  // Note that if structure is passed as a parameter, it is silently converted
+  // to character array with 1-byte size of the single element!
+  Memcpy(key+nkey*Sizeof(dummy),dummy,Sizeof(dummy))
+  if currgroup<0 then
+    Error("This item belongs to no group:",key[nkey].name)
+    return -1
+  endif
+  key[nkey].group=currgroup
+  nkey++
+end
+
+// Parses the fconfig_default.ini. Returns 0 on success and -1 on error.
+function int Parsefconfigdefault()
+  int i,j,n,ndescr,nnote,ncaveat,valmode
+  char kwd[32],s[512],name[SNAME],groupmeaning[LNAME]
+  handle f
+  struct t_key key
+  f=Fopen(fconfigdef,"rt")
+  if f==NULL then
+    Error("Unabe to open default initialization file",fconfigdef)
+    return -1
+  endif
+  ngroup=0
+  nkey=0
+  currgroup=-1
+  groupmeaning[0]='\0'
+  // Read lines, one by one, and process them.
+  while 1 do
+    // Get next line.
+    if fscanf(f,"%s",s)<0 break        // End of file reached
+    n=Strlen(s)
+    if n==0 continue
+    // Remove trailing noise and carriage return/line feed. Note that leading
+    // spaces are stripped automatically by fscanf().
+    while n>0 && (s[n-1]=='\n' || s[n-1]==' ' || s[n-1]=='#' || s[n-1]=='\t') do
+      n--
+    enddo
+    if n==0 continue
+    s[n]='\0'
+    i=Skipspaces(s)
+    if s[i]=='/' && s[i+1]=='/' then
+      // Comment.
+      i=i+2+Skipspaces(s+i+2)
+      // Check if keyword. Keyword is a word consisting only of letters
+      // followed by a colon (may be separated by one or several spaces).
+      for j=0,j<31,j++ do
+        if Isalpha(s[i+j])==0 break
+        kwd[j]=Toupper(s[i+j])
+      enddo
+      kwd[j]='\0'
+      if j>0 then
+        while s[i+j]==' ' || s[i+j]=='\t' do j++; enddo
+        if s[i+j]==':' &&                                                      \
+          (Strcmp(kwd,"GROUP")==0 || Strcmp(kwd,"ITEM")==0 ||                  \
+          Strcmp(kwd,"VALUE")==0 || Strcmp(kwd,"TYPE")==0 ||                   \
+          Strcmp(kwd,"VALUES")==0 || Strcmp(kwd,"DEFAULT")==0 ||               \
+          Strcmp(kwd,"DESCRIPTION")==0 || Strcmp(kwd,"NOTE")==0 ||             \
+          Strcmp(kwd,"EXAMPLE")==0 || Strcmp(kwd,"CAVEAT")==0)                 \
+        then
+          i=i+j+1+Skipspaces(s+i+j+1)  // Confirmed known keyword
+        else
+          kwd[0]='\0'                  // Not a keyword
+        endif
+      endif
+      if Strcmp(kwd,"GROUP")==0 then
+        // Group meaning.
+        Strcpy(groupmeaning,s+i)
+      else if Strcmp(kwd,"ITEM")==0 then
+        // Start of new item. If previous item is defined, add it to the table.
+        if (key.name[0]!='\0') then
+          if Addnewitem(key)<0 return -1
+        endif
+        Memset(key,0,Sizeof(key))
+        Strcpy(key.name,s+i)
+        groupmeaning[0]='\0'
+        ndescr=0; nnote=0; ncaveat=0; valmode=0
+      else if Strcmp(kwd,"VALUE")==0 || Strcmp(kwd,"TYPE")==0 then
+        // Verbal description of the allowed value, defines data type.
+        if Strnicmp(s+i,"BOOL",4)==0 then
+          key.type=VT_BOOL
+        else if Strnicmp(s+i,"0/1",3)==0 then
+          key.type=VT_BOOL
+        else if Strnicmp(s+i,"YES/NO",6)==0 then
+          key.type=VT_YESNO
+        else if Strnicmp(s+i,"ON/OFF",6)==0 then
+          key.type=VT_ONOFF
+        else if Strnicmp(s+i,"INT",3)==0 then
+          key.type=VT_INT              // Limits may follow!
+        else if Strnicmp(s+i,"FLOAT",5)==0 then
+          key.type=VT_FLOAT
+        else if Strnicmp(s+i,"FILE",4)==0 then
+          key.type=VT_FILE
+        else if Strnicmp(s+i,"ABSOLUTE FILE",13)==0 then
+          key.type=VT_FILE
+        else if Strnicmp(s+i,"RELATIVE FILE",13)==0 then
+          key.type=VT_RELFILE
+        else if Strnicmp(s+i,"PATH",4)==0 then
+          key.type=VT_PATH
+        else if Strnicmp(s+i,"ABSOLUTE PATH",13)==0 then
+          key.type=VT_PATH
+        else if Strnicmp(s+i,"RELATIVE PATH",13)==0 then
+          key.type=VT_RELPATH
+        else if Strnicmp(s+i,"STRING",6)==0 then
+          key.type=VT_STRING
+        else if Strnicmp(s+i,"DON'T",5)==0 then
+          key.type=VT_NOCHG
+        else if Strnicmp(s+i,"OBSOLETE",8)==0 then
+          key.type=VT_NOCHG
+        endif
+        ndescr=0; nnote=0; ncaveat=0; valmode=0
+      else if Strcmp(kwd,"VALUES")==0 then
+        // Start of the list of values.
+        ndescr=0; nnote=0; ncaveat=0
+        key.nvalue=0
+        for n=0,n<SNAME-1,n++ do
+          if s[i]==' ' || s[i]=='\t' || s[i]==',' ||                           \
+            s[i]==';' || s[i]==':' || s[i]=='\0' break
+          key.val[key.nvalue][n]=s[i]; i++
+        enddo
+        if n==0 continue
+        key.val[key.nvalue][n]='\0'
+        while 1 do
+          if s[i]!=' ' && s[i]!='\t' && s[i]!=',' &&                           \
+            s[i]!=';' && s[i]!=':' break
+          i++
+        enddo
+        Strncpy(key.valexpl+key.nvalue*LNAME,s+i,LNAME)
+        key.nvalue=key.nvalue+1
+        valmode=1
+      else if Strcmp(kwd,"DEFAULT")==0 then
+        // Default value. Spaces are not allowed. Form "key=value" is supported.
+        for n=0,n<SNAME-1,n++ do
+          if s[i]==' ' || s[i]=='\t' || s[i]==',' ||                           \
+            s[i]==';' || s[i]=='\0' break
+          if s[i]=='=' && Strnicmp(name,key.name,n)==0 then
+            n=-1; i++
+            continue
+          endif
+          name[n]=s[i]; i++
+        enddo
+        name[n]='\0'
+        if Stricmp(name,"NONE")==0 || Stricmp(name,"NONE.")==0 then
+          key.default[0]='\0'
+        else
+          Strcpy(key.default,name)
+          if key.type==VT_UNDEF key.type=Suggesttype(name)
+        endif
+        ndescr=0; nnote=0; ncaveat=0; valmode=0
+      else if Strcmp(kwd,"EXAMPLE")==0 then
+        // Example.
+        Strncpy(key.example,s+i,SNAME)
+        ndescr=0; nnote=0; ncaveat=0; valmode=0
+      else if Strcmp(kwd,"DESCRIPTION")==0 then
+        // Description.
+        ndescr=0; nnote=0; ncaveat=0; valmode=0
+        while ndescr<NTEXT-1 && s[i]!='\0' do
+          if s[i]=='$' then
+            key.descr[ndescr]='\n'
+          else
+            key.descr[ndescr]=s[i]
+          endif
+          i++; ndescr++
+        enddo
+        key.descr[ndescr]='\0'
+      else if Strcmp(kwd,"NOTE")==0 then
+        // Caveat.
+        ndescr=0; nnote=0; ncaveat=0; valmode=0
+        while nnote<LNAME-1 && s[i]!='\0' do
+          key.note[nnote]=s[i]
+          i++; nnote++
+        enddo
+        key.note[nnote]='\0'
+      else if Strcmp(kwd,"CAVEAT")==0 then
+        // Caveat.
+        ndescr=0; nnote=0; ncaveat=0; valmode=0
+        while ncaveat<LNAME-1 && s[i]!='\0' do
+          key.caveat[ncaveat]=s[i]
+          i++; ncaveat++
+        enddo
+        key.caveat[ncaveat]='\0'
+      else if ndescr>0 then
+        // Continuation of the previous description.
+        i=i+Skipnoise(s+i)
+        if ndescr<NTEXT-1 then
+          key.descr[ndescr]=' '        // Add space if continuation
+          ndescr++
+        endif
+        while ndescr<NTEXT-1 && s[i]!='\0' do
+          if s[i]=='$' then
+            key.descr[ndescr]='\n'
+          else
+            key.descr[ndescr]=s[i]
+          endif
+          i++; ndescr++
+        enddo
+        key.descr[ndescr]='\0'
+      else if nnote>0 then
+        // Continuation of the previous note.
+        i=i+Skipnoise(s+i)
+        if nnote<LNAME-1 then
+          key.note[nnote]=' '          // Add space if continuation
+          nnote++
+        endif
+        while nnote<LNAME-1 && s[i]!='\0' do
+          key.note[nnote]=s[i]
+          i++; nnote++
+        enddo
+        key.note[nnote]='\0'
+      else if ncaveat>0 then
+        // Continuation of the previous caveat.
+        i=i+Skipnoise(s+i)
+        if ncaveat<LNAME-1 then
+          key.caveat[ncaveat]=' '      // Add space if continuation
+          ncaveat++
+        endif
+        while ncaveat<LNAME-1 && s[i]!='\0' do
+          key.caveat[ncaveat]=s[i]
+          i++; ncaveat++
+        enddo
+        key.caveat[ncaveat]='\0'
+      else if valmode!=0 then
+        if key.nvalue>=NVAL continue
+        for n=0,n<SNAME-1,n++ do
+          if s[i]==' ' || s[i]=='\t' || s[i]==',' ||                           \
+            s[i]==';' || s[i]==':' || s[i]=='\0' break
+          key.val[key.nvalue][n]=s[i]; i++
+        enddo
+        if n==0 continue
+        while s[i]==' ' || s[i]=='\t' do i++; enddo
+        if s[i]!=':' continue
+        key.val[key.nvalue][n]='\0'
+        while 1 do
+          if s[i]!=' ' && s[i]!='\t' && s[i]!=',' &&                           \
+            s[i]!=';' && s[i]!=':' break
+          i++
+        enddo
+        Strncpy(key.valexpl+key.nvalue*LNAME,s+i,LNAME)
+        key.nvalue=key.nvalue+1
+      endif
+    else if (s[i]=='[') then
+      // New group.
+      i++
+      for n=0,n<SNAME-1,n++ do
+        if s[i]==']' || s[i]=='\0' break
+        name[n]=s[i]
+        i++
+      enddo
+      name[n]='\0'
+      // Flush previous item, if any.
+      if (key.name[0]!='\0') then
+        if Addnewitem(key)<0 return -1
+      endif
+      Memset(key,0,Sizeof(key))
+      if ngroup>=NGROUP then
+        Error("Too many groups in the file",fconfigdef)
+        return -1
+      endif
+      Strcpy(group[ngroup].name,name)
+      if groupmeaning[0]=='\0' then
+        Strcpy(group[ngroup].meaning,name)
+      else
+        Strcpy(group[ngroup].meaning,groupmeaning)
+      endif
+      group[ngroup].meaning[0]=Toupper(group[ngroup].meaning[0])
+      currgroup=ngroup
+      ngroup++
+      groupmeaning[0]='\0'
+      ndescr=0; nnote=0; ncaveat=0; valmode=0
+    else
+      // Keyword. If it coincides with the item name, add item to the table.
+      // Otherwise, this is a separate item.
+      if (key.name[0]!='\0') then
+        if Addnewitem(key)<0 return -1
+      endif
+      groupmeaning[0]='\0'
+      ndescr=0; nnote=0; ncaveat=0; valmode=0
+      for n=0,n<SNAME-1,n++ do
+        if s[i]=='=' || s[i]=='\0' break
+        name[n]=s[i]
+        i++
+      enddo
+      while n>0 && (name[n-1]==' ' || name[n-1]=='\t') do
+        n--
+      enddo
+      name[n]='\0'
+      if n>0 && Stricmp(name,key.name)!=0 then
+        Memset(key,0,Sizeof(key))
+        // Key without any explanation.
+        Strcpy(key.name,name)
+        // Try to suggest item type by its value.
+        if s[i]=='=' then
+          key.type=Suggesttype(s+i+1)
+        endif
+        // Set predefined value to the specified value.
+        if s[i]=='=' then
+          i++
+          while s[i]==' ' || s[i]=='\t' do i++; enddo
+          Strcpy(key.val,s+i)
+          key.nvalue=1
+        endif
+        if Addnewitem(key)<0 return -1
+      endif
+      Memset(key,0,Sizeof(key))
+    endif
+  enddo
+  // Add last unprocessed item, if any.
+  if (key.name[0]!='\0') then
+    if Addnewitem(key)<0 return -1
+  endif
+  // All done, report success.
+  Fclose(f)
+  return 0
+end
+
+// Reads actual value of the key with given index as a text string. Returns
+// length of the string in characters, not including terminal 0, or 0 on error.
+function int Getcurrentvalue(int index,char *value)
+  int answer
+  value[0]='\0'
+  if index<0 || index>=nkey return 0
+  answer=CallDLL(kernel32,"GetPrivateProfileStringA",                          \
+    group[key[index].group].name,key[index].name,"",value,LNAME,fconfig)
+  return answer
+end
+
+// Converts position of the selection in the list to the key index. Returns
+// key index on success and -1 on error.
+function int Selectiontokey(int pos)
+  int i
+  for i=0,i<nkey,i++ do
+    if key[i].pos==pos return i
+  enddo
+  return -1
+end
+
+// Sets value of key[index] to the one specified by format string. Returns
+// nonzero on success and 0 on error.
+function int Setvalue(int index,format value)
+  int answer
+  if index<0 || index>=nkey return 0
+  answer=CallDLL(kernel32,"WritePrivateProfileStringA",                        \
+    group[key[index].group].name,key[index].name,value,fconfig)
+  return answer
+end
+
+// Given position of the selection in the list, fills controls with the
+// item-specific data. If pos<0, controls are cleared.
+function int Selectitem(int pos)
+  int i,j,y,hastext
+  char s[LNAME],value[LNAME]
+  // Find first item with pos equal to or exceeding specified position.
+  for i=0,i<nkey,i++ do
+    if key[i].pos>=pos break
+  enddo
+  if i>=nkey || pos<0 then
+    // No control or request to clear controls.
+    selectedgroup=-1
+    selecteditem=-1
+  else if key[i].pos>pos then
+    // Only group is selected.
+    for j=0,j<ngroup,j++ do
+      if group[j].pos==pos break
+    enddo
+    if j<ngroup then
+      selectedgroup=j
+    else
+      selectedgroup=key[i].group
+    endif
+    selecteditem=-1
+  else
+    // Item is selected.
+    selectedgroup=key[i].group
+    selecteditem=i
+  endif
+  // Update group description.
+  if selectedgroup<0 then
+    change hgroup text=""
+  else
+    change hgroup text=group[selectedgroup].meaning
+  endif
+  // Update item description.
+  change hdescr color=LIGHTGRAY
+  change hdescr bkcolor=LIGHTGRAY
+  clear hdescr
+  if selecteditem<0 then
+    change hitem text=""
+  else
+    change hitem text=key[selecteditem].name
+    hastext=0
+    draw window=hdescr at 0,15 wrap=MAINDX-LISTDX-150 color=BLACK
+    if key[selecteditem].descr[0]!='\0' then
+      draw text=key[selecteditem].descr
+      hastext=1
+    endif
+    if key[selecteditem].note[0]!='\0' then
+      if hastext draw text="\n\n"
+      draw text="Note: "
+      draw text=key[selecteditem].note
+      hastext=1
+    endif
+    if key[selecteditem].caveat[0]!='\0' then
+      if hastext draw text="\n\n"
+      draw color=LIGHTRED
+      draw text="Caveat: "
+      draw text=key[selecteditem].caveat
+      hastext=1
+    endif
+    if key[selecteditem].example[0]!='\0' then
+      if hastext draw text="\n\n"
+      draw color=BLACK
+      draw text="Example: "
+      draw text=key[selecteditem].example
+      hastext=1
+    endif
+    draw show
+  endif
+  // Create new controls that depend on the item properties.
+  change hvar color=LIGHTGRAY
+  change hvar bkcolor=LIGHTGRAY
+  clear hvar
+  hsetdef=NULL; hbronew=NULL; hsetnew=NULL
+  for i=0,i<NVAL,i++ do
+    hval[i]=NULL; hsetval[i]=NULL
+  enddo
+  y=0
+  draw window=hvar
+  if selecteditem>=0 && key[selecteditem].nvalue>0 then
+    draw at 0,y+19 font=MEDIUMFONT color=DARKGRAY text="Values:"
+    for i=0,i<key[selecteditem].nvalue,i++ do
+      if key[selecteditem].valexpl[i][0]=='\0' then
+        Strcpy(s,key[selecteditem].val+i*SNAME)
+      else
+        sprintf(s,"%s  --  %s",                                              \
+        key[selecteditem].val+i*SNAME,key[selecteditem].valexpl+i*LNAME)
+      endif
+      hval[i]=control TEXT
+        window=hvar
+        position=105,y,MAINDX-LISTDX-BTNDX-150,BTNDY
+        help=format("预设值%i",i+1)
+        text=s
+        font=MEDIUMFONT
+        color=BLACK
+      endc
+      if Strcpy(s,key[selecteditem].val+i*SNAME)>8 then
+        Strcpy(s,"Set")
+      else
+        s[0]=Toupper(s[0])
+      endif
+      hsetval[i]=control BUTTON
+        window=hvar
+        position=MAINDX-LISTDX-BTNDX-35,y,BTNDX,BTNDY
+        name=s
+        help=format("按下可将项目设置为预定义值 %i",i+1)
+      endc
+      y=y+30
+    enddo
+  endif
+  if selecteditem>=0 then
+    y=160
+    draw at 0,y+19 font=MEDIUMFONT color=DARKGRAY text="Actual:"
+    hactual=control TEXT
+      window=hvar
+      position=105,y,MAINDX-LISTDX-140,BTNDY
+      help="所选项目的实际值"
+      font=MEDIUMFONT
+      color=LIGHTRED
+    endc
+    y=y+30
+    draw at 0,y+19 font=MEDIUMFONT color=DARKGRAY text="Default:"
+    hdef=control TEXT
+      window=hvar
+      position=105,y,MAINDX-LISTDX-BTNDX-150,BTNDY
+      help="所选项目的默认值"
+      font=MEDIUMFONT
+      color=BLACK
+    endc
+    if key[selecteditem].default[0]=='\0' then
+      hsetdef=NULL
+    else
+      hsetdef=control BUTTON
+        window=hvar
+        position=MAINDX-LISTDX-BTNDX-35,y,BTNDX,BTNDY
+        name="设置
+        help="按下可将项目设置为默认值"
+      endc
+    endif
+    y=y+30
+    draw at 0,y+19 font=MEDIUMFONT color=DARKGRAY text="New value:"
+    if key[selecteditem].type==VT_FILE ||                                      \
+      key[selecteditem].type==VT_RELFILE ||                                    \
+      key[selecteditem].type==VT_PATH ||                                       \
+      key[selecteditem].type==VT_RELPATH                                       \
+    then
+      hnew=control EDIT
+        window=hvar
+        position=105,y,MAINDX-LISTDX-SBTNX1-SBTNX2-150,BTNDY
+        help="在所选项目中输入新值" 
+        font=MEDIUMFONT
+        color=BLACK
+        bkcolor=WHITE
+      endc
+      hbronew=control BUTTON
+        window=hvar
+        position=MAINDX-LISTDX-SBTNX1-SBTNX2-40,y,SBTNX1,BTNDY
+        name="浏览"
+        help="按下可浏览新值" 
+      endc
+      hsetnew=control BUTTON
+        window=hvar
+        position=MAINDX-LISTDX-SBTNX2-35,y,SBTNX2,BTNDY
+        name="设置"
+        help="按可将项目设置为新值" 
+      endc
+    else
+      hnew=control EDIT
+        window=hvar
+        position=105,y,MAINDX-LISTDX-BTNDX-150,BTNDY
+        help="在所选项目中输入新值" 
+        font=MEDIUMFONT
+        color=BLACK
+        bkcolor=WHITE
+      endc
+      hsetnew=control BUTTON
+        window=hvar
+        position=MAINDX-LISTDX-BTNDX-35,y,BTNDX,BTNDY
+        name="设置"
+        help="按可将项目设置为新值" 
+      endc
+    endif
+    y=y+30
+  endif
+  draw show
+  // Set actual and new key value.
+  if selecteditem>=0 then
+    j=Getcurrentvalue(selecteditem,value)
+    if j==0 then
+      change hactual color=DARKGRAY
+      change hactual text="(none)"
+    else
+      change hactual color=LIGHTRED
+      change hactual text=value
+      change hnew text=value
+    endif
+  endif
+  // Set default.
+  if selecteditem>=0 then
+    if key[selecteditem].default[0]=='\0' then
+      change hdef color=DARKGRAY
+      change hdef text="(none)"
+    else
+      change hdef text=key[selecteditem].default
+    endif
+  endif
+  // Check whether changes are disabled.
+  if selecteditem>=0 && key[selecteditem].type==VT_NOCHG then
+    disable hsetdef
+    disable hnew
+    disable hbronew
+    disable hsetnew
+  endif
+  if selecteditem>=0 && Stricmp(key[selecteditem].default,"varies")==0 then
+    disable hsetdef
+  endif
+end
+
+// Converts path or file name relative to the Test Player directory into
+// absolute. Final backslash in relative directory is not touched.
+function int Relativetoabsolute(char *rpath,char *apath)
+  char s[512]
+  if shlwapi==NULL then
+    Strcpy(apath,rpath)                // Emergency solution
+    return
+  endif
+  if CallDLL(shlwapi,"PathIsRelativeA",rpath)==0 then
+    Strcpy(apath,rpath)                // Path is already absolute
+    return
+  endif
+  sprintf(s,"%s%s",tppath,rpath)
+  CallDLL(shlwapi,"PathCanonicalizeA",apath,s)
+end
+
+// Converts absolute path or file name to relative to the Test Player directory.
+function int Absolutetorelative(char *apath,char *rpath)
+  if shlwapi==NULL then
+    Strcpy(rpath,apath)                // Emergency solution
+    return
+  endif
+  if CallDLL(shlwapi,"PathIsRelativeA",apath)!=0 then
+    Strcpy(rpath,apath)                // Path is already relative
+    return
+  endif
+  if CallDLL(shlwapi,"PathRelativePathToA",rpath,tppath,0,apath,0)!=0 return
+  Strcpy(rpath,apath)                // Emergency solution
+end
+
+// Main program.
+function int main()
+  int i,j,k,answer,pos,index
+  char s[LNAME],t[LNAME],p[LNAME]
+  char path[LNAME],drv[LNAME],dir[LNAME],nam[LNAME],ext[LNAME]
+  // Assure that Test Player.
+  if Embedded()==0 then
+    Error("Attention, this script can only","be called from the Test Player")
+    goto finish
+  endif
+  // Get handle of kernel32.dll, contains GetPrivateProfileString() and
+  // GetModuleFileName().
+  kernel32=LoadDLL("kernel32.dll")
+  if kernel32==NULL then
+    Error("Unable to load kernel32.dll","Can't edit initialization file")
+    goto finish
+  endif
+  // Get handle of shlwapi.dll.
+  shlwapi=LoadDLL("shlwapi.dll")
+  // Get name of the executable (Test Player) and derive the full names of the
+  // initialization files.
+  answer=CallDLL(kernel32,"GetModuleFileNameA",0,path,LNAME)
+  if answer==0 then
+    Error("Unable to get location","of the fconfig.ini")
+    goto finish
+  endif
+  Fnsplit(path,drv,dir,nam,ext)
+  Fnmerge(fconfig,drv,dir,"fconfig",".ini")
+  Fnmerge(fconfigdef,drv,dir,"fconfig_default",".ini")
+  Fnmerge(tppath,drv,dir,"","")
+  // Open and parse the fconfig_default.ini.
+  if Parsefconfigdefault()<0 goto finish
+  // Create main window.
+  hmain=control WINDOW
+    window=NULL
+    position=10,10,MAINDX,MAINDY
+    name=format("%s v%s",DESCRIPTION,VERSION)
+    help=" "
+    color=BLACK
+    bkcolor=LIGHTGRAY
+    size=2048
+  endc
+  // Create and fill list of items.
+  selection=0
+  draw window=hmain
+  draw at 5,20 font=INFOFONT color=BLACK text="Items:"
+  hlist=control LISTBOX
+    window=hmain
+    position=10,25,LISTDX,MAINDY-70
+    help="项目" 
+    font=INFOFONT
+    color=BLACK
+    bkcolor=WHITE
+    mode=M_REPEAT|M_VSCROLL
+  endc
+  pos=0
+  for i=0,i<ngroup,i++ do
+    add hlist text=format("[%s]",group[i].meaning)
+    group[i].pos=pos
+    pos++
+    for j=0,j<nkey,j++ do
+      if key[j].group!=i continue
+      add hlist text=format("    %s",key[j].name)
+      key[j].pos=pos
+      if selection==0 selection=pos
+      pos++
+    enddo
+  enddo
+  change hlist select=selection
+  // Create search controls.
+  draw at 5,MAINDY-15 font=INFOFONT color=BLACK text="Find:"
+  hfindtxt=control EDIT
+    window=hmain
+    position=38,MAINDY-34,LISTDX-75,22
+    help="要搜索的文本" 
+    font=INFOFONT
+    color=BLACK
+    bkcolor=WHITE
+    mode=M_HSCROLL
+  endc
+  hfind=control BUTTON
+    window=hmain
+    position=LISTDX-30,MAINDY-34,41,22
+    text="Next"
+    help="查找下一项" 
+    font=INFOFONT
+    color=BLACK
+  endc
+  // Create general item description.
+  draw at LISTDX+25,40 font=MEDIUMFONT color=DARKGRAY text="Group:"
+  hgroup=control TEXT
+    window=hmain
+    position=LISTDX+130,21,MAINDX-LISTDX-140,BTNDY
+    help="当前选定组的说明" 
+    font=MEDIUMFONT
+  endc
+  draw at LISTDX+25,70 font=MEDIUMFONT color=DARKGRAY text="Item:"
+  hitem=control TEXT
+    window=hmain
+    position=LISTDX+130,51,MAINDX-LISTDX-140,BTNDY
+    help="当前所选项目的名称" 
+    font=MEDIUMFONT
+  endc
+  draw at LISTDX+25,100 font=MEDIUMFONT color=DARKGRAY text="Description:"
+  hdescr=control CHILD
+    window=hmain
+    position=LISTDX+130,83,MAINDX-LISTDX-140,175
+    help="当前所选项目的详细说明" 
+    font=TIMESFONT
+    color=LIGHTGRAY
+    bkcolor=LIGHTGRAY
+    size=4096
+  endc
+  draw show
+  // Create child window for variable controls.
+  hvar=control CHILD
+    window=hmain
+    position=LISTDX+25,267,MAINDX-LISTDX-26,280
+    help=" "
+    color=LIGHTGRAY
+    bkcolor=LIGHTGRAY
+    size=2048
+  endc
+  hexit=control BUTTON
+    window=hmain
+    position=MAINDX-BTNDX-10,MAINDY-BTNDY-10,BTNDX,BTNDY
+    name="关闭"
+    help="关闭此窗口"
+  endc
+  Selectitem(selection)
+  Setfocus(hlist)
+  // Main loop.
+  while 1 do
+    if Pressed(hexit) then
+      goto finish
+    else if Pressed(hfind) || Pressed(hfindtxt) then
+      index=Selectiontokey(selection)
+      if index<0 index=0
+      Text(hfindtxt,s)
+      for j=0,s[j]!='\0',j++ do
+        s[j]=Tolower(s[j])
+      enddo
+      for i=0,i<nkey,i++ do
+        k=i+index+1
+        while k>=nkey do k=k-nkey; enddo
+        for j=0,key[k].name[j]!='\0',j++ do
+          t[j]=Tolower(key[k].name[j])
+        enddo
+        t[j]='\0'
+        if Strstr(t,s)>=0 then
+          change hlist select=key[k].pos
+          break
+        endif
+      enddo
+      Setfocus(hlist)
+    else if hsetdef!=NULL && Pressed(hsetdef) then
+      index=Selectiontokey(selection)
+      if index<0 continue
+      Setvalue(index,"%s",key[index].default)
+      Selectitem(selection)
+      Setfocus(hlist)
+    else if hbronew!=NULL && Pressed(hbronew) then
+      Text(hnew,s)
+      index=Selectiontokey(selection)
+      if index<0 continue
+      if key[index].type==VT_FILE then
+        // Absolute file name.
+        if s[0]=='\0' Strcpy(s,key[index].default)
+        if s[0]=='\0' Strcpy(s,"*.*")
+        Relativetoabsolute(s,p); Strcpy(s,p)
+        answer=SYS.Browse(hmain,s,"Select file name",0)
+        Setfocus(hlist)
+        if answer==0 continue
+      else if key[index].type==VT_RELFILE then
+        // Relative file name.
+        if s[0]=='\0' Strcpy(s,key[index].default)
+        if s[0]=='\0' Strcpy(s,"*.*")
+        Relativetoabsolute(s,p)
+        answer=SYS.Browse(hmain,p,"Select file name",0)
+        Setfocus(hlist)
+        if answer==0 continue
+        Absolutetorelative(p,s)
+      else if key[index].type==VT_PATH then
+        // Absolute path.
+        Relativetoabsolute(s,p); Strcpy(s,p)
+        sprintf(t,"Select new path for %s:",key[index].name)
+        answer=SYS.Browsedir(hmain,s,t,0)
+        Setfocus(hlist)
+        if answer==0 continue
+      else if key[index].type==VT_RELPATH then
+        // Relative path.
+        if s[0]=='\0' Strcpy(s,key[index].default)
+        Relativetoabsolute(s,p)
+        sprintf(t,"Select new path for %s:",key[index].name)
+        answer=SYS.Browsedir(hmain,p,t,0)
+        Setfocus(hlist)
+        if answer==0 continue
+        Absolutetorelative(p,s)
+      endif
+      change hnew text=s
+      Setfocus(hlist)
+    else if hsetnew!=NULL && Pressed(hsetnew) then
+      Text(hnew,s)
+      index=Selectiontokey(selection)
+      if index<0 continue
+      Setvalue(index,"%s",s)
+      Selectitem(selection)
+      Setfocus(hlist)
+    endif
+    for i=0,i<NVAL,i++ do
+      if hsetval[i]==NULL continue
+      if Pressed(hsetval[i]) then
+        index=Selectiontokey(selection)
+        if index<0 continue
+        Setvalue(index,"%s",key[index].val+i*SNAME)
+        Selectitem(selection)
+        Setfocus(hlist)
+      endif
+    enddo
+    pos=Status(hlist)
+    if pos!=selection then
+      selection=pos
+      Selectitem(selection)
+      Setfocus(hlist)
+    endif
+    wait
+  enddo
+finish:
+  if hmain!=NULL destroy hmain
+  if shlwapi!=NULL UnloadDLL(shlwapi)
+  if kernel32!=NULL UnloadDLL(kernel32)
+end
+

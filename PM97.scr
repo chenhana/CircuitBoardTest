@@ -1,0 +1,289 @@
+#include "ls.icl"
+#include "pa.icl"                  // Rich Text Format extentions
+
+#define MAINX    354                   // Dimensions of main window
+#define MAINY    323
+#define DX       246                   // Inner dimensions of graph window
+#define DY       246
+
+#define GIDLE    0                     // Grabber modes
+#define GCLEAR   1
+#define GWAIT    2
+#define GGRAB    3
+
+function int main()
+  int i,j,k,m,n,ndel,channel,open,mode,column,line,pictureok,count
+  int cleartime,timeout
+  char buf[10240],fname[260],s[256]
+  handle hmain,hgraph,hcount,htext,hstatus
+  handle hstart,hstop,hopen,hadd,hquit
+  handle hcom[4],h
+  hmain=control WINDOW
+    window=NULL
+    position=10,10,MAINX,MAINY
+    name="PM97捕捉器"
+    help=" "
+    bkcolor=LIGHTGRAY
+    size=1024
+  endc
+  hstatus=control TEXT
+    window=hmain
+    position=0,6,MAINX,23
+    text="Welcome"
+    help=" "
+    mode=M_CENTERED
+    font=MEDIUMFONT
+  endc
+  hgraph=control GRAPH
+    window=hmain
+    position=7,30,DX,DY
+    color=BLACK
+    bkcolor=WHITE
+    help="示波器上的图片"
+  endc
+  draw window=hmain font=INFOFONT mode=M_LEFT color=BLACK
+  draw at 28,DY+48 text="Add your comment:"
+  hcount=control TEXT
+    window=hmain
+    position=2,DY+51,22,20
+    text="1:"
+    help=" "
+    mode=M_RIGHT
+    font=TIMESFONT
+  endc
+  htext=control EDIT
+    window=hmain
+    position=28,DY+49,DX-20,22
+    help="此处你可以对图片评论"
+    mode=M_BORDER
+    font=TIMESFONT
+  endc
+  draw show
+  hcom[0]=control RADIO
+    window=hmain
+    position=DX+19,27,60,20
+    name="COM1"
+    help="检查示波器是否连接到COM1:"
+  endc
+  hcom[1]=control RADIO
+    window=hmain
+    position=DX+19,49,60,20
+    name="COM2"
+    help="检查示波器是否连接到COM2:"
+  endc
+  hcom[2]=control RADIO
+    window=hmain
+    position=DX+19,71,60,20
+    name="COM3"
+    help="检查示波器是否连接到COM3:"
+  endc
+  hcom[3]=control RADIO
+    window=hmain
+    position=DX+19,93,60,20
+    name="COM4"
+    help="检查示波器是否连接到COM4:"
+  endc
+  hstart=control BUTTON
+    window=hmain
+    position=DX+19,133,80,22
+    name="开始"
+    help="按下开始等待图片"
+  endc
+  hstop=control BUTTON
+    window=hmain
+    position=DX+19,162,80,22
+    name="停止"
+    help="按下停止抓取"
+  endc
+  disable hstop
+  hopen=control BUTTON
+    window=hmain
+    position=DX+19,210,80,22
+    name="打开文件"
+    help="按下打开RTF日志文件"
+  endc
+  hadd=control BUTTON
+    window=hmain
+    position=DX+19,239,80,22
+    name="添加"
+    help="按下可将图片添加到RTF文件"
+  endc
+  disable hadd
+  hquit=control BUTTON
+    window=hmain
+    position=DX+19,DY+49,80,22
+    name="关闭"
+    help="按下关闭抓取器"
+  endc
+  n=0
+  for i=0,i<4,i++ do
+    h=Fserial(i+1,9600,8,NOPARITY|DTR_ON)
+    if h==NULL then
+      disable hcom[i]
+    else
+      Fclose(h)
+      if n==0 then
+        change hcom[i] mode=M_CHECKED
+        channel=i+1
+      endif
+      n++
+    endif
+  enddo
+  if n==0 then
+    change hstatus color=RED
+    change hstatus text="No free serial channel!"
+    channel=0
+    disable hstart
+    disable hopen
+  endif
+  n=0; open=0; mode=GIDLE; pictureok=0; count=1
+  Strcpy(fname,"pm97.rtf")
+  while 1 do
+    if Pressed(hquit) then
+      break
+    else if Pressed(hstart) then
+      h=Fserial(channel,9600,8,NOPARITY|DTR_ON)
+      if h==NULL then
+        change hstatus text=format("Unable to open COM%i:",channel)
+      else
+        draw window=hgraph color=GRAY bkcolor=WHITE
+        draw at 0,0 fillrect DX,DY color=BLACK show
+        line=0; mode=GCLEAR; cleartime=Time()+1000
+        pictureok=0
+        disable hadd
+        change hstatus text="Clearing..."
+        disable hstart
+        enable hstop
+      endif
+    else if Pressed(hstop) then
+      change hstatus text="Interrupted"
+      enable hstart
+      disable hstop
+      if h!=NULL Fclose(h)
+      h=NULL
+      mode=GIDLE
+    else if Pressed(hopen) then
+      if SYS.Browse(hmain,fname,"Select PM97 protocol file",0)!=0 then
+        if open RClose()
+        open=0
+        disable hadd
+        if ROpen(fname)==0 then
+          Strtime(s,"%a %d-%b-%Y %H:%M",0,0)
+          RParagraph(RTF_CENTERED|RTF_HEADER)
+          RFmt(RTF_TIMES,RTF_ITALIC,12)
+          RAddtext(" ")
+          RParagraph(RTF_CENTERED|RTF_HEADER|RTF_THINBRD)
+          RFmt(RTF_TIMES,RTF_ITALIC,9)
+          RAddfmt("PM97 Scopemeter %s - page ",s)
+          RAddpagenumber()
+          RParagraph(RTF_CENTERED)
+          RFmt(RTF_ARIAL,RTF_BOLD,14)
+          RAddtext("\nPM97 Scopemeter\n")
+          open=1
+          if pictureok enable hadd
+          count=1
+          change hcount text=format("%i",count)
+        endif
+      endif
+    else if Pressed(hadd) then
+      RParagraph(RTF_CENTERED)
+      RFmt(RTF_TIMES,RTF_NORMAL,10)
+      RAddpicture(hgraph,0,0,DX,DY,0)
+      RParagraph(RTF_CENTERED)
+      Text(htext,s)
+      if s[0]=='\0' then
+        RAddfmt("\n%i\n\n",count)
+      else
+        RAddfmt("\n%i:  %s\n\n",count,s)
+      endif
+      disable hadd                     // Don't let add picture twice
+      clear htext
+      count++
+      change hcount text=format("%i",count)
+      pictureok=0
+    endif
+    if h!=NULL then
+      n=n+Fread(buf+n,Sizeof(buf+n),h)
+      if mode==GCLEAR then
+        if n!=0 then
+          cleartime=Time()+1000
+        else if Time()>cleartime then
+          mode=GWAIT
+          change hstatus text="Press \"START PRINT\""
+        endif
+        n=0
+      else if mode==GWAIT && n>0 then
+        mode=GGRAB
+        timeout=Time()+3000
+        change hstatus text="Receiving data..."
+      else if mode==GGRAB && Time()>timeout then
+        change hstatus text="Timeout!"
+        enable hstart
+        disable hstop
+        Fclose(h); h=NULL
+        mode=GIDLE
+      else if mode==GGRAB && n>0 then
+        ndel=0
+        if buf[0]==27 then             // Escape sequence
+          switch buf[1]
+          case 42:
+            j=$uint2(buf+3)
+            if 5+j<=n then             // Is complete string already here?
+              draw window=hgraph
+              column=0
+              for i=0,i<j,i++ do
+                m=buf[5+i]
+                for k=0,k<8,k++ do
+                  if (m & 0x80) draw pixel column+3,line+k+3
+                  m=m<<1;
+                enddo
+                column++
+                if column>=240 then
+                  column=0
+                  line=line+8
+                  if line>=240 then
+                    change hstatus text="Done"
+                    enable hstart
+                    disable hstop
+                    Fclose(h); h=NULL
+                    mode=GIDLE
+                    pictureok=1
+                    if open enable hadd
+                    break
+                  endif
+                endif
+              enddo
+              draw show
+              ndel=5+j
+            endif
+          case 51: ndel=3
+          case 64: ndel=2
+          case 65: ndel=3
+          case 77: ndel=2
+          case 107: ndel=3
+          default:
+            change hstatus text="Unknown escape sequence"
+            enable hstart
+            disable hstop
+            Fclose(h); h=NULL
+            mode=GIDLE
+          endsw
+        else
+          while ndel<n && buf[ndel]!=27 do
+            ndel++
+          enddo
+        endif
+        if ndel>0 && n>=ndel then
+          timeout=Time()+3000
+          if n>ndel Memcpy(buf,buf+ndel,n-ndel)
+          n=n-ndel
+        endif
+      endif
+    endif
+    wait
+  enddo
+  if h!=NULL Fclose(h)
+  if open RClose()
+end
+
+

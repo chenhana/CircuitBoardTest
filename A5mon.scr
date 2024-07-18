@@ -1,0 +1,996 @@
+#include "ls.icl"                  // Standard functions
+#include "or.icl"                // A2 command names
+#include "pa.icl"                  // Support for files in rich text format
+#multinst                              // Allow multiple instances
+
+#define VERSION        "1.00"
+#define DESCRIPTION    "A5 monitoring oscilloscope"
+
+#cmdbuff 16
+
+#define HEADER         "atg XYZ monitoring data 1.0"
+
+#define NHEAD          32              // Number of heads
+#define NCHAN          8               // Number of channels in head controller
+#define NCHANSEL       9               // NCHAN+1
+#define NPOINT         20000           // Number of data points per channel
+
+#define PLOTDX         512             // Width of plot window
+#define PLOTDY         420             // Height of plot window
+#define CHANDX         159             // Distance between control groups
+#define OVDX           110             // Width of overview window
+#define OVDY           80              // Height of overview window
+
+// Selected layout configuration bits.
+#define LC_TYPEMASK    0x0B000000      // General type of machine
+#define   LC_STD       0x00000000      // LC_TYPEMASK: standard A5/A6 tester
+#define   LC_NEWA1     0x01000000      // LC_TYPEMASK: new A1 (slow A5) tester
+#define   LC_S1        0x02000000      // LC_TYPEMASK: S1/S2
+#define   LC_A8        0x03000000      // LC_TYPEMASK: A7/A8
+#define   LC_S3        0x08000000      // LC_TYPEMASK: S3
+
+typedef struct t_layout $LAY;          // Create compatible layout types
+typedef struct t_extlay $EXTLAY;
+typedef struct t_ext0   $EXT0;         // First additional layout extention
+typedef struct t_ext1   $EXT1;         // Second additional layout extention
+typedef struct t_ext2   $EXT2;         // Third additional layout extention
+typedef struct t_ext3   $EXT3;         // Fourth additional layout extention
+
+typedef struct t_savemon               // Monitoring data header in file
+  char   header[32]                    // Must be equal to HEADER
+  char   date[24]                      // Date of creation intext format
+  char   reason[128]                   // Reason why data was saved
+  int    nchan                         // Must coincide with NCHAN
+  int    npoint                        // Actual data size, points
+  int    period                        // Distance between points, us
+  char   datavalid[NHEAD]              // Data validity markers
+  char   dummy[284]                    // Total size 512 bytes
+ends
+
+char chname[NCHANSEL][16] = {                                                  \
+  "<Off>",  "Xexp",   "X",      "Yexp",   "Y",                                 \
+  "Zexp",   "Z",      "P",      "Pads" }
+
+handle   hmain                         // Main window
+handle   hplot                         // Shows oscillogrammes
+handle   hsweep                        // Sweeping velocity
+handle   hget                          // Get existing monitoring data
+handle   hnew                          // Get new monitoring data
+handle   hload                         // Load data from file
+handle   hsave                         // Save data to file
+handle   hcurs                         // Find cursors
+handle   hmessage                      // Message window
+handle   hoverview                     // Overview in case of overscan
+handle   hquit                         // Close oscilloscope
+handle   hsub1                         // Subtract channel 0 from channel 1
+handle   hsub3                         // Subtract channel 2 from channel 3
+handle   hhead[4]                      // Head on oscilloscope channel
+handle   hchan[4]                      // Head channel on oscilloscope channel
+handle   hsca[4]                       // Scale index
+handle   hofs[4]                       // Offset index
+handle   hscr[4]                       // Manual offset
+
+int      sub1                          // Subtract channel 0 from channel 1
+int      sub3                          // Subtract channel 2 from channel 3
+int      head[4]                       // Head on oscilloscope channel
+int      chan[4]                       // Head channel or -1
+int      scale[4]                      // Scale index
+int      offset[4]                     // Offset index
+int      manual[4]                     // Manual offset, divisions
+int      cursor1                       // Position of first cursor, data point
+int      cursor2                       // Position of second cursor, data point
+int      catched                       // Catched cursor, 0: none
+int      sweep                         // Sweep index
+
+int      nhead                         // Number of heads and cameras
+int      cameras                       // Dedicated cameras
+int      nfing                         // Number of heads ($LAY.nfing*2)
+
+float    data[NHEAD][NCHAN][NPOINT]    // Data from controllers
+int      panel[NHEAD][NPOINT]          // Panel identifiers
+int      net[NHEAD][NPOINT]            // Net identifiers
+int      pad[NHEAD][NPOINT]            // Pad identifiers
+int      datavalid[NHEAD]              // Whether corresponding data[] valid
+int      npoint                        // Actual data size, points
+int      period                        // Distance between points, us
+int      x0                            // X offset, pixels
+int      ovcatch                       // Cursor catched in hoverview
+int      ovx0                          // Mouse where cursor was catched
+int      ovofs0                        // Offset when cursor was catched
+
+char     savefile[260]                 // Last used save file name
+
+int      chcolor[4]  = { BLACK,     LIGHTRED, GREEN,      LIGHTBLUE }
+int      lowcolor[4] = { LIGHTGRAY, PINK,     WHITEGREEN, WHITEBLUE }
+
+float    tfactor[5] = {                                                        \
+  1,       2,       5,       10,      20 }
+float    scalefactor[24] = {                                                   \
+  0.01,    0.02,    0.05,    0.1,     0.2,     0.5,     1.0,     2.0,          \
+  5.0,     10.0,    20.0,    50.0,    100.0,   200.0,   500.0,   1000.0,       \
+  2000.0,  5000.0,  10000.0, 20000.0, 50000.0, 100000.0,200000.0,500000.0 }
+
+// Gets data from the tester.
+function int Getdata()
+  int i,j,t,mask,head,offset,size,realsize,err
+  char buf[64]
+  Memset(data,0,Sizeof(data))
+  Memset(panel,0,Sizeof(panel))
+  Memset(net,0,Sizeof(net))
+  Memset(pad,0,Sizeof(pad))
+  Memset(datavalid,0,Sizeof(datavalid))
+  nfing=$LAY.nfing*2
+  cameras=$LAY.cameras & 0x3
+  nhead=nfing
+  if cameras & 0x02 then
+    nhead=nhead+2
+  else if cameras & 0x01 then
+    nhead=nhead+1
+  endif
+  for j=0,j<NCHAN,j++ do
+    SYS.Killimm(j)
+  enddo
+  err=0
+  for head=0,head<NHEAD,head++ do
+    if head==nfing && (cameras & 0x01)==0 continue
+    if head==nfing+1 && (cameras & 0x02)==0 continue
+    if head>=nfing+2 break
+    offset=0
+    while err==0 && offset<npoint do
+      size=Min(npoint-offset,250)
+      buf[0]=S_TEST
+      buf[1]=5                         // Get A5 SHARC monitoring data
+      buf[2]=head                      // Head
+      $int4(buf+4)=offset              // Offset
+      $int4(buf+8)=size                // Number of points
+      for j=0,j<NCHAN,j++ do
+        buf[3]=j                       // Controller channel
+        SYS.Sendimm(j,12,buf)
+      enddo
+      t=Time()
+      // Note that there is no wait inside this loop.
+      while err==0 do
+        for j=0,j<NCHAN,j++ do
+          if $A[j].length==0 then
+            break
+          else if $A[j].answer!=S_TEST || $char($A[j]+5)!=5 then
+            err=1                      // Invalid answer
+          endif
+        enddo
+        if j>=NCHAN break
+        if Time()-t>2000 err=2
+        if Pressed(hquit) err=-1
+      enddo
+      for j=0,j<NCHAN && err==0,j++ do
+        if $uint4($A[j]+8)!=offset return 1
+        realsize=Min(size,$uint2($A[j]+12))
+        if realsize>0 datavalid[head]=1
+        if j==7 then                   // Packed panel-net/pad data
+          for i=0,i<realsize,i++ do
+            t=$int4($A[j]+14+i*4)
+            data[head][j][offset+i]=t  // Accuracy sufficient for 32-bit int
+            if (t & 0x40000000) then
+              // 14-bit panel ID.
+              panel[head][offset+i]=(t>>16) & 0x00003FFF
+              mask=0x0000FFFF
+            else
+              // 6-bit panel ID.
+              panel[head][offset+i]=(t>>24) & 0x0000003F
+              mask=0x00FFFFFF
+            endif
+            // Note that pad IDs here are incremented by 1 because zero IDs are
+            // allowed by crate.
+            if (t & 0x80000000) then
+              net[head][offset+i]=t & mask
+            else
+              pad[head][offset+i]=t & mask
+            endif
+          enddo
+        else
+          for i=0,i<realsize,i++ do
+            data[head][j][offset+i]=$float4($A[j]+14+i*4)
+          enddo
+        endif
+      enddo
+      offset=offset+size
+    enddo
+    if err!=0 break
+  enddo
+  return err
+end
+
+// Saves current data to binary file.
+function int Savemon(char *path)
+  int i,j,k
+  char *buf
+  handle f
+  struct t_savemon sm
+  change hmessage color=RED
+  change hmessage bkcolor=GRAY
+  change hmessage text="Saving..."
+  // Open file.
+  if Alloc(buf,NPOINT*4)==0 then
+    change hmessage color=LIGHTRED
+    change hmessage bkcolor=YELLOW
+    change hmessage text="Low memory"
+    return -1
+  endif
+  f=Fopen(path,"wb")
+  if f==NULL then
+    Free(buf)
+    change hmessage color=LIGHTRED
+    change hmessage bkcolor=YELLOW
+    change hmessage text="Can't create file"
+    return -1
+  endif
+  // Save header.
+  Memset(sm,0,Sizeof(sm))
+  Memcpy(sm.header,HEADER,Strlen(HEADER))
+  Strtime(sm.date,"%d-%b-%Y %H:%M:%S",0,0)
+  sm.date[22]='\r'
+  sm.date[23]='\n'
+  sm.nchan=NCHAN
+  sm.npoint=npoint
+  sm.period=period
+  for i=0,i<NHEAD,i++ do
+    sm.datavalid[i]=datavalid[i]
+  enddo
+  Fwrite(sm,512,f)
+  // Save complete layout.
+  Fwrite($LAY,768,f)
+  Fwrite($EXTLAY,768,f)
+  Fwrite($EXT0,768,f)
+  Fwrite($EXT1,768,f)
+  Fwrite($EXT2,768,f)
+  Fwrite($EXT3,768,f)
+  // Save data.
+  for i=0,i<NHEAD,i++ do
+    if datavalid[i]==0 continue
+    for j=0,j<NCHAN,j++ do
+      for k=0,k<npoint,k++ do
+        if j==7 then
+          $int4(buf+k*4)=data[i][j][k]
+        else
+          $float4(buf+k*4)=data[i][j][k]
+        endif
+      enddo
+      Fwrite(buf,npoint*4,f)
+    enddo
+  enddo
+  Fclose(f)
+  Free(buf)
+  change hmessage color=BLACK
+  change hmessage bkcolor=GRAY
+  change hmessage text="Saved"
+  return 0
+end
+
+// Loads data from binary file.
+function int Loadmon(char *path)
+  int i,j,k,n,t,mask,err
+  char *buf
+  struct t_layout lay,dummylay
+  change hmessage color=RED
+  change hmessage bkcolor=GRAY
+  change hmessage text="Loading..."
+  handle f
+  struct t_savemon sm
+  // Open file.
+  if Alloc(buf,NPOINT*4)==0 then
+    change hmessage color=LIGHTRED
+    change hmessage bkcolor=YELLOW
+    change hmessage text="Low memory"
+    return -1
+  endif
+  f=Fopen(path,"rb")
+  if f==NULL then
+    Free(buf)
+    change hmessage color=LIGHTRED
+    change hmessage bkcolor=YELLOW
+    change hmessage text="Can't open file"
+    return -1
+  endif
+  err=0
+  // Read and check header.
+  n=Fread(sm,512,f)
+  if n!=512 then
+    err=1
+  else if Memcmp(sm.header,HEADER,Strlen(HEADER))!=0 then
+    err=1
+  else if sm.nchan!=NCHAN || sm.npoint<0 || sm.npoint>NPOINT then
+    err=1
+  endif
+  if err!=0 goto finish
+  // Get important parameters from layout.
+  n=Fread(lay,768,f)
+  if n!=768 then err=1; goto finish; endif
+  nfing=lay.nfing*2
+  cameras=lay.cameras & 0x3
+  nhead=nfing
+  if cameras & 0x02 then
+    nhead=nhead+2
+  else if cameras & 0x01 then
+    nhead=nhead+1
+  endif
+  // Skip rest of layout.
+  n=Fread(dummylay,768,f)
+  n=n+Fread(dummylay,768,f)
+  n=n+Fread(dummylay,768,f)
+  n=n+Fread(dummylay,768,f)
+  n=n+Fread(dummylay,768,f)
+  if n!=768*5 then
+    err=1; goto finish
+  endif
+  // Clear old data.
+  Memset(data,0,Sizeof(data))
+  Memset(panel,0,Sizeof(panel))
+  Memset(net,0,Sizeof(net))
+  Memset(pad,0,Sizeof(pad))
+  Memset(datavalid,0,Sizeof(datavalid))
+  npoint=sm.npoint
+  period=sm.period
+  // Load and parse data.
+  for i=0,i<NHEAD,i++ do
+    if sm.datavalid[i]==0 continue
+    for j=0,j<NCHAN,j++ do
+      n=Fread(buf,npoint*4,f)
+      if n!=npoint*4 then
+        err=1; goto finish
+      endif
+      for k=0,k<npoint,k++ do
+        if j==7 then
+          t=$int4(buf+k*4)
+          data[i][j][k]=t              // Accuracy sufficient for 32-bit int
+          if (t & 0x40000000) then
+            // 14-bit panel ID.
+            panel[i][k]=(t>>16) & 0x00003FFF
+            mask=0x0000FFFF
+          else
+            // 6-bit panel ID.
+            panel[i][k]=(t>>24) & 0x0000003F
+            mask=0x00FFFFFF
+          endif
+          if (t & 0x80000000) then
+            net[i][k]=t & mask
+          else
+            pad[i][k]=t & mask
+          endif
+        else
+          data[i][j][k]=$float4(buf+k*4)
+        endif
+      enddo
+    enddo
+    datavalid[i]=1
+  enddo
+finish:
+  Fclose(f)
+  Free(buf)
+  if err==0 then
+    change hmessage color=BLACK
+    change hmessage bkcolor=GRAY
+    change hmessage text="确定"
+  else
+    change hmessage color=LIGHTRED
+    change hmessage bkcolor=YELLOW
+    change hmessage text="Bad data"
+  endif
+  return err
+end
+
+// Formats floating-point value.
+function int Prvalue(char *txt,float value)
+  float a
+  draw text=txt
+  a=Abs(value)
+  if a==0.0 then
+    draw text="0.0"
+  else if a<10.0 then
+    draw text=format("%7.5f",value)
+  else if a<100.0 then
+    draw text=format("%7.4f",value)
+  else if a<1000.0 then
+    draw text=format("%7.3f",value)
+  else if a<10000.0 then
+    draw text=format("%7.2f",value)
+  else if a<100000.0 then
+    draw text=format("%7.1f",value)
+  else if a<1000000.0 then
+    draw text=format("%-7.0f",value)
+  else if a<10000000.0 then
+    draw text=format("%7.4fe6",value/1000000.0)
+  else if a<100000000.0 then
+    draw text=format("%7.4fe7",value/10000000.0)
+  else
+    draw text=format("%7.5g",value)
+  endif
+end
+
+function int main()
+  int i,j,n,k,hd,ch,hp,cp,lm,lo,t,x,y,reread,getnew,relist,redraw,success
+  char buf[64],s[512]
+  float tfact,yfact,yoffs
+  npoint=0
+  x0=0
+  hmain=control WINDOW
+    window=NULL
+    position=10,10,PLOTDX+129,PLOTDY+136
+    name=format("%s v%s",DESCRIPTION,VERSION)
+    help=" "
+    bkcolor=GRAY
+    size=4096
+  endc
+  hplot=control GRAPH
+    window=hmain
+    position=6,5,PLOTDX,PLOTDY
+    help="监控数据"
+    bkcolor=WHITE
+  endc
+  draw window=hmain
+  sweep=0; sub1=0; sub3=0
+  getini("Monitoring","Settings","%i,%i,%i",                                   \
+    &sweep,&sub1,&sub3)
+  sweep=Max(0,Min(sweep,4))
+  Strcpy(savefile,"a5mon.msv")
+  getini("Monitoring","Savefile",savefile)
+  draw color=BLACK bkcolor=LIGHTGRAY font=SMALLFONT mode=M_CENTERED
+  draw at PLOTDX+12,4 fillrect PLOTDX+124,210
+  hsweep=control COMBOLIST
+    window=hmain
+    position=PLOTDX+19,10,98,200
+    help="选择扫描速度"
+    font=MAINFONT
+    mode=M_VSCROLL
+  endc
+  hget=control BUTTON
+    window=hmain
+    position=PLOTDX+19,40,98,24
+    text="Get data"
+    help="获取上次保存的监视数据"
+    font=MAINFONT
+  endc
+  hnew=control BUTTON
+    window=hmain
+    position=PLOTDX+19,70,98,24
+    text="New data"
+    help="双击以获取新的监视数据"
+    font=MAINFONT
+    mode=M_DBLCLICK
+  endc
+  hload=control BUTTON
+    window=hmain
+    position=PLOTDX+19,110,98,24
+    text="Load file"
+    help="按下可以从文件中读取监视数据"
+    font=MAINFONT
+  endc
+  hsave=control BUTTON
+    window=hmain
+    position=PLOTDX+19,140,98,24
+    text="Save to file"
+    help="按下将当前数据保存到文件"
+    font=MAINFONT
+  endc
+  hcurs=control BUTTON
+    window=hmain
+    position=PLOTDX+19,180,98,24
+    text="Cursors"
+    help="按下可将光标移至可见区域"
+    font=MAINFONT
+  endc
+  for i=0,i<4,i++ do
+    sprintf(s,"Channel[%i]",i)
+    head[i]=0; chan[i]=-1; scale[i]=6; offset[i]=0; manual[i]=0;
+    getini("Monitoring",s,"%i,%i,%i,%i,%i",                                    \
+      head+i,chan+i,scale+i,offset+i,manual+i)
+    chan[i]=Max(-1,Min(NCHAN-2,chan[i]))
+    scale[i]=Max(0,Min(23,scale[i]))
+    if i==1 then
+      hsub1=control CHECKBOX
+        window=hmain
+        position=124+CHANDX*i,PLOTDY+11,29,17
+        name="-1"
+        help="减去通道1"
+        color=chcolor[i-1]
+        bkcolor=lowcolor[i]
+        mode=(sub1?M_CHECKED:0)
+      endc
+    endif
+    if i==3 then
+      hsub3=control CHECKBOX
+        window=hmain
+        position=124+CHANDX*i,PLOTDY+11,29,17
+        name="-3"
+        help="减去通道3"
+        color=chcolor[i-1]
+        bkcolor=lowcolor[i]
+        mode=(sub3?M_CHECKED:0)
+      endc
+    endif
+    draw color=chcolor[i] bkcolor=lowcolor[i] font=MAINFONT mode=M_LEFT
+    draw at 5+CHANDX*i,PLOTDY+10 fillrect 159+CHANDX*i,PLOTDY+132
+    draw at 44+CHANDX*i,PLOTDY+27 text=format("Channel %i",i+1)
+    draw font=INFOFONT color=BLACK
+    draw at 11+CHANDX*i,PLOTDY+50 text="Src:"
+    draw at 11+CHANDX*i,PLOTDY+76 text="Scale:"
+    draw at 11+CHANDX*i,PLOTDY+101 text="Offset:"
+    hhead[i]=control COMBOLIST
+      window=hmain
+      position=41+CHANDX*i,PLOTDY+30,51,850
+      help=format("通道%i的测试头"，i+1)
+      font=MAINFONT
+      mode=M_VSCROLL
+    endc
+    hchan[i]=control COMBOLIST
+      window=hmain
+      position=91+CHANDX*i,PLOTDY+30,60,850
+      help=format("通道%i的数据源"，i+1)
+      font=MAINFONT
+      mode=M_VSCROLL
+    endc
+    for j=0,j<NCHANSEL-1,j++ do        // Panel/pad channel is excluded
+      add hchan[i] text=chname[j]
+    enddo
+    change hchan[i] select=chan[i]+1
+    hsca[i]=control COMBOLIST
+      window=hmain
+      position=61+CHANDX*i,PLOTDY+56,90,440
+      help=format("通道%i的刻度，单位/刻度 ",i+1)
+      font=MAINFONT
+      mode=M_VSCROLL
+    endc
+    add hsca[i] text=" 0.01/div"
+    add hsca[i] text=" 0.02/div"
+    add hsca[i] text=" 0.05/div"
+    add hsca[i] text=" 0.1/div"
+    add hsca[i] text=" 0.2/div"
+    add hsca[i] text=" 0.5/div"
+    add hsca[i] text=" 1/div"
+    add hsca[i] text=" 2/div"
+    add hsca[i] text=" 5/div"
+    add hsca[i] text=" 10/div"
+    add hsca[i] text=" 20/div"
+    add hsca[i] text=" 50/div"
+    add hsca[i] text=" 100/div"
+    add hsca[i] text=" 200/div"
+    add hsca[i] text=" 500/div"
+    add hsca[i] text=" 1K/div"
+    add hsca[i] text=" 2K/div"
+    add hsca[i] text=" 5K/div"
+    add hsca[i] text=" 10K/div"
+    add hsca[i] text=" 20K/div"
+    add hsca[i] text=" 50K/div"
+    add hsca[i] text=" 100K/div"
+    add hsca[i] text=" 200K/div"
+    add hsca[i] text=" 500K/div"
+    change hsca[i] select=scale[i]
+    hofs[i]=control COMBOLIST
+      window=hmain
+      position=61+CHANDX*i,PLOTDY+81,90,200
+      help=format("通道%i的偏移量"，i+1 )
+      mode=M_VSCROLL
+    endc
+    add hofs[i] text=" Auto (AC)"
+    add hofs[i] text=" Cursor 1"
+    add hofs[i] text=" Cursor 2"
+    add hofs[i] text=" Manual"
+    change hofs[i] select=offset[i]
+    hscr[i]=control HSCROLL
+      window=hmain
+      position=12+CHANDX*i,PLOTDY+107,139,20
+      help=format("手动通道%i的偏移量"，i+1 )
+      limits=-35,35
+    endc
+    change hscr[i] select=manual[i]
+  enddo
+  draw show
+  hmessage=control TEXT
+    window=hmain
+    position=PLOTDX+13,224,OVDX,40
+    mode=M_CENTERED
+    font=MEDIUMFONT
+    bkcolor=GRAY
+    help=" "
+  endc
+  hoverview=control GRAPH
+    window=hmain
+    position=PLOTDX+13,314,OVDX,OVDY
+    help="数据总览"
+  endc
+  hquit=control BUTTON
+    window=hmain
+    position=PLOTDX+12,PLOTDY-20,112,26
+    text="关闭"
+    help="关闭示波器"
+  endc
+  catched=0
+  reread=1
+  getnew=0
+  relist=0
+  redraw=1
+  ovcatch=0
+  lo=(NPOINT+OVDX-1)/OVDX              // Decimation factor for overview panel
+  lm=tfactor[sweep]                    // Decimation factor for main window
+  cursor1=PLOTDX/4*lm; cursor2=PLOTDX*3/4*lm
+  // Main loop.
+  while 1 do
+    // On request, re-read data.
+    if reread!=0 then
+      success=1
+      // Ask for actual data size.
+      change hmessage color=RED
+      change hmessage bkcolor=GRAY
+      change hmessage text="稍等..."
+      SYS.Killimm(0)
+      buf[0]=S_TEST
+      buf[1]=4
+      $int4(buf+2)=(getnew?0x00000001:0x00000000)
+      SYS.Sendimm(0,6,buf)
+      t=Time()
+      while 1 do
+        if $A[0].length>0 break
+        if Time()-t>2000 break
+        if Pressed(hquit) return
+        wait
+      enddo
+      if $A[0].answer!=S_TEST || $A[0].length<15 || $char($A[0]+5)!=0x04 then
+        success=0
+      else
+        npoint=$int4($A[0]+9)
+        period=$uint2($A[0]+13)
+      endif
+      j=Getdata()
+      if j<0 goto finish
+      if j!=0 success=0
+      if success==0 then
+        change hmessage color=LIGHTRED
+        change hmessage bkcolor=YELLOW
+        change hmessage text="Can't read data"
+        npoint=0
+      else
+        change hmessage color=BLACK
+        change hmessage bkcolor=GRAY
+        change hmessage text="确定"
+      endif
+      // Update sweep scala.
+      clear hsweep
+      if period==500 then
+        add hsweep text=" 10 ms/div"
+        add hsweep text=" 20 ms/div"
+        add hsweep text=" 50 ms/div"
+        add hsweep text="100 ms/div"
+        add hsweep text="200 ms/div"
+      else
+        add hsweep text=" 20 ms/div"
+        add hsweep text=" 40 ms/div"
+        add hsweep text="100 ms/div"
+        add hsweep text="200 ms/div"
+        add hsweep text="400 ms/div"
+      endif
+      change hsweep select=sweep
+      reread=0
+      getnew=0
+      relist=1
+      redraw=1
+    endif
+    // Check for pressed buttons.
+    if Pressed(hquit) then
+      break
+    else if Pressed(hsweep) then
+      sweep=Status(hsweep)
+      lm=tfactor[sweep]
+      if x0+PLOTDX*lm>NPOINT x0=NPOINT-PLOTDX*lm
+      redraw=1
+    else if Pressed(hget) then
+      reread=1
+    else if Pressed(hnew) then
+      reread=1
+      getnew=1
+    else if Pressed(hload) then
+      if SYS.Browse(hmain,savefile,"Select file with monitoring data",0) then
+        Loadmon(savefile)
+        relist=1
+        redraw=1
+      endif
+    else if Pressed(hsave) then
+      if SYS.Browse(hmain,savefile,"Select file to save monitoring data",0) then
+        Savemon(savefile)
+      endif
+    else if Pressed(hcurs) then
+      cursor1=x0+PLOTDX/4*lm
+      cursor2=x0+PLOTDX*3/4*lm
+      redraw=1
+    else if Pressed(hsub1) then
+      sub1=Status(hsub1)
+      redraw=1
+    else if Pressed(hsub3) then
+      sub3=Status(hsub3)
+      redraw=1
+    endif
+    for i=0,i<4,i++ do
+      if Pressed(hhead[i]) then
+        head[i]=Status(hhead[i])
+        redraw=1
+      else if Pressed(hchan[i]) then
+        chan[i]=Status(hchan[i])-1
+        redraw=1
+      else if Pressed(hsca[i]) then
+        scale[i]=Status(hsca[i])
+        redraw=1
+      else if Pressed(hofs[i]) then
+        offset[i]=Status(hofs[i])
+        redraw=1
+      else if Pressed(hscr[i]) then
+        manual[i]=Status(hscr[i])
+        redraw=1
+      endif
+    enddo
+    // Move overview window.
+    if Status(hoverview)==1 then
+      x=Limit0(hoverview)
+      if ovcatch==0 then
+        ovcatch=1
+        ovx0=x
+        ovofs0=x0
+      else
+        x=Max(0,Min(NPOINT-PLOTDX*lm,ovofs0+(x-ovx0)*lo))
+        if x!=x0 then
+          x0=x
+          redraw=1
+        endif
+      endif
+    else
+      ovcatch=0
+    endif
+    // Move cursors.
+    if (Status(hplot)==1) then
+      x=Limit0(hplot)
+      if x<0 && x0>0 then
+        x0=Max(0,x0+(x-5)/10*lm); redraw=1
+      else if x>=PLOTDX && x0<NPOINT-PLOTDX-1 then
+        x0=Min(NPOINT-PLOTDX*lm,x0+(x-PLOTDX+5)/10*lm); redraw=1
+      endif
+      x=Max(0,Min(PLOTDX-1,x))*lm+x0
+      if catched==0 && Abs(cursor1-x)<5*lm then
+        catched=1; redraw=1; endif
+      if catched==0 && Abs(cursor2-x)<5*lm then
+        catched=2; redraw=1; endif
+      if catched==1 && cursor1!=x then
+        cursor1=x; redraw=1
+      else if catched==2 && cursor2!=x then
+        cursor2=x; redraw=1
+      endif
+    else
+      if catched!=0 redraw=1           // Reset cursor highlighting
+      catched=0
+    endif
+    // Refill list of available heads.
+    if relist then
+      for i=0,i<4,i++ do
+        head[i]=Max(0,Min(nhead-1,head[i]))
+        clear hhead[i]
+        for j=0,j<nhead,j++ do
+          if j<nfing then
+            add hhead[i] text=format("%i%s",j/2,j & 1?"R":"L")
+          else if j==nfing then
+            add hhead[i] text="Top"
+          else
+            add hhead[i] text="Bot"
+          endif
+        enddo
+        change hhead[i] select=head[i]
+      enddo
+      relist=0
+      redraw=1
+    endif
+    // Redraw oscillogrammes.
+    if redraw then
+      redraw=0
+      clear hplot
+      // Draw background of overview window.
+      draw window=hoverview
+      draw bkcolor=WHITEBLUE clear
+      draw color=GRAY bkcolor=WHITE
+      draw at x0/lo,OVDY/2-11
+      draw fillrect (x0+PLOTDX*lm)/lo+1,OVDY/2+11
+      draw color=STRANGE at cursor1/lo,0 to cursor1/lo,OVDY
+      draw color=STRANGE at cursor2/lo,0 to cursor2/lo,OVDY
+      draw window=hplot
+      if x0+PLOTDX*lm>npoint x0=Max(0,npoint-PLOTDX*lm)
+      // Draw grid.
+      draw color=LIGHTGRAY
+      for j=20*lm,j<NPOINT,j=j+20*lm do
+        k=(j-x0)/lm
+        if k<0 continue
+        if k>PLOTDX break
+        draw at k,0 to k,PLOTDY
+      enddo
+      for j=-10,j<=10,j++ do
+        k=PLOTDY/2+j*20
+        if k<0 continue
+        if k>=PLOTDY break
+        draw at 0,k to PLOTDX,k
+      enddo
+      // Draw cursors.
+      draw font=SMALLFONT mode=M_CENTERED
+      if catched!=1 then
+        draw color=STRANGE at (cursor1-x0)/lm,12 text="1"
+        draw to (cursor1-x0)/lm,PLOTDY
+      endif
+      if catched!=2 then
+        draw color=STRANGE at (cursor2-x0)/lm,12 text=" 2"
+        draw to (cursor2-x0)/lm,PLOTDY
+      endif
+      draw color=WHITE at PLOTDX-431,0 fillrect PLOTDX,60
+      if catched==1 then
+        draw color=LIGHTRED at (cursor1-x0)/lm,12 text="1"
+        draw to (cursor1-x0)/lm,PLOTDY
+      else if catched==2 then
+        draw color=LIGHTRED at (cursor2-x0)/lm,12 text=" 2"
+        draw to (cursor2-x0)/lm,PLOTDY
+      endif
+      // Draw values at cursor.
+      draw color=DARKGRAY mode=M_LEFT
+      if period==500 then
+        tfact=0.5
+      else
+        tfact=1.0
+      endif
+      if tfact<100.0 then
+        draw at PLOTDX-425,15
+        draw text=format("t1 = %g ms",cursor1*tfact)
+        draw at PLOTDX-245,15
+        draw text=format("t2 = %g ms",cursor2*tfact)
+        draw at PLOTDX-65,15
+        draw text=format("dt = %g ms",(cursor2-cursor1)*tfact)
+      else
+        draw at PLOTDX-425,15
+        draw text=format("t1 = %g s",cursor1*tfact/1000.0)
+        draw at PLOTDX-245,15
+        draw text=format("t2 = %g s",cursor2*tfact/1000.0)
+        draw at PLOTDX-65,15
+        draw text=format("dt = %g s",(cursor2-cursor1)*tfact/1000.0)
+      endif
+      y=28
+      for i=0,i<4,i++ do
+        if chan[i]<0 continue          // Channel inactive
+        draw color=chcolor[i]
+        hd=head[i]; ch=chan[i]
+        if i==0 then
+          hp=hd; cp=ch
+        else
+          hp=head[i-1]; cp=chan[i-1]
+        endif
+        if datavalid[hd]==0 continue
+        if (i==1 && sub1!=0 && chan[0]>=0) ||                                  \
+          (i==3 && sub3!=0 && chan[2]>=0) then
+          draw at PLOTDX-425,y
+          Prvalue("D1 = ",data[hd,ch,cursor1]-data[hp,cp,cursor1])
+          draw at PLOTDX-245,y
+          Prvalue("D2 = ",data[hd,ch,cursor2]-data[hp,cp,cursor2])
+          draw at PLOTDX-65,y
+          Prvalue("d = ",data[hd,ch,cursor2]-data[hd,ch,cursor1]-              \
+            data[hp,cp,cursor2]+data[hp,cp,cursor1])
+          ;
+        else
+          draw at PLOTDX-425,y
+          Prvalue("U1 = ",data[hd,ch,cursor1])
+          draw at PLOTDX-245,y
+          Prvalue("U2 = ",data[hd,ch,cursor2])
+          draw at PLOTDX-65,y
+          Prvalue("d = ",                                                      \
+            data[hd,ch,cursor2]-data[hd,ch,cursor1])
+          ;
+        endif
+        n=0; s[0]='\0'
+        if panel[hd][cursor1]!=0                                               \
+          n=n+sprintf(s+n,"Panel %i ",panel[hd][cursor1])
+        if net[hd][cursor1]!=0                                                 \
+          n=n+sprintf(s+n,"Net %i",net[hd][cursor1])
+        if pad[hd][cursor1]!=0                                                 \
+          n=n+sprintf(s+n,"Pad %i",pad[hd][cursor1]-1)
+        if n>0 then
+          draw at PLOTDX-355,y text=s
+        endif
+        n=0; s[0]='\0'
+        if panel[hd][cursor2]!=0                                               \
+          n=n+sprintf(s+n,"Panel %i ",panel[hd][cursor2])
+        if net[hd][cursor2]!=0                                                 \
+          n=n+sprintf(s+n,"Net %i",net[hd][cursor2])
+        if pad[hd][cursor2]!=0                                                 \
+          n=n+sprintf(s+n,"Pad %i",pad[hd][cursor2]-1)
+        if n>0 then
+          draw at PLOTDX-175,y text=s
+        endif
+        y=y+11
+      enddo
+      // Draw oscillogramms.
+      for i=0,i<4,i++ do
+        if chan[i]<0 continue          // Channel inactive
+        hd=head[i]; ch=chan[i]
+        if i==0 then
+          hp=hd; cp=ch
+        else
+          hp=head[i-1]; cp=chan[i-1]
+        endif
+        if datavalid[hd]==0 continue
+        // Main window.
+        draw window=hplot color=chcolor[i]
+        yfact=20.0/scalefactor[scale[i]]
+        if offset[i]==0 then           // "AC" mode
+          yoffs=0.0
+          if (i==1 && sub1!=0) || (i==3 && sub3!=0) then
+            for j=0,j<npoint,j++ do
+              yoffs=yoffs+data[hd,ch,j]-data[hp,cp,j]
+            enddo
+          else
+            for j=0,j<npoint,j++ do
+              yoffs=yoffs+data[hd,ch,j]
+            enddo
+          endif
+          if npoint>0 yoffs=yoffs/npoint
+        else if offset[i]==1 then      // Offset at cursor 1
+          yoffs=data[hd,ch,cursor1]
+        else if offset[i]==2 then      // Offset at cursor 2
+          yoffs=data[hd,ch,cursor2]
+        else
+          yoffs=0                      // Manual offset
+        endif
+        yoffs=yoffs-manual[i]*scalefactor[scale[i]]
+        if (i==1 && sub1!=0) || (i==3 && sub3!=0) then
+          y=PLOTDY/2-(data[hd,ch,x0]-data[hp,cp,x0]-yoffs)*yfact
+          draw at 0,y
+          for j=1,x0+j<npoint && j<PLOTDX,j++ do
+            y=PLOTDY/2-(data[hd,ch,x0+j*lm]-data[hp,cp,x0+j*lm]-yoffs)*yfact
+            draw to j,y
+          enddo
+        else
+          y=PLOTDY/2-(data[hd,ch,x0]-yoffs)*yfact
+          draw at 0,y
+          for j=1,x0+j<npoint && j<PLOTDX,j++ do
+            y=PLOTDY/2-(data[hd,ch,x0+j*lm]-yoffs)*yfact
+            draw to j,y
+          enddo
+        endif
+        draw to j+1,y
+        y=PLOTDY/2-manual[i]*20.0
+        draw at 4,y+1 to 1,y+4 to 1,y-4 to 2,y-3 to 2,y+2
+        draw to 3,y+1 to 3,y-2 to 4,y-1 to 4,y to 8,y
+        draw color=WHITE
+        draw at 5,y+1 to 0,y+6 to 0,y-6 to 6,y
+        // Overview window.
+        draw window=hoverview color=chcolor[i]
+        yfact=1.0/scalefactor[scale[i]]
+        if (i==1 && sub1!=0) || (i==3 && sub3!=0) then
+          y=Max(0,Min(OVDY/2-(data[hd,ch,0]-data[hp,cp,0]-yoffs)*yfact,OVDY-1))
+          draw at 0,y
+          for j=1,j*lo<npoint && j<OVDX,j++ do
+            y=Max(0,Min(                                                       \
+              OVDY/2-(data[hd,ch,j*lo]-data[hp,cp,j*lo]-yoffs)*yfact,OVDY-1))
+            draw to j,y
+          enddo
+        else
+          y=Max(0,Min(OVDY/2-(data[hd,ch,0]-yoffs)*yfact,OVDY-1))
+          draw at 0,y
+          for j=1,j*lo<npoint && j<OVDX,j++ do
+            y=Max(0,Min(OVDY/2-(data[hd,ch,j*lo]-yoffs)*yfact,OVDY-1))
+            draw to j,y
+          enddo
+        endif
+      enddo
+      draw window=hplot show
+      draw window=hoverview show
+    endif
+    wait
+  enddo
+finish:
+  setini("Monitoring","Settings","%i,%i,%i",                                   \
+    sweep,sub1,sub3)
+  setini("Monitoring","Savefile",savefile)
+  for i=0,i<4,i++ do
+    sprintf(s,"Channel[%i]",i)
+    setini("Monitoring",s,"%i,%i,%i,%i,%i",                                    \
+      head[i],chan[i],scale[i],offset[i],manual[i])
+    ;
+  enddo
+end
+

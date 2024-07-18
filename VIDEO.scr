@@ -1,0 +1,2386 @@
+#include "ls.icl"
+#multinst
+#zeroid                                // Process answers with zero command ID
+#cmdbuff 1
+
+#define VERSION        "1.19"
+
+// 1.11: Features to support head cameras.
+// 1.12: 4 and 8 images at once.
+// 1.13: Position of needle in the headcam's view.
+// 1.14: Support for grabbing on Z down.
+// 1.15: Support for color filter.
+// 1.16: Major redesign, special functions.
+// 1.17: Instant save frame, name to be selected in advance.
+// 1.18: Z movement in Point special mode.
+// 1.19: Subtraction of background in Point special mode.
+// 1.20: Support for up to 12 video cameras.
+// 1.21: Shinethru illumination.
+// 1.22: Z movement for both sides.
+
+#define MINX           768             // Minimal image width
+#define MINY           576             // Minimal image height
+
+#define MAXX       768//    1024            // Maximal image width
+#define MAXY       576//    768             // Maximal image height
+
+// Layout configuration bits in $LAY.config.
+#define LC_SMASK2      0x20000000      // Extention of LC_SMASK
+#define LC_AUTOPROBE   0x10000000      // Autodetect probes (Kelvin or standard)
+#define LC_TYPEMASK    0x0B000000      // General type of machine
+#define   LC_STD       0x00000000      // LC_TYPEMASK: standard A5/A6 tester
+#define   LC_NEWA1     0x01000000      // LC_TYPEMASK: new A1 (slow A5) tester
+#define   LC_S1        0x02000000      // LC_TYPEMASK: S1/S2
+#define   LC_A8        0x03000000      // LC_TYPEMASK: A7/A8
+#define   LC_S3        0x08000000      // LC_TYPEMASK: S3
+#define LC_VACUUMBOX   0x04000000      // Disable movements on bottom side
+#define LC_MOREMASK    0x00C00000      // Mask for more space bits
+#define   LC_MOREBOT   0x00800000      // Give more space on bottom
+#define   LC_MORETOP   0x00400000      // Give more space on the top
+#define LC_DEADLOCKS   0x00200000      // Autoresolve deadlocks
+#define LC_ILLUM       0x00100000      // Auto switch video illumination on/off
+#define LC_HARDZ       0x00040000      // Hard Z contacting (A2/A4/A5 only)
+#define LC_QUAKE       0x00020000      // Earthquake protection on (M2 only)
+#define LC_SMASK1      0x0001C000      // Mask for type of loading system
+#define LC_RELAYS      0x00002000      // Slow (LATEST-compatible) relays
+#define LC_OHTYPE      0x00001C00      // Mask to extract on-head type
+#define   LC_NOFIELD   0x00001000      // On-heads without field amplifier
+#define   LC_PHADJ     0x00000C00      // On-heads with adjustable field phase
+#define   LC_ACTIVE    0x00000400      // Active on-heads (with Dallas/R1-R4)
+#define   LC_PASSIVE   0x00000000      // Passive on-heads (manual C adjust)
+#define LC_TRAFFICS    0x00000200      // Hitachi-style traffic lights
+#define LC_ZSENSORS    0x00000100      // A series: Z pressure sensors active
+#define LC_LOWBAUD     0x00000100      // M2: low AFMCU I/O baud rate
+#define LC_ISM2        0x00000080      // M2 tester
+#define LC_A2LOADER    0x00000040      // A2-style loader, enables LC_SMASK
+#define LC_ENCODERS    0x00000020      // Tester with encoders
+#define LC_COVER       0x00000010      // I have forgotten what it means
+#define LC_HIGHZ       0x00000008      // Z always moves with full hub (B1)
+#define LC_LDELAY      0x00000004      // Wait after light off (obsolete)
+#define LC_AMASK       0x00000003      // Mask for type of antennae
+#define   LC_EXTANT    0x00000000      // LC_AMASK: external (A1) antennae
+#define   LC_INTANT    0x00000001      // LC_AMASK: internal antennae (void)
+#define   LC_FINGANT   0x00000002      // LC_AMASK: finger antennae
+// Alternative (old) interpretation of LC_OHTYPE bits.
+#define LC_PHASEADJ    0x00000800      // On-heads with adjustable field phase
+#define LC_ACTIVEONHD  0x00000400      // Active on-heads (with Dallas/R1-R4)
+// Tester types in LC_SMASK=(LC_SMASK2|LC_SMASK1).
+#define LC_LMMAN       0x0001C000      // L&M manual tester
+#define LC_LMS2        0x00018000      // L&M for S2a
+#define LC_EPCOS       0x00014000      // L&M for EPCOS tester
+#define LC_LM          0x00010000      // L&M for A5a
+#define LC_A5WIDE      0x0000C000      // A5 wide shuttle
+#define LC_AUTOMATE    0x00008000      // Automatical shuttle
+#define LC_A2XSHUT     0x00004000      // A2X shuttle
+#define LC_A2SHUT      0x00000000      // A2 standard shuttle
+// Useful shortcuts and substitutions.
+#define LC_SMASK       (LC_SMASK2|LC_SMASK1)
+#define LC_LDMASK      (LC_SMASK2|LC_SMASK1|LC_A2LOADER)
+#define LC_TMASK       (LC_TYPEMASK|LC_ISM2|LC_HIGHZ|LC_LDELAY)
+#define LC_LMAUTO      (LC_LM|LC_A2LOADER)
+#define LC_LMS2AUTO    (LC_LMS2|LC_A2LOADER)
+#define LC_EPCOSAUTO   (LC_EPCOS|LC_A2LOADER)
+
+#define NCHEESE        40              // Maximal number of holes in cheese
+#define NFOUND         30              // Maximal number of found fiducials
+#define NSUB           64              // Number of subareas in Corr window
+
+#define SM_DATAMATRIX  0               // Special mode: Datamatrix recognition
+#define SM_POINT       1               // Special mode: point search
+#define SM_FOCUS       2               // Special mode: S3 focus
+
+#define NNAME          20
+char chname[NNAME][12] = {             /* Channel, isheadcam, text          */ \
+  "00 0",        "01 1",        "02+2",        "03+3",                         \
+  "04+4",        "05+5",        "06+6",        "07+7",                         \
+  "08+8",        "09+9",        "10+10",       "11+11",                        \
+  "16 0..1",     "17+0..3",     "18+0..7",     "19+0..11",                     \
+  "12 0+01...",  "13 1+01...",  "14 0+00...",  "15 1+11..." }
+
+#define NFILTER        5
+int filterdata[NFILTER] = {            /* Colour filter settings            */ \
+  0x00000000,                          /* No filter                         */ \
+  0x015A5100,                          /* Tin                               */ \
+  0x01627C00,                          /* Gold                              */ \
+  0x014C8400,                          /* Copper                            */ \
+  0x01872300 }                         /* Green                             */
+
+#define NDMTYPE        10
+int dmtypelist[NDMTYPE] = {            /* Supported Datamatrix 200 types    */ \
+  10, 12, 14, 16, 18, 20, 22, 24, 26, 32 }
+
+#define NDMSIZE        13
+int dmsizelist[NDMSIZE] = {            /* Supported Datamatrix dot sizes    */ \
+  4, 6, 8, 10, 13, 17, 22, 28, 35, 45, 60, 77, 100 }
+
+#define NZTIME 10
+float ztime[NZTIME] = { 0.5, 1.0, 1.5, 2.0, 3.0, 5.0, 10.0, 15.0, 20.0, 30.0 }
+
+int loresbits[5] = { 0x00, 0x20, 0x40, 0x60, 0xC0 }
+
+// General parameters.
+handle           hmain                 // Main window
+handle           hfid                  // Child with fiducial controls
+handle           hlum                  // Child with illumination controls
+handle           hspecsel              // Selector for special controls
+handle           hspecial              // Child with special controls
+handle           hsave                 // Child with frame save controls
+handle           hvideo[13]            // Video windows (0 is main)
+int              videox                // Width of image from grabber
+int              videoy                // Height of image from grabber
+int              screenx               // Corrected width of image from grabber
+int              screeny               // Corrected height of image from grabber
+int              sizex                 // Width of main video window
+int              sizey                 // Height of main video window
+int              videotype             // Set of displayed channels
+int              camera                // Last selected camera
+int              izoom                 // Zoom of main video window (logical)
+float            zoom                  // Zoom of main video window (physical)
+int              iangle                // Rotation of main video (logical)
+float            angle                 // Rotation of main video (radians)
+int              clip                  // Clipping of needles in main video
+int              filter                // RGB-to-grayscale filter
+int              mirror                // Mirror of main video window
+int              autoset               // 0x1: bri/ctr, 0x2: white balance
+int              hiexp                 // High exposition
+int              selbmp                // 0: selection defines model, 1: bitmap
+int              showfps               // Display fps counter on the screen
+int              bright                // Actual brightness
+int              contr                 // Actual contrast
+int              hide                  // Hide main video window
+int              freeze                // Freeze main video window
+int              zdn                   // Grab preferrably when contacting PCB
+int              lores                 // Reduce X image resolution (0..4)
+int              grayscale             // Grayscale image
+int              specsel               // Selected special mode, SM_xxx
+int              ltop                  // Top illumination
+int              lskew                 // Skew illumination
+int              lthru                 // Shinethrough illumunation
+
+// Video cheese.
+int              cheesex[NCHEESE]      // Relative X hole coordinate
+int              cheesey[NCHEESE]      // Relative Y hole coordinate
+int              cheeser[NCHEESE]      // Diameter of hole
+int              cheesec[NCHEESE]      // Colour of border
+int              cheesevx[NCHEESE]     // X hole velocity
+int              cheesevy[NCHEESE]     // Y hole velocity
+int              ncheese               // Number of holes on the screen
+float            fps                   // Frames per second
+
+// Search for fiducials.
+handle           hvfid                 // Fiducial
+float            found[NFOUND][3]      // Found fiducials
+int              nfound                // Number of found fiducials
+
+// Search for Datamatrix.
+handle           hdmtype               // Size of Datamatrix code in dots
+handle           hdmsize               // Size of Datamatrix dots in pixels
+handle           hdmdots               // Color of Datamatrix dots
+handle           hidcode               // ID button
+handle           hmatr                 // Matrix button
+int              dmtype                // Index of Datamatrix size in dots
+int              dmsize                // Index of Datamatrix dot size in pixels
+int              dmdots                // Color of Datamatrix dots (0:B, 1:W)
+int              corners[8]            // Found corners (x,y,x,y...)
+int              cornersok             // Whether corners valid
+char             datacode[256]         // Decoded code
+
+// Point position.
+#define NMEAN          20              // Length of point history
+handle           hpointx               // X point coordinate
+handle           hpointy               // Y point coordinate
+handle           hpointcnt             // Mean count
+int              pointmean             // Show mean
+handle           hpointmean            // Smoothed coordinates
+handle           hpointhead            // Selected head
+handle           hpointz1              // First Z coordinate
+handle           hpointdt              // Waiting time
+handle           hpointz2              // Second Z coordinate
+handle           hpointnomove          // Move to first coordinate
+handle           hpointmove1           // Move to first coordinate
+handle           hpointmove12          // Move there and back coordinate
+handle           hpointmove2           // Move to second coordinate
+float            xpointmean[NMEAN]     // History of X coordinates
+float            ypointmean[NMEAN]     // History of Y coordinates
+int              npointmean            // Length of point history
+int              pointhead             // Selected head
+int              pointz1               // First Z coordinate, um
+int              pointdt               // Index of waiting time in ztime[], s
+int              pointz2               // Second Z coordinate, um
+int              pointzmode            // Z move mode (0:no,1:1,2:2,3:1-2)
+int              pointlast             // 1: last was Z1, 2: last was Z2
+int              pointzlast            // Last Z coordinate
+int              pointtmove            // Time of last Z movement
+int              pointtrepeat          // Time of last repeat movement
+
+// S3 focus.
+handle           hfocussum             // High-frequency sum
+handle           hfocusz               // Actual Z coordinate
+handle           hfocusup              // Move camera up
+handle           hfocusdn              // Move camera down
+int              focusz[2]             // Actual Z coordinates
+int              focusmove[2]          // Move S3 Z cameras
+
+// Sets Z movement mode in Point special dialog.
+function int Setzmovemode(int mode)
+  if specsel!=SM_POINT return          // Not a point mode
+  if mode<0 || mode>3 mode=0
+  pointzmode=mode
+  change hpointnomove color=(mode==0?LIGHTRED:BLACK)
+  change hpointnomove bkcolor=(mode==0?YELLOW:GRAY)
+  change hpointmove1 color=(mode==1?LIGHTRED:BLACK)
+  change hpointmove1 bkcolor=(mode==1?YELLOW:GRAY)
+  change hpointmove12 color=(mode==3?LIGHTRED:BLACK)
+  change hpointmove12 bkcolor=(mode==3?YELLOW:GRAY)
+  change hpointmove2 color=(mode==2?LIGHTRED:BLACK)
+  change hpointmove2 bkcolor=(mode==2?YELLOW:GRAY)
+end
+
+function int Answerproc(char *answer,int info)
+  if answer[4]==0x0A && specsel==SM_POINT then
+    // Stop Z movements on soft reset.
+    Setzmovemode(0)
+  endif
+end
+
+// Given video channel, returns head that carries corresponding video camera,
+// or -1 if channel is invalid or not assigned.
+function int Headfromchannel(int channel)
+  int head,n
+  if $LAY.cameras!=0 then
+    if channel==0 return $LAY.nfing*2
+    if channel==1 return $LAY.nfing*2+1
+  else
+    n=0
+    for head=0,head<$LAY.nfing*2,head++ do
+      if ($LAY.headcameras & (1<<head))==0 continue
+      if channel==n return head
+      n++
+    enddo
+  endif
+  return -1
+end
+
+// Given video channel, returns head (not channel!) that is able to serve as
+// a shinethru source for the given camera. If there is no such head, returns
+// -1.
+function int Opposite(int channel)
+  int head,opp,n
+  if $LAY.cameras!=0 then
+    if channel==0 then
+      if ($LAY.cameras & 0x2) return $LAY.nfing*2+1
+    else if channel==1 then
+      if ($LAY.cameras & 0x1) return $LAY.nfing*2
+    endif
+  else
+    n=0
+    for head=0,head<$LAY.nfing*2,head++ do
+      if ($LAY.headcameras & (1<<head))==0 continue
+      if channel==n then
+        for opp=0,opp<$LAY.nfing*2,opp++ do
+          if ($LAY.headcameras & (1<<opp))==0 continue
+          if $LAY.side[head/2]==$LAY.side[opp/2] continue
+          if $LAY.bottom[head/2]!=$LAY.bottom[opp/2] continue
+          if $LAY.top[head/2]!=$LAY.top[opp/2] continue
+          return opp
+        enddo
+        break
+      endif
+      n++
+    enddo
+  endif
+  return -1
+end
+
+// Generates channel code that supports shinethrough illumination.
+function int Opc(int channel)
+  int opp
+  if lthru==0 return channel           // No shinethrough illumination
+  opp=Opposite(channel)
+  if opp<0 return channel              // No opposite camera
+  return 0x00800000 | (opp<<16) | channel
+end
+
+// Redraws overlay over the main video window.
+function int Overlay()
+  int i,x,y,r,head
+  float sa,ca,xv,yv,radius,camradius,d,dx,headx,heady,scale
+  char s[256]
+  if hvideo[0]==NULL return
+  draw window=hvideo[0]
+  if ncheese==0 then
+    draw color=VIDEOFILL bkcolor=VIDEOFILL
+  else
+    draw color=YELLOW bkcolor=YELLOW
+  endif
+  draw at 0,0 fillrect sizex,sizey     // Clear main video window
+  draw color=BLACK bkcolor=VIDEOFILL
+  for i=0,i<ncheese,i++ do
+    x=cheesex[i]
+    y=cheesey[i]
+    r=cheeser[i]
+    draw at x+sizex/2,y+sizey/2
+    draw fillellipse r,r
+    x=x+cheesevx[i]
+    if x<(-screenx/2) || x>screenx/2 then
+      cheesevx[i]=-cheesevx[i]
+    else
+      cheesex[i]=x
+    endif
+    y=y+cheesevy[i]
+    if y<(-screeny/2) || y>screeny/2 then
+      cheesevy[i]=-cheesevy[i]
+    else
+      cheesey[i]=y
+    endif
+  enddo
+  if ncheese>0 then
+    draw mode=M_CENTERED
+    if sizex>512 then
+      draw font=HUGEFONT
+      draw color=RED at sizex/2-1,sizey/4+2 text="BEWARE OF MICE!"
+      draw color=LIGHTRED at sizex/2+2,sizey/4-2 text="BEWARE OF MICE!"
+    else
+      draw font=LARGEFONT
+      draw color=RED at sizex/2-1,sizey/4+1 text="BEWARE OF MICE!"
+      draw color=LIGHTRED at sizex/2+1,sizey/4-1 text="BEWARE OF MICE!"
+    endif
+    draw mode=M_LEFT
+  endif
+  if showfps && fps>0.0 then
+    draw color=WHITE at 5,5 rect 60,23
+    draw color=BLACK bkcolor=LIGHTGRAY at 6,6 fillrect 59,22
+    draw font=INFOFONT at 8,21 text=format("%.1f fps",fps)
+  endif
+  sa=Sin(mirror?angle:-angle)
+  ca=Cos(angle)
+  if clip!=0 then
+    // Get headcam-to-needle distance from layout. If absent, set to default.
+    radius=$int4($EXTLAY+424)/1000.0
+    camradius=$int4($EXTLAY+428)/1000.0
+    dx=camradius-radius
+    if (dx<1.0 || dx>5.0) dx=3.0
+    if clip<0.0 dx=-dx
+    // Get camera magnification.
+    head=Headfromchannel(camera)
+    scale=0.0
+    if head>=0 then
+      headx=0.0; heady=0.0
+      sprintf(s,"Headcam scale[%i]",head)
+      getini("System",s,"%f,%f",&headx,&heady)
+      if headx>3.0 && headx<20.0 && heady>3.0 && heady<20.0 then
+        scale=(headx+heady)/2000.0     // Millimeters per pixel
+      endif
+    endif
+    if scale==0.0 then
+      headx=0.0; heady=0.0
+      if head>=0 then
+        sprintf(s,"Video scale[%i]",$LAY.side[head/2])
+      else
+        Strcpy(s,"Video scale[0]")
+      endif
+      getini("System",s,"%f,%f",&headx,&heady)
+      if headx>1.5 && headx<10.0 && heady>1.5 && heady<10.0 then
+        scale=(headx+heady)/1024.0     // Millimeters per pixel
+      else
+        scale=0.01                     // Millimeters per pixel
+      endif
+    endif
+    dx=dx*zoom/scale
+    // Draw cross and circle.
+    draw color=LIGHTGREEN
+    d=25.0*zoom
+    draw at sizex/2+d*sa,sizey/2-d*ca
+    draw to sizex/2-d*sa,sizey/2+d*ca
+    draw pixel sizex/2-d*sa,sizey/2+d*ca
+    draw at sizex/2-d*ca,sizey/2-d*sa
+    draw to sizex/2+d*ca,sizey/2+d*sa
+    draw pixel sizex/2+d*ca,sizey/2+d*sa
+    draw at sizex/2+dx*ca,sizey/2+dx*sa
+    d=0.50*zoom/scale
+    draw ellipse d,d
+  endif
+  draw color=LIGHTRED font=SMALLFONT
+  for i=0,i<nfound,i++ do
+    xv=(found[i][0]-videox/2)*zoom*(mirror?-1:1)
+    yv=(found[i][1]-videoy/2)*zoom
+    x=xv*ca-yv*sa+sizex/2
+    y=yv*ca+xv*sa+sizey/2
+    r=found[i][2]*zoom/30
+    if r>1 then
+      draw at x-r,y to x+r+1,y
+      draw at x,y-r to x,y+r+1
+      draw at x+3,y text=format("%i",i)
+    endif
+  enddo
+  if cornersok then
+    xv=corners[6]*zoom*(mirror?-1:1)
+    yv=corners[7]*zoom
+    x=xv*ca-yv*sa+sizex/2
+    y=yv*ca+xv*sa+sizey/2
+    draw font=LARGEFONT mode=M_LEFT color=LIGHTBLUE at x,y-10 text=datacode
+    draw color=LIGHTRED at x,y
+    for i=0,i<8,i=i+2 do
+      xv=corners[i]*zoom*(mirror?-1:1)
+      yv=corners[i+1]*zoom
+      x=xv*ca-yv*sa+sizex/2
+      y=yv*ca+xv*sa+sizey/2
+      draw to x,y
+    enddo
+  endif
+  draw show
+end
+
+// Creates nice windows with live video.
+function int View(int type)
+  int i,j,x,y,n,vmode,smallcam
+  // If type of placement is not changed, do nothing.
+  if videotype==type return
+  // First of all, destroy all available video windows.
+  for n=0,n<13,n++ do
+    if hvideo[n]!=NULL then
+      destroy hvideo[n]
+      hvideo[n]=NULL
+    endif
+  enddo
+  // Video mode for main video screen.
+  vmode=(hide?0:(freeze?1:2))|(grayscale?0x08:0x00)|                           \
+    (hiexp & 0x01?0x04:0x00)|(zdn?0x10:0x00)|loresbits[lores]|                 \
+    filterdata[filter]
+  if type<12 then
+    // Single video screen.
+    camera=type
+    sizex=screenx-6; sizey=screeny-3
+    hvideo[0]=control GRAPH
+      window=hmain
+      position=3,3,sizex,sizey
+      help=format("主视频图像(通道%i)",camera)
+      mode=M_SELECTION
+      bkcolor=VIDEOFILL
+      color=BLACK
+    endc
+    Overlay()
+    SYS.Videoangle(hvideo[0],Opc(camera),mirror,zoom,bright,contr,vmode,angle)
+  else if type==16 then
+    // Split video screen (cameras 0 and 1).
+    camera=0
+    sizex=screenx/2-6; sizey=screeny-3
+    hvideo[0]=control GRAPH
+      window=hmain
+      position=3,3,sizex,sizey
+      help="主视频图像(通道0)"
+      bkcolor=VIDEOFILL
+      color=BLACK
+    endc
+    Overlay()
+    SYS.Videoangle(hvideo[0],Opc(0),mirror,zoom,bright,contr,vmode,angle)
+    hvideo[1]=control GRAPH
+      window=hmain
+      position=screenx/2+3,3,sizex,sizey
+      help="Video image (channel 1)"
+      bkcolor=VIDEOFILL
+      color=BLACK
+    endc
+    SYS.Videoangle(hvideo[1],Opc(1),mirror,zoom,bright,contr,vmode,angle)
+  else if type==17 then
+    // 4 video screens (cameras 0,1,2 and 3).
+    camera=0
+    sizex=screenx/2-6; sizey=screeny/2-6
+    for i=0,i<4,i++ do
+      x=3+(screenx/2)*(i%2)
+      y=3+(screeny/2)*(i/2)
+      hvideo[i]=control GRAPH
+        window=hmain
+        position=x,y,sizex,sizey
+        help=format("视频图像(通道%i)",i)
+        bkcolor=VIDEOFILL
+        color=BLACK
+      endc
+      SYS.Videoangle(hvideo[i],Opc(i),mirror,zoom,bright,contr,vmode,angle)
+    enddo
+    Overlay()
+  else if type==18 then
+    // 8 video screens (cameras 0 to 7).
+    camera=0
+    sizex=screenx/4-6; sizey=screeny/2-6
+    for i=0,i<8,i++ do
+      x=3+(screenx/4)*(i%4)
+      y=3+(screeny/2)*(i/4)
+      hvideo[i]=control GRAPH
+        window=hmain
+        position=x,y,sizex,sizey
+        help=format("视频图像(通道%i)",i)
+        bkcolor=VIDEOFILL
+        color=BLACK
+      endc
+      SYS.Videoangle(hvideo[i],Opc(i),mirror,zoom,bright,contr,vmode,angle)
+    enddo
+    Overlay()
+  else if type==19 then
+    // 12 video screens (cameras 0 to 11).
+    camera=0
+    sizex=screenx/4-6; sizey=screeny/3-6
+    for i=0,i<12,i++ do
+      x=3+(screenx/4)*(i%4)
+      y=3+(screeny/3)*(i/4)
+      hvideo[i]=control GRAPH
+        window=hmain
+        position=x,y,sizex,sizey
+        help=format("视频图像(通道%i)",i)
+        bkcolor=VIDEOFILL
+        color=BLACK
+      endc
+      SYS.Videoangle(hvideo[i],Opc(i),mirror,zoom,bright,contr,vmode,angle)
+    enddo
+    Overlay()
+  else
+    // Large video from camera 0 or 1, surrounded by small images.
+    sizex=screenx/2-6; sizey=screeny/2-6
+    camera=(type==12 || type==14?0:1)
+    hvideo[0]=control GRAPH
+      window=hmain
+      position=screenx/4+3,screeny/4+3,sizex,sizey
+      help=format("主视频图像(通道%i)",camera)
+      mode=M_SELECTION
+      bkcolor=VIDEOFILL
+      color=BLACK
+    endc
+    Overlay()
+    SYS.Videoangle(hvideo[0],Opc(camera),mirror,zoom,bright,contr,vmode,angle)
+    n=1
+    for j=0,j<4,j++ do
+      for i=0,i<4,i++ do
+        if (i==1 || i==2) && (j==1 || j==2) continue
+        if type<=13 then
+          smallcam=(i+j) & 1
+        else
+          smallcam=camera
+        endif
+        hvideo[n]=control GRAPH
+          window=hmain
+          position=screenx/4*i+3,screeny/4*j+3,screenx/4-6,screeny/4-6
+          help=format("辅助视频图像(通道%i)",smallcam)
+          bkcolor=VIDEOFILL
+          color=BLACK
+        endc
+        draw window=hvideo[n] color=BLACK
+        draw at 4,22 text=(smallcam==0?"Ch 0":"Ch 1") show
+        draw at 5,21 text=(smallcam==0?"Ch 0":"Ch 1") show
+        draw at 6,22 text=(smallcam==0?"Ch 0":"Ch 1") show
+        draw at 5,23 text=(smallcam==0?"Ch 0":"Ch 1") show
+        draw color=WHITE
+        draw at 5,22 text=(smallcam==0?"Ch 0":"Ch 1") show
+        SYS.Videoex(hvideo[n],Opc(smallcam),0,0.25,bright,contr,2)
+        n++
+      enddo
+    enddo
+  endif
+  videotype=type
+  nfound=0
+  cornersok=0
+end
+
+// Applies changed video parameters to main video window(s).
+function int Setparm(int forcefreeze)
+  int i,vmode
+  vmode=(forcefreeze?1:(hide?0:(freeze?1:2)))|                                 \
+    (hiexp & 0x01?0x04:0x00)|(grayscale?0x08:0x00)|(zdn?0x10:0x00)|            \
+    loresbits[lores]|filterdata[filter]
+  if hvideo[0]!=NULL then
+    SYS.Videoangle(hvideo[0],Opc(camera),mirror,zoom,bright,contr,vmode,angle)
+    SYS.Autoset(camera,autoset)
+  endif
+/*
+  if videotype==8 || videotype==13 || videotype==14 then
+    for i=1,i<8,i++ do
+      if hvideo[i]==NULL continue
+      SYS.Videoangle(hvideo[i],Opc(i),mirror,zoom,bright,contr,vmode,angle)
+      SYS.Autoset(i,autoset)
+    enddo
+  endif
+*/
+  autoset=autoset & 0xFD
+end
+
+// Service function, calculates distance between fiducials i and j.
+function float Fidist(int i,int j)
+  float dx,dy
+  dx=(found[i,0]-found[j,0])
+  dy=(found[i,1]-found[j,1])
+  return Sqrt(dx*dx+dy*dy)
+end
+
+// Service function, recalculates found coordinates to screen. Input and
+// output coordinates may coincide.
+function int Toscreen(float xf,float yf,float *x,float *y)
+  x[0]=sizex/2+(xf-videox/2)*zoom*(mirror?-1:1)
+  y[0]=sizey/2+(yf-videoy/2)*zoom
+end
+
+function int Readstring(int p1,int p2,int p3,int p4,int camera,char *text)
+  int i,j,k,m,q,vx0,vx1,vy0,vy1,ix,iy,ir2,p,n,pe,ne,chksum
+  int bitmin,bitmax,bithi,bitlo,bit[8,8],bite[8,8]
+  float r,radius,side
+  float x,y,x0,y0,x1,y1,x2,y2,x3,y3,dx,dy,sx[8,8],sy[8,8]
+  char *buf,s[32]
+  // Get contents of data area (64 bit).
+  vx0=Min(found[p1][0],found[p2][0],found[p3][0],found[p4][0])
+  vx1=Max(found[p1][0],found[p2][0],found[p3][0],found[p4][0])+1
+  vy0=Min(found[p1][1],found[p2][1],found[p3][1],found[p4][1])
+  vy1=Max(found[p1][1],found[p2][1],found[p3][1],found[p4][1])+1
+  Alloc(buf,(vx1-vx0)*(vy1-vy0))
+  SYS.Getvideo(camera,vx0-sizex/2,vx1-sizex/2,1,vy0-sizey/2,vy1-sizey/2,1,buf)
+  vx1=vx1-vx0
+  vy1=vy1-vy0
+  // Calculate side of enclosing rectangle and radius of bit search area.
+  side=Fidist(p2,p3)
+  radius=Max(1.0,Min(10.0,side/40.0))
+  ir2=radius*2+1
+  // Get bits.
+  bitmin=255
+  bitmax=0
+  for i=0,i<8,i++ do
+    r=(1.5+i)/10.0
+    x0=found[p1][0]*(1.0-r)+found[p2][0]*r
+    y0=found[p1][1]*(1.0-r)+found[p2][1]*r
+    x1=found[p4][0]*(1.0-r)+found[p3][0]*r
+    y1=found[p4][1]*(1.0-r)+found[p3][1]*r
+    for j=0,j<8,j++ do
+      r=(1.5+j)/10.0
+      x=Floor(x0*(1.0-r)+x1*r)
+      sx[i,7-j]=x; ix=x+0.5
+      y=Floor(y0*(1.0-r)+y1*r)
+      sy[i,7-j]=y; iy=y+0.5
+      p=0; n=0; pe=0; ne=0
+      for k=-ir2,k<=ir2,k++ do
+        dx=ix+k-x
+        for m=-ir2,m<=ir2,m++ do
+          dy=iy+m-y
+          r=dx*dx+dy*dy
+          if r>4*radius*radius continue
+          if r<=radius*radius then
+            p=p+buf[(iy+m-vy0)*vx1+ix+k-vx0]
+            n++
+          else
+            pe=pe+buf[(iy+m-vy0)*vx1+ix+k-vx0]
+            ne++
+          endif
+        enddo
+      enddo
+      p=p/n
+      bit[i,7-j]=p
+      bitmin=Min(bitmin,p)
+      bitmax=Max(bitmax,p)
+      pe=pe/ne
+      bite[i,7-j]=pe
+    enddo
+  enddo
+  Free(buf)
+  // Check that bits have correct levels and normalize.
+  bithi=(2*bitmax+bitmin)/3.0
+  bitlo=(2*bitmin+bitmax)/3.0
+  n=0
+  for i=0,i<8,i++ do
+    for j=0,j<8,j++ do
+      if bit[i,j]>bithi then
+        bit[i,j]=0; bite[i,j]=0        // Interprete white as 0
+      else if bit[i,j]<bitlo then
+        bit[i,j]=1; bite[i,j]=1        // Interprete black as 1
+      else if bit[i,j]>bite[i,j] then
+        bit[i,j]=0; bite[i,j]=0        // Interprete white center as 0
+      else if bit[i,j]<bite[i,j] then
+        bit[i,j]=1; bite[i,j]=2        // Interprete black center as 1
+      else
+        n++; break                     // Invalid level
+      endif
+    enddo
+  enddo
+  if n!=0 return -1                    // Some points have invalid level
+  // Now restore encoded text. Format: 7 data bytes with odd parity in bit 7,
+  // followed by checksum of all bytes XORed with 0x0E.
+  for k=0,k<4,k++ do                   // Orientation
+    chksum=0
+    for i=0,i<8,i++ do                 // Read 8 bytes
+      s[i]=0
+      for j=0,j<8,j++ do
+        if k==0 then m=bit[7-i,j]
+        else if k==1 then m=bit[j,i]
+        else if k==2 then m=bit[i,7-j]
+        else m=bit[7-j,7-i]; endif
+        s[i]=s[i] | (m<<j)
+      enddo
+      chksum=chksum ^ s[i]
+    enddo
+    // Check if code is recognized correctly.
+    if chksum!=0x0E continue
+    for m=0,m<7,m++ do
+      p=0
+      for q=0,q<8,q++ do
+        if (s[m] & (1<<q))!=0 p=!p
+      enddo
+      if p==0 break
+    enddo
+    if m<7 continue                    // Invalid parity
+    for m=0,m<7,m++ do
+      text[m]=s[m] & 0x7F
+    enddo
+    text[7]='\0'
+    // Draw enclosing rectangle.
+    Toscreen(found[p1][0],found[p1][1],&x0,&y0)
+    Toscreen(found[p2][0],found[p2][1],&x1,&y1)
+    Toscreen(found[p3][0],found[p3][1],&x2,&y2)
+    Toscreen(found[p4][0],found[p4][1],&x3,&y3)
+    draw color=LIGHTRED
+    draw at x0,y0 to x1,y1 to x2,y2 to x3,y3 to x0,y0
+    // Draw bits.
+    for i=0,i<8,i++ do
+      for j=0,j<8,j++ do
+        if bite[i,j]==0 then
+          continue
+        else if bite[i,j]==1 then
+          Toscreen(sx[i,j],sy[i,j],&x,&y)
+          draw at x+0.5,y+0.5 color=LIGHTRED ellipse ir2,ir2
+        else
+          Toscreen(sx[i,j],sy[i,j],&x,&y)
+          draw at x+0.5,y+0.5 color=LIGHTGREEN ellipse ir2,ir2
+        endif
+      enddo
+    enddo
+    // Draw text.
+    draw font=LARGEFONT mode=M_CENTERED color=LIGHTRED
+    draw at sx[4,4]+side/20,sy[4,4]-side*0.7-10 text=text
+    draw at sx[4,4]+side/20,sy[4,4]+side*0.7+30 text=text
+    return 0                           // Code read
+  enddo
+  return -1                            // Code not recognized
+end
+
+function int Recognizeid(int nfound,int camera,char *s)
+  int i,j,k,m,q,n,p,p1[900],p2[900],c[NFOUND],sx[8,8],sy[8,8],pe,ne
+  int order[4],nattempt
+  int vx0,vx1,vy0,vy1
+  float x,y,x0,y0,x1,y1,x2,y2,x3,y3,r,r1,r2,d[900],side,step
+  char *buf
+  draw window=hvideo[0] color=VIDEOFILL bkcolor=VIDEOFILL
+  draw at 0,0 fillrect sizex,sizey     // Clear main video window
+  if nfound<4 then
+    draw show
+    return -1                          // Too few fiducials
+  endif
+  // Limit correlation of worst pad to 50% of best one.
+  for i=1,i<nfound,i++ do
+    if found[i][2]<found[0][2]*0.5 break
+  enddo
+  nfound=i
+  if nfound<4 return -1                // Too few fiducials
+  // Calculate distances between all fiducials and place them to array sorted
+  // by distance.
+  n=0
+  for i=0,i<nfound-1,i++ do
+    for j=i+1,j<nfound,j++ do
+      r=Fidist(i,j)
+      for k=0,k<n,k++ do
+        if r<d[k] break
+      enddo
+      if k<n then
+        for q=n,q>k,q-- do
+          p1[q]=p1[q-1]
+          p2[q]=p2[q-1]
+          d[q]=d[q-1]
+        enddo
+      endif
+      p1[k]=i
+      p2[k]=j
+      d[k]=r
+      n++
+    enddo
+  enddo
+  // Select 4 fiducials that form rectangle. Due to multiple checks, total
+  // number of executions of innermost loop is not as high as it seems to be.
+  nattempt=0
+  for i=0,i<n-3,i++ do
+    side=d[i]                          // Shortest distance of all 4 sides
+    c[p1[i]]++; c[p2[i]]++
+    for j=i+1,j<n-2,j++ do
+      if d[j]>side*1.20 continue
+      c[p1[j]]++; c[p2[j]]++
+      for k=j+1,k<n-1,k++ do
+        if d[k]>side*1.20 continue
+        if c[p1[k]]==2 || c[p2[k]]==2 continue
+        if c[p1[k]]!=1 && c[p2[k]]!=1 continue
+        c[p1[k]]++; c[p2[k]]++
+        for m=k+1,m<n,m++ do
+          if d[m]>side*1.20 continue
+          if c[p1[m]]!=1 || c[p2[m]]!=1 continue
+          c[p1[m]]++; c[p2[m]]++
+          for q=0,q<NFOUND,q++ do
+            if c[q]!=0 && c[q]!=2 break
+          enddo
+          if q==NFOUND then
+            // Find order of nodes and check that quadrangle is not a romb.
+            order[1]=p1[i]; order[2]=p2[i];
+            if p1[j]==p1[i]      then order[0]=p2[j];
+            else if p2[j]==p1[i] then order[0]=p1[j];
+            else if p1[k]==p1[i] then order[0]=p2[k];
+            else if p2[k]==p1[i] then order[0]=p1[k];
+            else if p1[m]==p1[i] then order[0]=p2[m];
+            else if p2[m]==p1[i] then order[0]=p1[m];
+            endif
+            if p1[j]==p2[i]      then order[3]=p2[j];
+            else if p2[j]==p2[i] then order[3]=p1[j];
+            else if p1[k]==p2[i] then order[3]=p2[k];
+            else if p2[k]==p2[i] then order[3]=p1[k];
+            else if p1[m]==p2[i] then order[3]=p2[m];
+            else if p2[m]==p2[i] then order[3]=p1[m];
+            endif
+            r1=Fidist(order[0],order[2])
+            r2=Fidist(order[1],order[3])
+            // We have found 4 quadrangle corners. Check that they are more
+            // or less rectangular.
+            if r1>1.25*side && r1<1.6*side && r2>1.25*side && r2<1.6*side then
+              // Make points clockwise-oriented. The simplest way is to
+              // calculate vector product of two consecutive sides.
+              x1=found[order[1]][0]-found[order[0]][0]
+              y1=found[order[1]][1]-found[order[0]][1]
+              x2=found[order[2]][0]-found[order[1]][0]
+              y2=found[order[2]][1]-found[order[1]][1]
+              if x1*y2-x2*y1<0.0 then
+                q=order[0]; order[0]=order[3]; order[3]=q
+                q=order[1]; order[1]=order[2]; order[2]=q
+              endif
+              // Try to recognize text.
+              if Readstring(order[0],order[1],order[2],order[3],camera,s)==0   \
+                then
+                // Text recognized.
+                draw show
+                return 0
+              endif
+              nattempt++
+              if nattempt>4 then
+                draw show
+                return -1
+              endif
+            endif
+          endif
+          c[p1[m]]--; c[p2[m]]--
+        enddo
+        c[p1[k]]--; c[p2[k]]--
+      enddo
+      c[p1[j]]--; c[p2[j]]--
+    enddo
+    c[p1[i]]--; c[p2[i]]--
+  enddo
+  draw show
+  return -1                            // No success!
+end
+
+external int SYS.Dmatrix(int chan,char *code,int *corners)
+
+// Recognizes Datamatrix ECC 200 code.
+function int Recognizematrix(int camera,int sa,int sb,int color,char *s)
+
+
+int n;
+  Memset(corners,0,Sizeof(corners))
+  n=SYS.Dmatrix(camera,s,corners)
+  if corners[0]!=0 || corners[1]!=0 || corners[4]!=0 || corners[5]!=0 then
+    cornersok=1
+  else
+    cornersok=0
+  endif
+lprintf(RED,"%i :: '%s'",n,s)
+
+//  cornersok=SYS.Datamatrix(camera,dmdots,dmtypelist[dmtype],                   \
+//    dmsizelist[dmsize],iangle-45.0,iangle+45.0,s,corners)
+//  if (cornersok) Strcpy(datacode,s)
+//  return cornersok
+end
+
+function int Corrwindow()
+  int i,j,k,n,r,point,redraw,dxy,dist
+  char moddata[8192],imgdata[8192]
+  int stat[NSUB][NSUB]
+  float corr,dummy
+  handle hcw,hplot,hpoint,hpscroll,hrepeat,hclose
+  hcw=control WINDOW
+    window=hmain
+    position=10,10,331,359
+    name="图像模式相关"
+    help=" "
+    bkcolor=YELLOW
+    mode=M_MODAL
+    size=128
+  endc
+  hplot=control GRAPH
+    window=hcw
+    position=5,5,321,321
+    help="相关图" 
+    color=BLACK
+    bkcolor=WHITE
+  endc
+  draw window=hcw at 10,349 font=INFOFONT text="Point" show
+  hpoint=control TEXT
+    window=hcw
+    position=54,331,36,24
+    text="0"
+    help="当前选择的点" 
+    font=MEDIUMFONT
+    mode=M_BORDER|M_CENTERED
+  endc
+  hpscroll=control VSCROLL
+    window=hcw
+    position=90,331,22,24
+    limits=1,-1
+    help="按下可更改所选点" 
+  endc
+  hrepeat=control BUTTON
+    window=hcw
+    position=200,331,61,24
+    name="重复"
+    help="按下可重新计算相关性" 
+  endc
+  hclose=control BUTTON
+    window=hcw
+    position=266,331,61,24
+    name="关闭"
+    help="按下可以关闭此窗口"
+  endc
+  point=0; redraw=0x1
+  while 1 do
+    if Pressed(hpscroll) then
+      point=point+Status(hpscroll)
+      if point<0 point=0
+      if point>0 && found[point][2]<found[0][2]/2.0 point--
+      if point>=NFOUND point=NFOUND-1
+      change hpoint text=format("%i",point)
+      change hpscroll select=0
+      redraw=redraw | 0x1
+    else if Pressed(hrepeat) then
+      redraw=redraw ^ 0x2
+      if redraw & 2 then
+        change hrepeat color=LIGHTRED
+      else
+        change hrepeat color=BLACK
+      endif
+    else if Pressed(hclose) then
+      destroy hcw
+      break
+    endif
+    if redraw then
+      dxy=320/NSUB
+      n=SYS.Recdata(hvfid,found[point][0],found[point][1],                     \
+        &corr,&dummy,moddata,imgdata);
+      draw window=hplot
+      draw color=WHITE bkcolor=WHITE clear
+      draw color=LIGHTGRAY font=INFOFONT mode=M_LEFT
+      do i=0,320,dxy
+        draw at i,0 to i,321; enddo
+      do i=0,320,dxy
+        draw at 0,i to 321,i; enddo
+      draw color=WHITE bkcolor=WHITE at 1,1 fillrect 44,16
+      draw at 3,16 color=GRAY text="Image"
+      draw color=WHITE bkcolor=WHITE at 280,305 fillrect 320,320
+      draw at 283,320 color=GRAY text="模式"
+      draw color=WHITE bkcolor=WHITE at 111,1 fillrect 213,16
+      draw at 113,16 color=BLUE text=format("Correlation %.1f",corr)
+      for i=0,i<NSUB,i++ do
+        for j=0,j<NSUB,j++ do
+          stat[i][j]=0
+        enddo
+      enddo
+      dist=256/NSUB
+      for k=0,k<n,k++ do
+        stat[imgdata[k]/dist][moddata[k]/dist]++
+      enddo
+      draw color=BLACK bkcolor=BLACK
+      for i=0,i<NSUB,i++ do
+        for j=0,j<NSUB,j++ do
+          if stat[i][j]==0 continue
+          r=Sqrt(stat[i][j])
+          if r==1 then
+            draw pixel j*dxy+dxy/2,(NSUB-1-i)*dxy+dxy/2
+          else if r==2 then
+            draw pixel j*dxy+dxy/2,(NSUB-1-i)*dxy+dxy/2
+            draw pixel j*dxy+dxy/2+1,(NSUB-1-i)*dxy+dxy/2+1
+          else if r==3 then
+            draw pixel j*dxy+dxy/2,(NSUB-1-i)*dxy+dxy/2
+            draw pixel j*dxy+dxy/2+1,(NSUB-1-i)*dxy+dxy/2
+            draw pixel j*dxy+dxy/2+1,(NSUB-1-i)*dxy+dxy/2+1
+          else if r==4 then
+            draw pixel j*dxy+dxy/2,(NSUB-1-i)*dxy+dxy/2
+            draw pixel j*dxy+dxy/2+1,(NSUB-1-i)*dxy+dxy/2
+            draw pixel j*dxy+dxy/2,(NSUB-1-i)*dxy+dxy/2+1
+            draw pixel j*dxy+dxy/2+1,(NSUB-1-i)*dxy+dxy/2+1
+          else
+            draw at j*dxy+dxy/2,(NSUB-1-i)*dxy+dxy/2 fillellipse r/2,r/2
+          endif
+        enddo
+      enddo
+      draw show
+      redraw=redraw & 0x2
+    endif
+    wait
+  enddo
+end
+
+// Gets coordinates of bright point.
+function int Getpointpos()
+  int i,j,k,vx,vy,result,imax,jmax,i0,i1,j0,j1
+  char *buf
+  float p,hx[1536],hy[1536],xmax,ymax,a,b,xpoint,ypoint
+  float x[1536],y[1536],xx[3],xy[3],yx[3],yy[3]
+  if videox<=0 || videoy<=0 return
+  vx=Min(videox,1536)
+  vy=Min(videoy,1536)
+  Alloc(buf,vx*vy)
+  result=SYS.Getvideo(camera,0-(videox/2),vx-(videox/2),1,                     \
+    0-(videoy/2),vy-(videoy/2),1,buf)
+  if result>0 then
+    for j=0,j<vy,j++ do
+      k=j*vx
+      for i=0,i<vx,i++ do
+        p=buf[k+i]; hx[i]=hx[i]+p; hy[j]=hy[j]+p
+      enddo
+    enddo
+    // Subtract background.
+    for i=0,i<vx,i++ do
+      x[i]=i
+    enddo
+    SYS.Polyfit(vx,x,hx,3,vx,x,y)
+    for i=0,i<vx,i++ do
+      hx[i]=hx[i]-y[i]
+    enddo
+    for i=0,i<vy,i++ do
+      y[i]=i
+    enddo
+    SYS.Polyfit(vy,y,hy,3,vy,y,x)
+    for i=0,i<vy,i++ do
+      hy[i]=hy[i]-x[i]
+    enddo
+    // Find maximas and approximation limits.
+    imax=0
+    for i=0,i<vx,i++ do
+      if hx[i]>xmax then
+        xmax=hx[i]
+        imax=i
+      endif
+      x[i]=i-videox/2
+    enddo
+    xmax=xmax/3.0
+    for i0=imax,i0>0,i0-- do
+      if hx[i0]<xmax break
+    enddo
+    for i1=imax,i1<vx-1,i1++ do
+      if hx[i1]<xmax break
+    enddo
+    jmax=0
+    for j=0,j<vy,j++ do
+      if hy[j]>ymax then
+        ymax=hy[j]
+        jmax=j
+      endif
+      y[j]=j-videoy/2
+    enddo
+    ymax=ymax/3.0
+    for j0=jmax,j0>0,j0-- do
+      if hy[j0]<ymax break
+    enddo
+    for j1=jmax,j1<vy-1,j1++ do
+      if hy[j1]<ymax break
+    enddo
+    // Make parabolic approximation and find maximum in X.
+    xx[0]=-1.0
+    xx[1]=0.0
+    xx[2]=1.0
+    SYS.Polyfit(i1-i0,x+i0,hx+i0,2,3,xx,xy)
+    a=(xy[0]+xy[2])/2.0-xy[1]
+    b=(xy[2]-xy[0])/2.0
+    if a==0.0 then
+      xpoint=0.0
+    else
+      xpoint=-b/2.0/a
+    endif
+    // Make parabolic approximation and find maximum in Y.
+    yx[0]=-1.0
+    yx[1]=0.0
+    yx[2]=1.0
+    SYS.Polyfit(j1-j0,y+j0,hy+j0,2,3,yx,yy)
+    a=(yy[0]+yy[2])/2.0-yy[1]
+    b=(yy[2]-yy[0])/2.0
+    if a==0.0 then
+      ypoint=0.0
+    else
+      ypoint=-b/2.0/a
+    endif
+    if pointmean==0 then
+      npointmean=0
+      change hpointcnt text=""
+      change hpointx text=format("%.2f ",xpoint)
+      change hpointy text=format("%.2f ",ypoint)
+      found[0][0]=xpoint+videox/2
+      found[0][1]=ypoint+videoy/2
+      found[0][2]=1000.0
+      nfound=1
+    else
+      if npointmean>=NMEAN npointmean--
+      for i=npointmean,i>=1,i-- do
+        xpointmean[i]=xpointmean[i-1]
+        ypointmean[i]=ypointmean[i-1]
+      enddo
+      xpointmean[0]=xpoint
+      ypointmean[0]=ypoint
+      npointmean++
+      xpoint=0.0; ypoint=0.0
+      for i=0,i<npointmean,i++ do
+        xpoint=xpoint+xpointmean[i]
+        ypoint=ypoint+ypointmean[i]
+      enddo
+      change hpointcnt text=format("= %2i",npointmean)
+      change hpointx text=format("%.3f ",xpoint/npointmean)
+      change hpointy text=format("%.3f ",ypoint/npointmean)
+      found[0][0]=xpoint/npointmean+videox/2
+      found[0][1]=ypoint/npointmean+videoy/2
+      found[0][2]=1000.0
+      nfound=1
+    endif
+  endif
+  Free(buf)
+end
+
+// Makes slow movement to Z coordinate with specified index (0: last, 1: Z1,
+// 2: Z2).
+function int Makezmovement(int index)
+  int v,z
+  char s[256]
+  // Request slow movement.
+  v=Max(10,Min(50.0/ztime[pointdt],200))
+  sprintf(s,"OUTPORT32 HEAD(%i) 0x10010007,%i",pointhead,v)
+  SERV.Cmdimm(0,s)
+  // Make movement.
+  if index==1 then
+    Text(hpointz1,s); sscanf(s,"%i",&pointz1)
+    pointz1=Max(5000,Min(pointz1,40000))
+    change hpointz1 text=format("%i",pointz1)
+    z=pointz1
+  else if index==2 then
+    Text(hpointz2,s); sscanf(s,"%i",&pointz2)
+    pointz2=Max(5000,Min(pointz2,40000))
+    change hpointz2 text=format("%i",pointz2)
+    z=pointz2
+  else
+    z=pointzlast
+  endif
+  sprintf(s,"OUTPORT32 HEAD(%i) 0x10010008,%i",pointhead,z)
+  SERV.Cmdimm(0,s)
+  pointzlast=z
+end
+
+// Gets high-frequency noise of the picture.
+function int Getimgnoise()
+  int i,j,k,sumx,sum,vx,vy,result
+  char *buf
+  if videox<=0 || videoy<=0 return
+  vx=Min(256,videox)
+  vy=Min(256,videoy)
+  Alloc(buf,vx*vy)
+  sum=0
+  result=SYS.Getvideo(camera,-vx/2,vx-vx/2,1,                                  \
+    -vy/2,vy-vy/2,1,buf)
+  if result>0 then
+    for j=0,j<vy-1,j++ do
+      sumx=0
+      for i=0,i<vx-1,i++ do
+        k=j*vx+i
+        sumx=sumx+Abs(buf[k]-buf[k+1])+Abs(buf[k]-buf[k+vx])
+      enddo
+      sum=sum+(sumx*10)/vx
+    enddo
+  endif
+  Free(buf)
+  return (sum*10)/vy
+end
+
+// Sets controls for special functions.
+function int Setspecial()
+  int i
+  clear hspecial
+  draw window=hspecial
+  if specsel==SM_DATAMATRIX then
+    // Datamatrix.
+    Setzmovemode(0)
+    draw font=MAINFONT at 58,21 color=GREEN
+    draw mode=M_CENTERED text="2D码:"
+    draw mode=M_LEFT color=BLACK
+    draw at 5,45 text="类型"
+    hdmtype=control COMBOLIST
+      window=hspecial
+      position=40,26,70,220
+      help="数据矩阵类型200代码" 
+      mode=M_VSCROLL
+    endc
+    for i=0,i<NDMTYPE,i++ do
+      add hdmtype text=format("%ix%i",dmtypelist[i],dmtypelist[i])
+    enddo
+    change hdmtype select=dmtype
+    draw at 5,73 text="尺寸"
+    hdmsize=control COMBOLIST
+      window=hspecial
+      position=40,54,70,300
+      help="数据矩阵点的大小，以相机像素为单位" 
+      mode=M_VSCROLL
+    endc
+    for i=0,i<NDMSIZE,i++ do
+      add hdmsize text=format("%i pix",dmsizelist[i])
+    enddo
+    change hdmsize select=dmsize
+    hdmdots=control COMBOLIST
+      window=hspecial
+      position=5,82,105,200
+      help="数据矩阵点的颜色" 
+      mode=M_VSCROLL
+    endc
+    add hdmdots text="黑在白上"
+    add hdmdots text="白在黑上"
+    change hdmdots select=dmdots
+    hidcode=control BUTTON
+      window=hspecial
+      position=5,112,50,24
+      name="Id"
+      help="按下可识别身份代码，别忘了学习基准点！" 
+    endc
+    if hvfid==NULL disable hidcode     // Disabled as long as no fiducial
+    hmatr=control BUTTON
+      window=hspecial
+      position=60,112,50,24
+      name="取"
+      help="按下可识别大小为AxB像素的数据矩阵代码" 
+    endc
+  else if specsel==SM_POINT then
+    // Point position.
+    pointzlast=5000
+    draw font=MAINFONT at 58,21 color=GREEN
+    draw mode=M_CENTERED text="点位:"
+    draw mode=M_LEFT color=BLACK
+    draw at 5,45 text="X="
+    hpointx=control TEXT
+      window=hspecial
+      position=25,26,85,23
+      help="X点坐标，像素 " 
+      mode=M_RIGHT|M_BORDER
+      font=MEDIUMFONT
+    endc
+    draw at 5,67 text="Y="
+    hpointy=control TEXT
+      window=hspecial
+      position=25,48,85,23
+      help="Y点坐标，像素 " 
+      mode=M_RIGHT|M_BORDER
+      font=MEDIUMFONT
+    endc
+    hpointmean=control CHECKBOX
+      window=hspecial
+      position=5,75,60,20
+      text="Mean"
+      help=format("显示最近%i测量的平均坐标",NMEAN)
+      mode=(pointmean?M_CHECKED:0)
+    endc
+    hpointcnt=control TEXT
+      window=hspecial
+      position=65,76,45,18
+      text=""
+      help=" "
+      bkcolor=WHITEGREEN
+    endc
+    draw at 5,120 text="Hd"
+    hpointhead=control COMBOLIST
+      window=hspecial
+      position=26,99,58,300
+      help="测试在Z方向移动 " 
+    endc
+    for i=0,i<$LAY.nfing*2,i++ do
+      add hpointhead text=format("%i%s",i/2,i & 1?"R":"L")
+    enddo
+    if pointhead<0 || pointhead>=$LAY.nfing*2 pointhead=0
+    change hpointhead select=pointhead
+    hpointnomove=control BUTTON
+      window=hspecial
+      position=88,100,22,22
+      text="No"
+      help="没有Z轴移动"
+    endc
+    if pointz1<5000 || pointz1>40000 pointz1=5000
+    draw at 5,145 text="Z1"
+    hpointz1=control EDIT
+      window=hspecial
+      position=26,125,58,22
+      text=format("%i",pointz1)
+      help="第一个Z坐标(约5000…25000微米)"
+      bkcolor=WHITE
+    endc
+    hpointmove1=control BUTTON
+      window=hspecial
+      position=88,125,22,22
+      text="1"
+      help="移动到第一个Z坐标 " 
+    endc
+    if pointdt<0 || pointdt>=NZTIME pointdt=3
+    draw at 5,170 text="dT"
+    hpointdt=control COMBOLIST
+      window=hspecial
+      position=26,149,58,250
+      help="移动间的时间，秒(0.2..30.0)"
+      bkcolor=WHITE
+    endc
+    for i=0,i<NZTIME,i++ do
+      add hpointdt text=format("%.1f",ztime[i])
+    enddo
+    change hpointdt select=pointdt
+    hpointmove12=control BUTTON
+      window=hspecial
+      position=88,150,22,22
+      text="12"
+      help="每dT秒更改Z坐标"
+    endc
+    if pointz2<5000 || pointz2>40000 pointz2=5000
+    draw at 5,195 text="Z2"
+    hpointz2=control EDIT
+      window=hspecial
+      position=26,175,58,22
+      text=format("%i",pointz2)
+      help="第二个Z坐标(约5000..25000微米)"
+      bkcolor=WHITE
+    endc
+    hpointmove2=control BUTTON
+      window=hspecial
+      position=88,175,22,22
+      text="2"
+      help="移动到第二个Z坐标" 
+    endc
+    Setzmovemode(0)
+  else if specsel==SM_FOCUS then
+    // S3 focussing.
+    draw font=MAINFONT at 58,21 color=GREEN
+    draw mode=M_CENTERED text="Focus:"
+    draw mode=M_LEFT color=BLACK
+    draw at 5,45 text="S="
+    hfocussum=control TEXT
+      window=hspecial
+      position=25,26,85,23
+      help="图像高频噪声" 
+      mode=M_BORDER
+      font=MEDIUMFONT
+    endc
+    if ($LAY.config & LC_TYPEMASK)==LC_S3 then
+      draw at 5,77 text="Z="
+      hfocusz=control TEXT
+        window=hspecial
+        position=25,58,85,23
+        help="摄影机的当前Z坐标" 
+        mode=M_BORDER
+        font=MEDIUMFONT
+      endc
+      hfocusup=control BUTTON
+        window=hspecial
+        position=45,95,32,32
+        text="U"
+        help="按下可将摄像头向上移动20微米" 
+        mode=M_REPEAT
+        font=MEDIUMFONT
+      endc
+      hfocusdn=control BUTTON
+        window=hspecial
+        position=45,133,32,32
+        text="D"
+        help="按下可将摄像头向下移动20微米" 
+        mode=M_REPEAT
+        font=MEDIUMFONT
+      endc
+      focusmove[0]=1
+      focusmove[1]=1
+    endif
+  endif
+  draw show
+end
+
+// Main routine. Most of processing is done here.
+function int main()
+  int i,j,fidcamera,delta,redraw,scan,repeat,lasttime,tlight
+  int sizea,sizeb,rot,modcolor,modtype,modx,mody,x,y,head,type,side
+  int lastframe,thisframe,lastfidframe,thisfidframe,thistime
+  char s[260],savepath[260],drv[4],dir[260],nam[260],ext[260]
+  float frot,dt,currfps,sa,ca,xv,yv
+  handle hasize,hascroll,hbsize,hbscroll,hrot,hrotscroll
+  handle hcolor,htype,hmodel,hscan,hrepeat
+  handle hcorr,hltop,hlskew,hlthru,hlight,hchan,hhiexp,hautoset,hbalance
+  handle hbright,hcontr,htextzoom,hzoom,htextangle,hangle,hclip
+  handle hfilter,hmirror,hfreeze,hhide,hcheese,hfps,hsavename
+  handle hsavesel,hsavebmp,hselbmp,hzdn,hlores,hgrayscale,hquit,f
+  // Determine full size of video image and its size on the screen.
+  SYS.Videosize(0,&videox,&videoy,&i);
+  screenx=Max(MINX,Min(videox,MAXX))
+  screeny=Max(MINY,Min(videoy,MAXY))
+  // Get settings.
+  type=0; izoom=0; hiexp=0; autoset=0; mirror=0; selbmp=0; showfps=0
+  iangle=0; clip=0; filter=0; zdn=0; lores=0
+  grayscale=0; specsel=SM_DATAMATRIX
+  ltop=1; lskew=0; lthru=0
+  pointhead=0; pointz1=5000; pointdt=3; pointz2=10000
+  focusz[0]=0; focusz[1]=0
+  getini("Video","Settings","%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i",          \
+    &type,&izoom,&autoset,&mirror,&selbmp,&showfps,&iangle,&clip,&zdn,         \
+    &lores,&grayscale,&filter,&specsel)
+  lores=Max(0,Min(lores,4))
+  getini("Video","Settings 2","%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i",     \
+    &ltop,&lskew,&dmtype,&dmsize,&dmdots,&pointmean,&pointhead,&pointz1,       \
+    &pointdt,&pointz2,&hiexp,focusz+0,&lthru,focusz+1)
+  Strcpy(savepath,"video.bmp")
+  getini("Video","Savepath","%s",savepath)
+  // Create main window.
+  hmain=control WINDOW
+    window=NULL
+    position=10,10,screenx+120,screeny+63
+    name=format("摄像头 v%s - %ix%i 像素",VERSION,videox,videoy)
+    help=" "
+    bkcolor=GREEN
+    size=512
+  endc
+  // Create modelling and pattern recognition controls.
+  hfid=control CHILD
+    window=hmain
+    position=screenx+1,3,116,208
+    help=" "
+    color=BLACK
+    bkcolor=WHITEGREEN
+    size=512
+  endc
+  draw window=hfid color=BLACK bkcolor=WHITEGREEN
+  draw font=MAINFONT at 58,19 color=GREEN mode=M_CENTERED text="基准:"
+  draw mode=M_LEFT color=BLACK
+  sizea=30; sizeb=20; rot=0; modcolor=0; modtype=0;
+  getini("Video","Model","%i,%i,%i,%i,%i",                                     \
+    &sizea,&sizeb,&rot,&modcolor,&modtype)
+  draw at 5,42 text="尺寸 A"
+  hasize=control EDIT
+    window=hfid
+    position=55,23,35,24
+    text=format("%i",sizea);
+    help="基准点的大小A，像素(宽度、外半径或距离)" 
+    font=MEDIUMFONT
+    bkcolor=WHITE
+  endc
+  hascroll=control VSCROLL
+    window=hfid
+    position=90,23,20,24
+    help="按下可更改A尺寸基准" 
+    limits=1,-1
+  endc
+  draw at 5,69 text="尺寸 B"
+  hbsize=control EDIT
+    window=hfid
+    position=55,50,35,24
+    text=format("%i",sizeb);
+    help="基准点的大小B，像素(高度、内径或厚度)" 
+    font=MEDIUMFONT
+    bkcolor=WHITE
+  endc
+  hbscroll=control VSCROLL
+    window=hfid
+    position=90,50,20,24
+    help="按下可更改B尺寸基准" 
+    limits=1,-1
+  endc
+  draw at 5,96 text="角度"
+  hrot=control EDIT
+    window=hfid
+    position=55,77,35,24
+    text=format("%i",rot);
+    help="基准角，逆时针度数" 
+    font=MEDIUMFONT
+    bkcolor=WHITE
+  endc
+  hrotscroll=control VSCROLL
+    window=hfid
+    help="按下可更改基准点角度" 
+    position=90,77,20,24
+    limits=1,-1
+  endc
+  hcolor=control COMBOLIST
+    window=hfid
+    position=5,104,105,90
+    help="基准点颜色"
+    bkcolor=WHITE
+  endc
+  add hcolor text="黑"
+  add hcolor text="白"
+  change hcolor select=modcolor
+  htype=control COMBOLIST
+    window=hfid
+    position=5,131,105,220
+    help="基准点类型"
+    bkcolor=WHITE
+    mode=M_VSCROLL
+  endc
+  add htype text="灰(灵活)"
+  add htype text="灰(全)"
+  add htype text="圆"
+  add htype text="三角形"
+  add htype text="十字"
+  add htype text="角"
+  add htype text="Dbl左"
+  add htype text="Dbl右"
+  change htype select=modtype
+  hmodel=control BUTTON
+    window=hfid
+    position=5,159,50,21
+    name="模式"
+    help="按下创建具有给定参数的模型" 
+  endc
+  hscan=control BUTTON
+    window=hfid
+    position=60,159,50,21
+    name="查找"
+    help="按下可识别图片上定义的基准点" 
+  endc
+  disable hscan                        // Disabled as long as no fiducial
+  hrepeat=control BUTTON
+    window=hfid
+    position=5,183,50,21
+    name="重"
+    help="按下可实时识别定义的基准点" 
+  endc
+  disable hrepeat                      // Disabled as long as no fiducial
+  hcorr=control BUTTON
+    window=hfid
+    position=60,183,50,21
+    name="坐标"
+    help="按下可查看相关图表"
+  endc
+  disable hcorr                        // Disabled as long as no fiducial
+  draw show
+  // Create illumination controls.
+  hlum=control CHILD
+    window=hmain
+    position=screenx+1,215,116,78
+    help=" "
+    color=BLACK
+    bkcolor=WHITEGREEN
+    size=512
+  endc
+  draw window=hlum color=BLACK bkcolor=WHITEGREEN
+  draw font=MAINFONT at 58,20 color=GREEN
+  draw mode=M_CENTERED text="照明:"
+  draw mode=M_LEFT color=BLACK
+  hltop=control CHECKBOX
+    window=hlum
+    position=5,22,55,18
+    name="顶"
+    help="顶部照明"
+    mode=(ltop?M_CHECKED:0)
+  endc
+  hlskew=control CHECKBOX
+    window=hlum
+    position=5,40,55,18
+    name="歪斜"
+    help="侧面照明"
+    mode=(lskew?M_CHECKED:0)
+  endc
+  hlthru=control CHECKBOX
+    window=hlum
+    position=5,58,55,18
+    name="穿透"
+    help="透光照明"
+    mode=(lthru?M_CHECKED:0)
+  endc
+  hlight=control BUTTON
+    window=hlum
+    position=65,29,45,24
+    name="..开"
+    help="按下可打开照明，双击可永久打开"
+  endc
+  if $GLOBAL.a5==0 then
+    disable hltop
+    disable hlskew
+    disable hlthru
+    disable hlight
+  endif
+  draw show
+  // Create selector for special controls.
+  draw window=hmain
+  draw at screenx+1,316 text="规格:"
+  hspecsel=control COMBOLIST
+    window=hmain
+    position=screenx+40,296,78,180
+    help="选择特殊视频功能"
+  endc
+  add hspecsel text="面"
+  add hspecsel text="点"
+  add hspecsel text="聚焦"
+  change hspecsel select=specsel
+  // Create placeholder for special controls.
+  hspecial=control CHILD
+    window=hmain
+    position=screenx+1,321,116,202
+    help=" "
+    color=BLACK
+    bkcolor=WHITEGREEN
+    size=512
+  endc
+  Setspecial()
+  // Create save bitmap controls.
+  hsave=control CHILD
+    window=hmain
+    position=screenx+1,527,116,78
+    help=" "
+    color=BLACK
+    bkcolor=WHITEGREEN
+    size=512
+  endc
+  draw window=hsave color=BLACK bkcolor=WHITEGREEN
+  draw font=MAINFONT at 58,21 color=GREEN
+  draw mode=M_CENTERED text="另存为:"
+  draw mode=M_LEFT color=BLACK
+  Fnsplit(savepath,drv,dir,nam,ext)
+  hsavename=control EDIT
+    window=hsave
+    position=5,25,85,20
+    name="视频"
+    help="图像文件的名称"
+    bkcolor=WHITE
+  endc
+  hsavesel=control BUTTON
+    window=hsave
+    position=90,25,20,20
+    name=">"
+    help="按下可选择名称/更改保存目录"
+  endc
+  hsavebmp=control BUTTON
+    window=hsave
+    position=5,48,105,24
+    name="保存"
+    help="按下可将完整图像保存到位图文件"
+  endc
+  draw window=hmain
+  // Create video image controls.
+  izoom=Max(-30,Min(30,izoom))
+  zoom=Exp(izoom/20.0*Log(2.0))
+  iangle=Max(-180,Min(180,iangle))
+  filter=Max(0,Min(filter,NFILTER-1))
+  draw at 4,screeny+23 text="Ch"
+  hchan=control COMBOLIST
+    window=hmain
+    position=23,screeny+4,70,400
+    help="选择要在屏幕上显示的通道"
+    bkcolor=WHITE
+    mode=M_VSCROLL
+  endc
+  for i=0,i<NNAME,i++ do
+    if ($LAY.cameras!=0 || $LAY.headcameras==0) && chname[i][2]!=' ' continue
+    add hchan text=chname[i]+3
+  enddo
+  change hchan select=0                // For the case that type is wrong
+  change hchan select=type
+  hbalance=control BUTTON
+    window=hmain
+    position=95,screeny+4,33,24
+    name="WB"
+    help="按下自动设置彩色摄像机的白平衡"
+  endc
+  hhiexp=control CHECKBOX
+    window=hmain
+    position=6,screeny+34,65,24
+    name="高清"
+    help="设置扩展的曝光('对比度')范围"
+    mode=(hiexp & 0x01?M_CHECKED:0)
+  endc
+  hautoset=control CHECKBOX
+    window=hmain
+    position=73,screeny+34,50,24
+    name="自动"
+    help="自动设置亮度和对比度"
+    mode=(autoset & 0x01?M_CHECKED:0)
+  endc
+  draw at 132,screeny+23 text="亮"
+  hbright=control HSCROLL
+    window=hmain
+    position=155,screeny+4,120,24
+    name="亮度"
+    help="滚动更改视频图像的亮度"
+    limits=-100,100
+  endc
+  bright=Status(hbright)
+  draw at 132,screeny+53 text="对"
+  hcontr=control HSCROLL
+    window=hmain
+    position=155,screeny+34,120,24
+    name="对比度"
+    help="滚动更改视频图像的对比度"
+    limits=-100,100
+  endc
+  contr=Status(hcontr)
+  draw at 280,screeny+23 text="缩放"
+  htextzoom=control BUTTON
+    window=hmain
+    position=320,screeny+4,50,24
+    help="缩放比例，单击可重置"
+    font=MEDIUMFONT
+    bkcolor=LIGHTGRAY
+  endc
+  if izoom<0 then
+    change htextzoom text=format(":%.2f",1.0/zoom)
+  else if izoom==0 then
+    change htextzoom text="1.00"
+  else
+    change htextzoom text=format("x%.2f",zoom)
+  endif
+  hzoom=control HSCROLL
+    window=hmain
+    position=373,screeny+4,100,24
+    name="缩放"
+    help="更改主图像的缩放比例"
+    limits=-60,60
+  endc
+  change hzoom select=izoom
+  draw at 280,screeny+53 text="角度"
+  htextangle=control BUTTON
+    window=hmain
+    position=320,screeny+34,50,24
+    help="旋转角度，度，单击可重置"
+    font=MEDIUMFONT
+    bkcolor=LIGHTGRAY
+  endc
+  hangle=control HSCROLL
+    window=hmain
+    name="相机角度"
+    help="更改主图像的缩放比例"
+    position=373,screeny+34,100,24
+    limits=-180,180
+  endc
+  change hangle select=iangle
+  draw at 476,screeny+23 text="削减"
+  hclip=control COMBOLIST
+    window=hmain
+    position=512,screeny+4,70,200
+    help="设置剪辑模式"
+  endc
+  add hclip text="无"
+  add hclip text="左"
+  add hclip text="右"
+  if clip==0 then
+    change hclip select=0
+  else if clip<0 then
+    change hclip select=1
+  else
+    change hclip select=2
+  endif
+  draw at 476,screeny+53 text="过滤"
+  hfilter=control COMBOLIST
+    window=hmain
+    position=512,screeny+34,70,200
+    help="设置RGB到灰度过滤器，仅限彩色摄像机"
+  endc
+  add hfilter text="无"
+  add hfilter text="锡"
+  add hfilter text="金"
+  add hfilter text="铜"
+  add hfilter text="绿"
+  change hfilter select=filter
+  hmirror=control CHECKBOX
+    window=hmain
+    position=591,screeny+1,56,20
+    name="镜像"
+    help="镜像(X<=>-X)"
+    mode=(mirror?M_CHECKED:0)
+  endc
+  hfreeze=control CHECKBOX
+    window=hmain
+    position=651,screeny+1,60,20
+    name="冻结"
+    help="冻结视频"
+  endc
+  hhide=control CHECKBOX
+    window=hmain
+    position=717,screeny+1,46,20
+    name="隐藏"
+    help="选中可在主屏幕中隐藏视频"
+  endc
+  hcheese=control CHECKBOX
+    window=hmain
+    position=591,screeny+21,76,20
+    name="图形"
+    help="检查一下有很多视频奶酪。小心老鼠！"
+  endc
+  hfps=control CHECKBOX
+    window=hmain
+    position=666,screeny+21,45,20
+    name="帧率"
+    help="显示每秒帧数计数器"
+    mode=(showfps?M_CHECKED:0)
+  endc
+  hselbmp=control CHECKBOX
+    window=hmain
+    position=715,screeny+21,45,20
+    name="位图"
+    help="检查是否要将选择保存到位图文件"
+    mode=(selbmp?M_CHECKED:0)
+  endc
+  if $LAY.nfing==0 || ($LAY.cameras==0 && $LAY.headcameras!=0) then
+    hzdn=control CHECKBOX
+      window=hmain
+      position=591,screeny+41,45,20
+      name="Zdn"
+      help="针接触PCB时优先抓取图像"
+      mode=(zdn?M_CHECKED:0)
+    endc
+  endif
+  hlores=control COMBOLIST
+    window=hmain
+    position=650,screeny+43,50,120
+    help="减小X分辨率(和传输数据的大小)"
+    font=TERMINALFONT
+  endc
+  add hlores text="Full"
+  add hlores text=":2"
+  add hlores text=":4"
+  add hlores text=":8"
+  add hlores text=":3H"
+  change hlores select=lores
+  hgrayscale=control CHECKBOX
+    window=hmain
+    position=714,screeny+41,50,20
+    name="灰"
+    help="选中以灰度显示彩色图像"
+    mode=(grayscale?M_CHECKED:0)
+  endc
+  draw show
+  // The most important control.
+  hquit=control BUTTON
+    window=hmain
+    position=screenx,screeny+33,118,27
+    name="退出"
+    help="关闭视频奶酪"
+  endc
+  // Create video screen(s).
+  videotype=-1
+  camera=0
+  View(type)
+  Setparm(0)
+  // Main loop.
+  redraw=1                             // 0x1: overlay, 0x2: model
+  scan=0                               // 1: find fiducial, 2: find label
+  repeat=0                             // 1: repeat fiducial, 2: repeat label
+  lastframe=0                          // Last video frame on main channel
+  lastfidframe=0                       // Last frame searched for fiducial
+  lasttime=0
+  while 1 do
+    // Update brightness, contrast and frames per second.
+    thisframe=SYS.Framecount(camera)
+    thisfidframe=SYS.Framecount(fidcamera)
+    thistime=Time()
+    if (thisfidframe!=lastfidframe && repeat!=0) scan=repeat
+    lastfidframe=thisfidframe
+    if thisframe!=lastframe then       // New video frame is available
+      if autoset & 0x01 then
+        SYS.Videoparms(camera,&i,&j,&delta)
+        if i!=bright then
+          bright=i; change hbright select=bright
+        endif
+        if j!=contr then
+          contr=j; change hcontr select=contr
+        endif
+      endif
+      if ncheese>0 redraw=redraw|1
+      if lasttime>0 then
+        dt=(thistime-lasttime)/1000.0
+        if dt>0.02 then                // Avoids division by zero, that's all
+          currfps=(thisframe-lastframe)/dt
+          fps=(fps==0.0?currfps:fps*0.9+currfps*0.1)
+          if showfps redraw=redraw|1
+        endif
+      endif
+      lasttime=thistime
+      lastframe=thisframe
+    endif
+    // Process signals from controls.
+    if Pressed(hquit) then
+      break
+    else if Pressed(hasize) || Pressed(hascroll) then
+      delta=Status(hascroll)
+      Text(hasize,s); sizea=0; sscanf(s,"%i",&sizea)
+      if sizea>=200 then delta=delta*20;
+      else if sizea>=50 then delta=delta*5;
+      else if sizea>=20 then delta=delta*2; endif
+      sizea=Max(5,Min(512,sizea+delta))
+      change hasize text=format("%i",sizea)
+      change hascroll select=0
+    else if Pressed(hbsize) || Pressed(hbscroll) then
+      delta=Status(hbscroll)
+      Text(hbsize,s); sizeb=0; sscanf(s,"%i",&sizeb)
+      if sizeb>=200 then delta=delta*20;
+      else if sizeb>=50 then delta=delta*5;
+      else if sizeb>=20 then delta=delta*2; endif
+      sizeb=Max(0,Min(512,sizeb+delta))
+      change hbsize text=format("%i",sizeb)
+      change hbscroll select=0
+    else if Pressed(hrot) || Pressed(hrotscroll) then
+      delta=Status(hrotscroll)*5
+      Text(hrot,s); rot=0; sscanf(s,"%i",&rot)
+      rot=Max(-180,Min(180,rot+delta))
+      change hrot text=format("%i",rot)
+      change hrotscroll select=0
+    else if Pressed(hmodel) then
+      if videotype<0 continue
+      SYS.Deletemodel(hvfid)
+      Text(hasize,s); sizea=0; sscanf(s,"%i",&sizea)
+      sizea=Max(5,Min(512,sizea))
+      change hasize text=format("%i",sizea)
+      Text(hbsize,s); sizeb=0; sscanf(s,"%i",&sizeb)
+      sizeb=Max(0,Min(512,sizeb))
+      change hbsize text=format("%i",sizeb)
+      Text(hrot,s); rot=0; sscanf(s,"%i",&rot)
+      rot=Max(-180,Min(180,rot))
+      change hrot text=format("%i",rot)
+      frot=rot*3.1415926/180.0
+      i=Status(htype)
+      switch i
+      case 0,1:
+        sizea=(sizea+1) & (~1)
+        sizeb=(sizeb+1) & (~1)
+        hvfid=SYS.Modelangle(camera,videox/2,videoy/2,sizea,sizeb,             \
+        (i==0?3:2),angle,clip)
+      case 2:
+        j=1-Status(hcolor)
+        hvfid=SYS.Syntmodel(camera,0,sizea,sizeb,0,frot,j)
+      case 3:
+        j=1-Status(hcolor)
+        hvfid=SYS.Syntmodel(camera,1,sizea,sizeb,0,frot,j)
+      case 4:
+        j=1-Status(hcolor)
+        hvfid=SYS.Syntmodel(camera,7,sizea,sizeb,0,frot,j)
+      case 5:
+        j=1-Status(hcolor)
+        hvfid=SYS.Syntmodel(camera,8,sizea,sizeb,0,frot,j)
+      case 6:
+        j=1-Status(hcolor)
+        hvfid=SYS.Syntmodel(camera,5,sizea,sizeb,0,frot,j)
+      default:
+        j=1-Status(hcolor)
+        hvfid=SYS.Syntmodel(camera,6,sizea,sizeb,0,frot,j)
+      endsw
+      fidcamera=camera
+      if hvfid==NULL then
+        disable hscan; scan=0
+        disable hrepeat; repeat=0; change hrepeat color=BLACK
+        if specsel==SM_DATAMATRIX disable hidcode
+        disable hcorr
+      else
+        enable hscan
+        enable hrepeat
+        if specsel==SM_DATAMATRIX enable hidcode
+        nfound=0
+        cornersok=0
+        modx=sizex/2; mody=sizey/2; redraw=redraw|3
+      endif
+    else if Pressed(hscan) then
+      scan=1
+      repeat=0; change hrepeat color=BLACK
+    else if Pressed(hrepeat) then
+      if repeat==0 then
+        scan=1; repeat=1; change hrepeat color=LIGHTRED
+      else
+        scan=0; repeat=0; change hrepeat color=BLACK
+      endif
+    else if Pressed(hcorr) then
+      Corrwindow()
+    else if Pressed(hchan) then
+      fps=0.0; lasttime=0
+      s[0]='\0'; Text(hchan,s)
+      for i=0,i<NNAME,i++ do
+        if Strcmp(chname[i]+3,s)==0 break
+      enddo
+      if i>=NNAME i=0
+      j=(chname[i][0]-'0')*10+chname[i][1]-'0'
+      camera=chname[i][3]-'0'
+      View(j)
+      redraw=redraw|1
+      side=(camera==1?1:0)
+      focusmove[side]=1
+    else if Pressed(hltop) then
+      ltop=Status(hltop)
+    else if Pressed(hlskew) then
+      lskew=Status(hlskew)
+    else if Pressed(hlthru) then
+      lthru=Status(hlthru)
+    else if Pressed(hlight) then
+      head=Headfromchannel(camera)
+      if head>=0 then
+        i=0x01
+        if Time()-tlight<500 then
+          i=i|0x02
+          change hlight color=LIGHTRED
+          change hlight bkcolor=YELLOW
+        else
+          change hlight color=BLACK
+          change hlight bkcolor=GRAY
+        endif
+        if ltop i=i|0x04
+        if lskew i=i|0x08
+        sprintf(s,"OUTPORT32 HEAD(%i) 0x80000002,%i",head,i)
+        SERV.Cmdimm(0,s)
+        tlight=Time()
+      endif
+    else if Pressed(hspecsel) then
+      specsel=Status(hspecsel)
+      Setspecial()
+    else if Pressed(hcheese) then
+      if Status(hcheese)==0 then
+        ncheese=0                      // Remove existing cheese
+      else
+        for i=0,i<NCHEESE,i++ do       // Create new cheese
+          cheesex[i]=Random(screenx)-screenx/2
+          cheesey[i]=Random(screeny)-screeny/2
+          cheeser[i]=Random(150)+20
+          cheesevx[i]=Random(11)-5
+          cheesevy[i]=Random(11)-5
+        enddo
+        ncheese=NCHEESE
+      endif
+      redraw=redraw|1
+    else if Pressed(hbright) then
+      bright=Status(hbright)
+      Setparm(0)
+    else if Pressed(hcontr) then
+      contr=Status(hcontr)
+      Setparm(0)
+    else if Pressed(hhiexp) then
+      hiexp=(hiexp & 0xFE)|(Status(hhiexp)?0x01:0x00)
+      Setparm(0)
+    else if Pressed(hautoset) then
+      autoset=(autoset & 0xFE)|(Status(hautoset)?0x01:0x00)
+      Setparm(0)
+    else if Pressed(hbalance) then
+      autoset=autoset | 0x02
+      Setparm(0)
+    else if Pressed(hzdn) then
+      zdn=Status(hzdn)
+      Setparm(0)
+    else if Pressed(hlores) then
+      lores=Status(hlores)
+      Setparm(0)
+    else if Pressed(hgrayscale) then
+      grayscale=Status(hgrayscale)
+      Setparm(0)
+    else if Pressed(htextzoom) then
+      izoom=0
+      zoom=1.0
+      change htextzoom text="1.00"
+      change hzoom select=0
+      Setparm(0)
+      redraw=redraw|1
+    else if Pressed(hzoom) then
+      izoom=Status(hzoom)
+      zoom=Exp(izoom/20.0*Log(2.0))
+      if izoom<0 then
+        change htextzoom text=format(":%.2f",1.0/zoom)
+      else if izoom==0 then
+        change htextzoom text="1.00"
+      else
+        change htextzoom text=format("x%.2f",zoom)
+      endif
+      Setparm(0)
+      redraw=redraw|1
+    else if Pressed(htextangle) then
+      iangle=0
+      angle=0.0
+      change htextangle text="0"
+      change hangle select=0
+      Setparm(0)
+      redraw=redraw|1
+    else if Pressed(hangle) then
+      iangle=Status(hangle)
+      angle=iangle*3.14159265359/180.0
+      change htextangle text=format("%i",iangle)
+      Setparm(0)
+      redraw=redraw|1
+    else if Pressed(hclip) then
+      i=Status(hclip)
+      if i==0 then
+        clip=0
+      else if i==1 then
+        clip=-1
+      else
+        clip=1
+      endif
+      redraw=redraw|1
+    else if Pressed(hfilter) then
+      filter=Status(hfilter)
+      Setparm(0)
+      redraw=redraw|1
+    else if Pressed(hmirror) then
+      mirror=Status(hmirror)
+      Setparm(0)
+      redraw=redraw|1
+    else if Pressed(hfreeze) then
+      freeze=Status(hfreeze)
+      Setparm(0)
+    else if Pressed(hhide) then
+      hide=Status(hhide)
+      Setparm(0)
+    else if Pressed(hfps) then
+      showfps=Status(hfps)
+      redraw=redraw|1
+    else if Pressed(hselbmp) then
+      selbmp=Status(hselbmp)
+    else if Pressed(hsavesel) then
+      Fnsplit(savepath,drv,dir,nam,ext)
+      Text(hsavename,nam)
+      Fnmerge(s,drv,dir,nam,ext)
+      i=SYS.Browse(hmain,s,"Select file to save bitmap",0)
+      if i!=0 then
+        Strcpy(savepath,s)
+        Fnsplit(savepath,drv,dir,nam,ext)
+        change hsavename text=nam
+      endif
+    else if Pressed(hsavebmp) then
+      Fnsplit(savepath,drv,dir,nam,ext)
+      Text(hsavename,nam)
+      Fnmerge(s,drv,dir,nam,ext)
+      i=SYS.Saveframe(camera,s,(grayscale?0x01:0x00),"",0.0)
+      if i<0 then
+        lprintf(CYAN,"Unable to save video frame")
+      else
+        Strcpy(savepath,s)
+      endif
+    else if Pressed(hvideo[0])==2 then
+      if selbmp==0 then                // Define fiducial
+        SYS.Deletemodel(hvfid)
+        i=Status(htype)
+        // Recalculate coordinates of central point.
+        sa=Sin(angle)
+        ca=Cos(angle)
+        x=(Limit2(hvideo[0])+Limit0(hvideo[0])-sizex)/2
+        y=(Limit3(hvideo[0])+Limit1(hvideo[0])-sizey)/2
+        xv=x*ca-y*sa+videox/2
+        yv=y*ca+x*sa+videoy/2
+        if i==0 || i==1 then
+          sizea=(Limit2(hvideo[0])-Limit0(hvideo[0])+1) & (~1)
+          sizeb=(Limit3(hvideo[0])-Limit1(hvideo[0])+1) & (~1)
+          hvfid=SYS.Modelangle(camera,xv,yv,sizea,sizeb,(i==0?3:2),angle,clip)
+        else if i==3 || i==4 then
+          sizea=Limit2(hvideo[0])-Limit0(hvideo[0])
+          sizeb=Limit3(hvideo[0])-Limit1(hvideo[0])
+          j=1-Status(hcolor)
+          if i==3 then
+            hvfid=SYS.Syntmodel(0,1,sizea,sizeb,0,0,j)
+          else if i==4 then
+            hvfid=SYS.Syntmodel(0,7,sizea,sizeb,0,0,j)
+          endif
+        endif
+        fidcamera=camera
+        if hvfid==NULL then
+          disable hscan; scan=0
+          disable hrepeat; repeat=0; change hrepeat color=BLACK
+          disable hidcode
+          disable hcorr
+        else
+          enable hscan
+          enable hrepeat
+          enable hidcode
+          nfound=0
+          cornersok=0
+          modx=x+sizex/2
+          mody=y+sizey/2
+          redraw=redraw|3
+        endif
+      else                             // Save bitmap to file
+        Fnsplit(savepath,drv,dir,nam,ext)
+        Text(hsavename,nam)
+        Fnmerge(s,drv,dir,nam,ext)
+        i=SYS.Browse(hmain,s,"Select file to save bitmap",0)
+        if i!=0 then
+          f=Fopen(s,"wb")
+          i=SYS.Writebmp(hvideo[0],                                            \
+            Limit0(hvideo[0]),Limit1(hvideo[0]),                               \
+            Limit2(hvideo[0]),Limit3(hvideo[0]),f,0)
+          Fclose(f)
+          lprintf(CYAN,"Size of bitmap file is %i bytes",i)
+        endif
+      endif
+    endif
+    // Special cases.
+    if specsel==SM_DATAMATRIX then     // Datamatrix
+      if Pressed(hdmtype) then
+        dmtype=Status(hdmtype)
+      else if Pressed(hdmdots) then
+        dmdots=Status(hdmdots)
+      else if Pressed(hdmsize) then
+        dmsize=Status(hdmsize)
+      else if Pressed(hidcode) then
+        scan=2; repeat=2; change hrepeat color=BLACK
+      else if Pressed(hmatr) then
+        scan=3; repeat=0; change hrepeat color=BLACK
+      endif
+    else if specsel==SM_POINT then     // Point position
+      if Pressed(hpointmean) then
+        pointmean=Status(hpointmean)
+        npointmean=0
+        change hpointcnt text=""
+        change hpointx text=""
+        change hpointy text=""
+      else if Pressed(hpointhead) then
+        pointhead=Status(hpointhead)
+        Setzmovemode(0)
+      else if Pressed(hpointz1) then
+        Text(hpointz1,s); sscanf(s,"%i",&pointz1)
+        pointz1=Max(5000,Min(pointz1,40000))
+        change hpointz1 text=format("%i",pointz1)
+      else if Pressed(hpointdt) then
+        pointdt=Status(hpointdt)
+      else if Pressed(hpointz2) then
+        Text(hpointz2,s); sscanf(s,"%i",&pointz2)
+        pointz2=Max(5000,Min(pointz2,40000))
+        change hpointz2 text=format("%i",pointz2)
+      else if Pressed(hpointnomove) then
+        Setzmovemode(0)
+      else if Pressed(hpointmove1) then
+        Setzmovemode(1)
+        Makezmovement(1)
+        pointlast=1
+        pointtmove=Time()
+        pointtrepeat=pointtmove
+      else if Pressed(hpointmove12) then
+        Setzmovemode(3)
+        Makezmovement(1)
+        pointlast=1
+        pointtmove=Time()
+        pointtrepeat=pointtmove
+      else if Pressed(hpointmove2) then
+        Setzmovemode(2)
+        Makezmovement(2)
+        pointlast=2
+        pointtmove=Time()
+        pointtrepeat=pointtmove
+      endif
+      Getpointpos()
+      dt=ztime[pointdt]*1000.0
+      if pointzmode==3 && Time()-pointtmove>=dt then
+        if pointlast==1 then
+          Makezmovement(2)
+          pointlast=2
+        else
+          Makezmovement(1)
+          pointlast=1
+        endif
+        pointtmove=Time()
+        pointtrepeat=pointtmove
+      else if pointzmode!=0 && Time()-pointtrepeat>=2000 then
+        Makezmovement(0)
+        pointtrepeat=Time()
+      endif
+    else if specsel==SM_FOCUS then     // S3 focus
+      i=Getimgnoise()
+      change hfocussum text=format(" %i",i)
+      if ($LAY.config & LC_TYPEMASK)==LC_S3 then
+        side=(camera==1?1:0)
+        if Pressed(hfocusup) then
+          focusz[side]=Max(-8000,focusz[side]-20)
+          focusmove[side]=1
+        else if Pressed(hfocusdn) then
+          focusz[side]=Min(8000,focusz[side]+20)
+          focusmove[side]=1
+        endif
+        for side=0,side<2,side++ do
+          if focusmove[side] then
+            if side==(camera==1?1:0)                                           \
+              change hfocusz text=format(" %i",focusz[side])
+            sprintf(s,"OUTPORT32 HEAD(%i) 0x10010008,%i",                      \
+              $LAY.nfing*2+side,focusz[side])
+            SERV.Cmdimm(0,s)
+            focusmove[side]=0
+          endif
+        enddo
+      endif
+    endif
+    // Scan fiducial or label.
+    if scan then
+      if (hide || camera!=fidcamera) then
+        // Assure that we have new image.
+        j=SYS.Framecount(fidcamera)
+        SYS.Nextframe(fidcamera)
+        while SYS.Framecount(fidcamera)==j do
+          wait
+        enddo
+      endif
+      if scan==1 then                  // Recognition
+        j=Time()
+        nfound=SYS.Recognangle(hvfid,0,0,videox,videoy,found,angle,clip)
+        cornersok=0
+        j=Time()-j
+        lprintf(CYAN,"Recognition time %i ms",j)
+        if nfound>NFOUND nfound=NFOUND
+        if nfound>0 enable hcorr
+        for i=0,i<nfound,i++ do
+          if found[i][2]<found[0][2]/2.0 break
+          if (repeat==0 || i==0) lprintf(CYAN,                                 \
+          "%2i %7.2f %7.2f %6.1f",i,                                           \
+          found[i][0]-videox/2,found[i][1]-videoy/2,found[i][2])
+        enddo
+        nfound=i
+        redraw=redraw|1
+      else if scan==2 then             // ID recognition
+        Setparm(1)
+        j=Time()
+        nfound=SYS.Recognangle(hvfid,0,0,videox,videoy,found,angle,clip)
+        if nfound>NFOUND nfound=NFOUND
+        disable hcorr
+        s[0]='\0'
+        Recognizeid(nfound,camera,s)
+        j=Time()-j
+        lprintf(CYAN,"Id recognition time %4i ms, id='%s'",j,s)
+        Setparm(0)
+      else if scan==3 then             // Datamatrix code recognition
+        Setparm(1)
+        j=Time()
+        disable hcorr
+        Text(hasize,s); sizea=0; sscanf(s,"%i",&sizea)
+        sizea=Max(5,Min(512,sizea))
+        change hasize text=format("%i",sizea)
+        Text(hbsize,s); sizeb=0; sscanf(s,"%i",&sizeb)
+        sizeb=Max(0,Min(512,sizeb))
+        change hbsize text=format("%i",sizeb)
+        s[0]='\0'
+        Recognizematrix(camera,sizea,sizeb,Status(hcolor),s)
+        j=Time()-j
+        lprintf(CYAN,"Matrix recognition time %4i ms, id='%s'",j,s)
+        Setparm(0)
+        nfound=0
+        redraw=redraw|1
+      endif
+      scan=0
+    endif
+    // Redraw overlays. Video is redrawn automagically.
+    if redraw then
+      Overlay()
+      if (redraw & 2) then
+        SYS.Drawmodel(hvfid,1,hvideo[0],modx,mody,-1,1)
+        draw show
+      endif
+      redraw=0
+    endif
+    wait
+  enddo
+  // End of session. Cleanup and save current settings to .ini file
+  Text(hasize,s); sizea=0; sscanf(s,"%i",&sizea)
+  Text(hbsize,s); sizeb=0; sscanf(s,"%i",&sizeb)
+  Text(hrot,s); rot=0; sscanf(s,"%i",&rot)
+  setini("Video","Model","%i,%i,%i,%i,%i",                                     \
+    sizea,sizeb,rot,Status(hcolor),Status(htype))
+  setini("Video","Settings","%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i",          \
+    videotype,izoom,autoset,mirror,selbmp,showfps,iangle,clip,zdn,             \
+    lores,grayscale,filter,specsel)
+  setini("Video","Settings 2","%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i,%i",     \
+    ltop,lskew,dmtype,dmsize,dmdots,pointmean,pointhead,pointz1,               \
+    pointdt,pointz2,hiexp,focusz[0],lthru,focusz[1])
+  setini("Video","Savepath","%s",savepath)
+  if hvfid!=NULL SYS.Deletemodel(hvfid)
+end
+

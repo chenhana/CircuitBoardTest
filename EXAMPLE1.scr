@@ -1,0 +1,51 @@
+#include "ls.icl"                  // System definitions and functions
+#include "or.icl"                // Command & error mnemonics
+#cmdbuff 1                             // Assign 1 command buffer
+
+#define SAW_OK         0               // Command is executed correctly
+#define SAW_BADCMD     1               // Command is syntactically invalid
+#define SAW_TIMEOUT    2               // No answer within timeout
+#define SAW_ERROR      3               // Answer is S_ERROR
+
+external int SERV.Decodeanswer(char *answer,char *text,char *extra,int mask);
+
+function int Sendandwait(char *command,char *answer,int timeout)
+  int t
+  // Command buffer 0 will be used for communication. Ensure that it's not
+  // associated with pending command.
+  SYS.Killimm(0)
+  // Send command. Note that Cmdimm() sets $A[0].length to 0.
+  if SERV.Cmdimm(0,command)<0 then
+    return SAW_BADCMD                  // Syntax error in command
+  endif
+  // Wait for answer.
+  timeout=Max(500,timeout)             // Minimal timeout 500 milliseconds
+  t=Time()
+  while $A[0].length==0 do
+    if Time()-t>timeout then
+      // Timeout, discard command and report erorr.
+      SYS.Killimm(0)
+      return SAW_TIMEOUT
+    endif
+    wait                               // Give time to other scripts and apps
+  enddo
+  // Answer is here, make a copy.
+  Memcpy(answer,$A[0],$A[0].length)
+  // Check whether command was executed correctly.
+  if $A[0].answer==S_ERROR return SAW_ERROR
+  // Report success.
+  return SAW_OK
+end
+
+function int main()
+  int i
+  char answer[32],text[200],extra[200]
+  // Make simple resistamce measurement between the points (10,77)
+  // and (590,77).
+  i=Sendandwait("M 0(10,77) 1(590,77) R(0,1)",answer,2000)
+  // Decode binary answer to text.
+  SERV.Decodeanswer(answer,text,extra,0xFFFFFFFF)
+  // Display answer.
+  lprintf(BLACK,"Return code %i, answer %s",i,text)
+end
+

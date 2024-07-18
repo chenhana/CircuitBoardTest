@@ -1,0 +1,117 @@
+#include "ls.icl"                  // System definitions and functions
+#include "or.icl"                // Command & error mnemonics
+#cmdbuff 1                             // Assign 1 command buffer
+
+#define SAW_OK         0               // Command is executed correctly
+#define SAW_BADCMD     1               // Command is syntactically invalid
+#define SAW_TIMEOUT    2               // No answer within timeout
+#define SAW_ERROR      3               // Answer is S_ERROR
+
+#define DEVICE         0               // Device (0 or 1)
+#define NFREQ          25              // Number of frequency points
+
+float freq[NFREQ] = {                  /* Frequencies in Herz              */  \
+     20.0,    30.0,    45.0,    72.0,    100.0,    150.0,                      \
+    200.0,   300.0,   450.0,   720.0,   1000.0,   1500.0,                      \
+   2000.0,  3000.0,  4500.0,  7200.0,  10000.0,  15000.0,                      \
+  20000.0, 30000.0, 45000.0, 72000.0, 100000.0, 150000.0,                      \
+ 200000.0 }
+
+function int Sendandwait(char *command,char *answer,int timeout)
+  int t
+  // Command buffer 0 will be used for communication. Ensure that it's not
+  // associated with pending command.
+  SYS.Killimm(0)
+  // Send command. Note that Cmdimm() sets $A[0].length to 0.
+  if SERV.Cmdimm(0,command)<0 then
+    return SAW_BADCMD                  // Syntax error in command
+  endif
+  // Wait for answer.
+  timeout=Max(500,timeout)             // Minimal timeout 500 milliseconds
+  t=Time()
+  while $A[0].length==0 do
+    if Time()-t>timeout then
+      // Timeout, discard command and report erorr.
+      SYS.Killimm(0)
+      return SAW_TIMEOUT
+    endif
+    wait                               // Give time to other scripts and apps
+  enddo
+  // Answer is here, make a copy.
+  Memcpy(answer,$A[0],$A[0].length)
+  // Check whether command was executed correctly.
+  if $A[0].answer==S_ERROR return SAW_ERROR
+  // Report success.
+  return SAW_OK
+end
+
+// Main program.
+function int main()
+  int i,n,result,dummy
+  char command[1024],answer[1024]
+  float head0,x0,y0,head1,x1,y1,head2,x2,y2,head3,x3,y3,r,phase
+  // Assume that coordinates of the pads are known in advance.
+  head0=0; x0=250.0; y0=77.5
+  head1=1; x1=350.0; y1=77.5
+  head2=2; x2=250.0; y2=232.5
+  head3=3; x3=350.0; y3=232.5
+  // Check whether device is connected by requesting the self-identification.
+  // Device 0 is on cahnnel 4 and device 1 is on channel 5.
+  sprintf(command,"EXTINIT %i \"*IDN?\"",DEVICE+4)
+  result=Sendandwait(command,answer,3000)
+  if result!=SAW_OK then
+    lprintf(RED,"Can't communicate - device not attached?")
+    return
+  endif
+  // Answer to EXTINIT is S_EXTINIT. Consult commands.doc or commands.pdf for
+  // the layout of the answer. Status is at offset 5, length of answer at
+  // offset 7 and answer starts at 9.
+  if $int2(answer+5) & 0x8000 then     // No such channel
+    lprintf(RED,"Channel %i is unavailable, correct layout",DEVICE+4)
+    return
+  else if $int2(answer+5) & 0x2 then   // Timeout
+    lprintf(RED,"Timeout, probably device is turned off")
+    return
+  else
+    // Note a blemish: CR at the end is displayed. How lazy am I!
+    lprintf(BLACK,"Device: %s",answer+9)
+  endif
+  // Set mode of measurements (Z-Theta, medium precision) and amplitude.
+  // Starting from here, I will not check for the possible errors.
+  sprintf(command,                                                             \
+    "EXTINIT CHAN=%i NOANSWER \"PMOD 6;MMOD 1;RATE 1;VOLT 1.0\"",DEVICE+4)
+  Sendandwait(command,answer,3000)
+  // Make NFREQ measurements.
+  for i=0,i<NFREQ,i++ do
+    // Set frequency.
+    sprintf(command,"EXTINIT CHAN=%i NOANSWER \"FREQ %g\"",DEVICE+4,freq[i])
+    Sendandwait(command,answer,3000)
+    // Make measurement. Stroke parameters are fixed to 20 mm/s, 30 pressure
+    // units (quite the possible minimum). First the head coordinates:
+    n=sprintf(command,                                                         \
+      "M %i(%g,%gV20P30) %i(%g,%gV20P30) %i(%g,%gV20P30) %i(%g,%gV20P30)",     \
+      head0,x0,y0,head1,x1,y1,head2,x2,y2,head3,x3,y3)
+    // Now specify which heads make the measurement and how are they connected
+    // to the analog bus and external device. Heads 2 and 3 are source and
+    // drain (HCUR,LCUR), heads 0 1nd 1 sense the voltage (HPOT,LPOT). I assume
+    // that device is connected in such a way that source is on U/I bus, drain
+    // on GND, hi-sense is PLUS and lo-sense is MINUS bus.
+    n=n+sprintf(command+n,                                                     \
+      " EXT(%i,%i,%i,%i,CHAN=%i,WAIT=10,CONN=(P,M,U,G)",                       \
+      head0,head1,head2,head3,DEVICE+4)
+    // And now the measurement itself. We just need to trigger the device
+    // (STRT), wait for answer (*WAI) and get the result (XALL?).
+    sprintf(command+n," \"STRT;*WAI;XALL?\")")
+    result=Sendandwait(command,answer,10000)
+    // Decode the answer.
+    if result!=SAW_OK then
+      lprintf(RED,"F=%7.0f Hz  ERROR",freq[i])
+    else
+      sscanf(answer+10,"%f,%f,%i",&r,&phase,&dummy)
+      lprintf(BLACK,                                                           \
+        "F = %7.0f Hz  r = %7.1f Ohm  fi = %5.1f deg",freq[i],r,phase)
+    endif
+  enddo
+  lprintf(BLACK,"ALL DONE.")
+end
+

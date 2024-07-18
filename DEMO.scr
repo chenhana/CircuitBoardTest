@@ -1,0 +1,1298 @@
+#include "ls.icl"
+#include "ly.icl"
+#include "pa.icl"
+
+#bitmap "son"="son.bmp"                // No compression! Demo must be fast!
+#bitmap "redbrick"="redbrick.bmp"
+
+#define MX1 560
+#define MY1 390
+#define DX1 544
+#define DY1 230
+#define GX0 100
+#define GY0 20
+#define NBUT 8
+#define TQUANTUM 120000
+#define NA 32
+#define NS 51
+#define NP 16
+
+handle hmain
+handle hdemo
+handle hpart[NBUT]
+handle hprb1,hprb2,hscr1,hscr2
+handle hrad1,hrad2,hrad3,hrad4
+handle hgraf,htext,hichi
+handle hedt1,hedt2
+handle hscbt[10]
+handle hspld,hspls,hpold,hpols,hsmoo,hspeed
+handle hshowlin,hshowspl,hshowpol
+char partname[NBUT,16] = {                                                     \
+  "控制",                                                                  \
+  "图像",                                                                  \
+  "菜单&&大小",                                                              \
+  "进程",                                                                 \
+  "运算",                                                               \
+  "修改文件",                                                           \
+  "保存'RTF'",                                                             \
+  "退出" };
+char parthelp[NBUT,66] = {                                                     \
+  "DEMO: Easy and flexible user interface. Press to see next frame!",          \
+  "DEMO: Graphic capabilities of SCRIPT2",                                     \
+  "DEMO: Resizable window with automatically positioned controls",             \
+  "DEMO: Multiple instances of simple programm run in parallel",               \
+  "DEMO: Mathematical calculations, press twice for auto test",                \
+  "Create sample file in MS Write format",                                     \
+  "Create sample file in RTF (Word-compatible) format",                        \
+  "Quit demonstration" };
+char fontname[8,16] = {                                                        \
+  "Times New Roman","Arial","Courier","Courier New",                           \
+  "LinePrinter","Times New Roman","Symbol","WingDings" };
+int active,step,tstep,offset
+int ax[NA],ay[NA],vx[NA],vy[NA]
+char ar[NA],ac[NA],ab[NA]
+float xin[NS],yin[NS],x[DX1],y[DX1]
+int timercount
+int respline
+int fitindex=5
+int fitorder=2
+char graphtype[80]
+
+external int Nextcontrols()
+external int Nextgraph()
+external int Nextmath()
+
+function int Createwrite()
+  int i
+  char s[80]
+  handle wfile
+  WOpen("demo.wri")
+  WParagraph(WRI_CENTERED)
+  WFont(LARGEFONT)
+  WAddtext("SCRIPT2 Write capabilities")
+  WParagraph(WRI_FORMAT)
+  WFmt(WRI_TIMES,WRI_NORMAL,12)
+  WAddtext("Script2 add-on \"ly.icl\" supports Microsoft ")
+  WAddtext("Write file format. One can esily create reports ")
+  WAddtext("and protocols which include not only formatted ")
+  WAddtext("well-readable text, but also screenshots from any ")
+  WAddtext("GRAPH window (or its part) which is currently ")
+  WAddtext("present on the screen. If this window displays ")
+  WAddtext("video image from PCI frame grabber, picture will ")
+  WAddtext("contain this video image, too!")
+  WParagraph(WRI_FORMAT)
+  WAddtext("Following 7 Windows fonts are available:")
+  WParagraph(WRI_FORMAT)
+  do i=0,7,1
+    if i==5 continue
+    WFmt(WRI_COURNEW,WRI_ITALIC,10)
+    Sprintf(s,"%20s",fontname[i])
+    WAddtext(s)
+    WAddtext(":   ")
+    WFmt(i,WRI_NORMAL,12)
+    WAddtext(fontname[i])
+    WParagraph(WRI_FORMAT)
+  enddo
+  WFmt(WRI_TIMES,WRI_NORMAL,12)
+  WAddtext("Each font can be made italic or bold, for example:")
+  WAddtext(" Times New Roman normal,")
+  WFmt(WRI_TIMES,WRI_ITALIC,12)
+  WAddtext(" Times New Roman italic,")
+  WFmt(WRI_TIMES,WRI_BOLD,12)
+  WAddtext(" Times New Roman bold,")
+  WFmt(WRI_TIMES,WRI_ITALIC|WRI_BOLD,12)
+  WAddtext(" Times New Roman italic bold. ")
+  WFmt(WRI_TIMES,WRI_NORMAL,12)                                          
+  WAddtext("Pitch size of each font is more or less freely ")
+  WAddtext("selectable: ")
+  for i=5,i<32,i=i*1.3
+    Sprintf(s,"Size %i, ",i)
+    WFmt(WRI_ARIAL,WRI_NORMAL,i)
+    WAddtext(s)
+  enddo
+  WFmt(WRI_TIMES,WRI_NORMAL,12)
+  WAddtext("etc.")
+  WParagraph(WRI_FORMAT)
+  WAddtext("This is a complete picture:")
+  WParagraph(WRI_CENTERED)
+  WAddpicture(hgraf,0,0,DX1-10,200,1)
+  WParagraph(WRI_FORMAT)
+  WAddtext("One can also cut the part of it:")
+  WParagraph(WRI_LEFT)
+  WAddpicture(hgraf,0,0,150,100,1)
+  WParagraph(WRI_FORMAT)
+  WAddtext("or another one:")
+  WParagraph(WRI_RIGHT)
+  WAddpicture(hgraf,DX1-160,100,DX1-10,200,1)
+  WParagraph(WRI_FORMAT)
+  WAddtext("Really, these bitmaps are embedded objects. When ")
+  WAddtext("you double-click any picture, Paintbrush appears ")
+  WAddtext("allowing you to edit the picture or to add any ")
+  WAddtext("important comments.")
+  WParagraph(WRI_FORMAT)
+  WAddtext("That's all...")
+  WClose()
+  SYS.Winexec("write.exe demo.wri")
+end
+
+function int CreateRTF()
+  int i,j
+  char s[80]
+  handle wfile
+  ROpen("demo.rtf")
+  RParagraph(RTF_CENTERED|RTF_GRAYBG)
+  RFont(LARGEFONT)
+  RAddtext("SCRIPT2 RTF capabilities")
+  RParagraph(RTF_CENTERED|RTF_HEADER|RTF_FIRST)
+  RFmt(RTF_TIMES,RTF_ITALIC,12)
+  RAddtext("SCRIPT2 RTF capabilities - first page")
+  RParagraph(RTF_CENTERED|RTF_HEADER)
+  RFmt(RTF_TIMES,RTF_ITALIC,12)
+  RAddtext("SCRIPT2 RTF capabilities - page ")
+  RAddpagenumber()
+  RParagraph(RTF_CENTERED|RTF_FOOTER|RTF_DBLBRD|RTF_FIRST)
+  RFmt(RTF_TIMES,RTF_ITALIC,9)
+  RAddtext("This document is generated by DEMO routine of OLLYTEST ")
+  RAddtext("- written completely in SCRIPT2")
+  RParagraph(RTF_CENTERED|RTF_FOOTER|RTF_DBLBRD)
+  RFmt(RTF_TIMES,RTF_ITALIC,9)
+  RAddtext("This document is generated by DEMO routine of OLLYTEST")
+  RParagraph(RTF_FORMAT|RTF_INDENT)
+  RFmt(RTF_TIMES,RTF_NORMAL,12)
+  RAddtext("Script2 add-on \"pa.icl\" supports Microsoft ")
+  RAddtext("Rich Text Format (RTF). One can esily create reports ")
+  RAddtext("and protocols which include not only formatted ")
+  RAddtext("well-readable text, but also tables and screenshots from any ")
+  RAddtext("GRAPH window (or its part) which is currently ")
+  RAddtext("present on the screen. If this window displays ")
+  RAddtext("video image from PCI frame grabber, picture will ")
+  RAddtext("contain this video image, too!")
+  RParagraph(RTF_FORMAT|RTF_INDENT)
+  RAddtext("Following 7 Windows fonts are available:")
+  j=RTF_LEFT|RTF_THINBRD
+  do i=0,7,1
+    if i==5 continue
+    RTable(RTF_CENTERED|RTF_DBLBRD|RTF_SPACE,10.0,5.0)
+    RCell(j,40)
+    RFmt(RTF_COURNEW,RTF_ITALIC,10)
+    RAddtext(fontname[i])
+    RCell(j,40)
+    RFmt(i,RTF_NORMAL,12)
+    RAddtext(fontname[i])
+    j=j^RTF_LIGHTBG
+  enddo
+  REndtable()
+  RParagraph(RTF_FORMAT|RTF_INDENT)
+  RFmt(RTF_TIMES,RTF_NORMAL,12)
+  RAddtext("The text can be made italic and/or bold, underlined and/or ")
+  RAddtext("striked through, sub- or superscripted, for example:")
+  RAddtext(" Times New")
+  RFmt(RTF_TIMES,RTF_SUPER,12)
+  RAddtext("(once in the past)")
+  RFmt(RTF_TIMES,RTF_NORMAL,12)
+  RAddtext(" Roman normal, ")
+  RFmt(RTF_TIMES,RTF_ITALIC|RTF_UL,12)
+  RAddtext("Times New Roman italic,")
+  RFmt(RTF_TIMES,RTF_NORMAL,12)
+  RAddtext(" ")
+  RFmt(RTF_TIMES,RTF_BOLD|RTF_ULTHICK|RTF_STRIKED,12)
+  RAddtext("Times New Roman bold,")
+  RFmt(RTF_TIMES,RTF_NORMAL,12)
+  RAddtext(" ")
+  RFmt(RTF_TIMES,RTF_ITALIC|RTF_BOLD|RTF_ULDOUBLE,12)
+  RAddtext("Times New Roman italic bold.")
+  RFmt(RTF_TIMES,RTF_NORMAL,12)
+  RAddtext(" Pitch size and colour of the text is more or less freely ")
+  RAddtext("selectable: ")
+  j=1
+  for i=5,i<32,i=i*1.3
+    RColour(j); j++
+    Sprintf(s,"Size %i, ",i)
+    RFmt(RTF_ARIAL,RTF_NORMAL,i)
+    RAddtext(s)
+  enddo
+  RColour(BLACK)
+  RFmt(RTF_TIMES,RTF_NORMAL,12)
+  RAddtext("etc. Different borders are also available:")
+  RParagraph(RTF_CENTERED|RTF_THINBRD|RTF_SPACE)
+  RAddtext("Black thin border")
+  RColour(LIGHTRED)
+  RParagraph(RTF_CENTERED|RTF_GRAYBG|RTF_BORDER|RTF_SPACE)
+  RColour(BLACK)
+  RAddtext("Medium red border")
+  RParagraph(RTF_CENTERED|RTF_DBLBRD|RTF_SHADOW|RTF_SPACE)
+  RColour(RED)
+  RAddtext("Double border with shadow")
+  RColour(BLACK)
+  RParagraph(RTF_FORMAT|RTF_INDENT)
+  RAddtext("This is a complete picture:")
+  RParagraph(RTF_CENTERED)
+  RAddpicture(hgraf,0,0,DX1-10,200,1)
+  RParagraph(RTF_FORMAT|RTF_SPACE|RTF_INDENT)
+  RAddtext("One can also cut the parts of it:  ")
+  RAddpicture(hgraf,0,0,150,100,1)
+  RAddtext(" , ")
+  RAddpicture(hgraf,DX1-160,100,DX1-10,200,1)                                 
+  RParagraph(RTF_FORMAT|RTF_INDENT)
+  RAddtext("As always, if you double-click any picture, some picture ")
+  RAddtext("editor appears allowing you to edit the picture or to add ")
+  RAddtext("any important comments.")
+  RParagraph(RTF_FORMAT|RTF_INDENT)
+  RAddtext("Please note that, as Rich Text Format includes ")
+  RFmt(RTF_TIMES,RTF_ITALIC,12)
+  RAddtext("hundreds ")
+  RFmt(RTF_TIMES,RTF_NORMAL,12)
+  RAddtext("of different commands, and different viewers do not understand ")
+  RAddtext("all of them, the appearance of this text may be different ")
+  RAddtext("in the different applications. The features are optimized for ")
+  RAddtext("Microsoft Word for Windows. That's all...")
+  RClose()
+  SYS.Winexec("c:\\winword\\winword.exe demo.rtf")
+end
+
+function int main()
+  handle dummy
+  int i,hpart5ena
+  char s[80]
+  // Create windows and controls necessary for demo
+  hmain=control WINDOW
+    window=NULL
+    position=50,50,MX1,MY1
+    name="演示"
+    help="脚本2演示"
+    bkcolor=WHITEBLUE
+  endc
+  dummy=control TEXT
+    window=hmain
+    position=0,10,MX1,40
+    font=LARGEFONT
+    color=BLUE
+    name="演示脚本"
+    mode=M_CENTERED
+  endc
+  dummy=control FRAME
+    window=hmain
+    position=7,55,MX1-14,91
+    font=MEDIUMFONT
+    color=BLUE
+    bkcolor=WHITE
+    name="按所需按钮查看相应的演示"
+    help="只要按一下按钮"
+    mode=M_CENTERED
+  endc
+  for i=0,i<NBUT,i=i+1
+    hpart[i]=control WINBUTTON
+      window=hmain
+      position=(15+135*(i%4)),i<4?84:114,125,24
+      name=partname[i]
+      help=parthelp[i]
+    endc
+  enddo
+  disable hpart[5]
+  disable hpart[6]
+  hpart5ena=0
+  hdemo=control CHILD
+    window=hmain
+    position=8,153,DX1,DY1
+    help=" "
+  endc
+  // Compile modules which will be called by demo
+  SYS.Compile("demotime.scr",1)
+  SYS.Compile("demosize.scr",1)
+  // Main demo loop
+  active=-1                            // No active demonstration
+  while Pressed(hpart[NBUT-1])==0 do
+    if Pressed(hpart[0]) then          // Controls demo
+      tstep=Time()
+      if active==0 continue            // Same demo active - do nothing
+      active=0
+      step=-1
+    else if Pressed(hpart[1]) then     // Graphics demo
+      tstep=Time()
+      if active==1 continue            // Same demo active - do nothing
+      active=1
+      step=-1
+    else if Pressed(hpart[2]) then     // Simple resizable window
+      SYS.Start("DEMOSIZE",10,"")
+    else if Pressed(hpart[3]) then     // Simple timer demo
+      for i=0,i<5,i++
+        sprintf(s,"Simple timer #%i",timercount)
+        SYS.Start("DEMOTIME",10,s)
+        timercount++
+      enddo
+    else if Pressed(hpart[4]) then     // Mathematics demo
+      tstep=Time()
+      if active==2 continue            // Same demo active - do nothing
+      active=2
+      step=-1
+    endif
+    if hpart5ena==1 && Pressed(hpart[5]) then
+      Createwrite()
+    else if hpart5ena==1 && Pressed(hpart[6]) then
+      CreateRTF()
+    endif
+    if active==1 && hpart5ena!=1 then
+      enable hpart[5]
+      enable hpart[6]
+      hpart5ena=1
+    else if active!=1 && hpart5ena==1 then
+      disable hpart[5]
+      disable hpart[6]
+      hpart5ena=0
+    endif
+    if active==0 Nextcontrols()
+    if active==1 Nextgraph()
+    if active==2 Nextmath()
+    if active!=1 wait
+  enddo
+end
+
+function int Nextcontrols()
+  handle dummy,hfram
+  int i,j,k
+  char title[4,53] = {                                                         \
+    "Basic features: Colors and fonts",                                        \
+    "Basic controls: Buttons, edits, scrollbars...",                           \
+    "Advanced controls: Listboxes, edits, bitmaps, childs" };
+  int texty[11] = { 21,37,52,66,82,100,110,124,140,173,226 }
+  int texti[10]= { 0,8,1,2,9,3,4,5,6,7 }
+  char texts[10,40] = {                                                        \
+    "MAINFONT is a default Windows font",                                      \
+    "FIXEDSYS is good for EDITOR",                                             \
+    "FIXEDFONT is good for formats",                                           \
+    "INFOFONT is common in explanations",                                      \
+    "TIMESFONT is for long texts",                                             \
+    "TERMINALFONT is a small fixed font",                                      \
+    "SMALLFONT is very useful on graphics",                                    \
+    "MEDIUMFONT is for titles",                                                \
+    "LARGEFONT",                                                               \
+    "HUGE..." };
+  char colors[24,14] = { "Black", "Blue", "Green", "Cyan", "Red",              \
+    "Magenta", "Brown", "Gray", "Darkgray", "Lightblue", "Lightgreen",         \
+    "Lightcyan", "Lightred", "Lightmagenta", "Yellow", "White",                \
+    "Lightgray", "Whiteblue", "Whitegreen", "Whitecyan", "Pink",               \
+    "Whitemagenta", "Lightyellow", "Strange" };
+  char icons[16,10] = { "ECTICON", "MAINICON", "POPUPICON", "DOOR",            \
+    "CAMERA", "GRAPH", "PRINT", "UP", "DOWN", "LEFT", "RIGHT",                 \
+    "CLOCK", "KEYS", "NOTEPAD", "QUESTION", "EXCLAM" };
+  if step==1 then
+    if Pressed(hscr1) change hprb1 limits=Status(hscr1),100
+    if Pressed(hscr2) change hprb2 limits=Status(hscr2),100
+    if Pressed(hrad1) change htext color=BLACK
+    if Pressed(hrad2) change htext color=LIGHTRED
+    if Pressed(hrad3) change htext color=GREEN
+    if Pressed(hrad4) change htext color=LIGHTBLUE
+    if Pressed(hedt1) setfocus hedt2
+    if Pressed(hedt2) setfocus hedt1
+  else if step==2 then
+    do i=0,9,1
+      if hscbt[i]==NULL continue
+      if Pressed(hscbt[i]) then
+        destroy hscbt[i]
+        hscbt[i]=NULL
+      endif
+    enddo
+  endif
+  if tstep>Time() return
+  clear hdemo                          // Destroy previous demo controls
+  step=step+1
+  if step>2 step=0
+  tstep=Time()+TQUANTUM
+  dummy=control TEXT
+    window=hdemo
+    position=0,0,DX1,20
+    name=title[step]
+    color=RED
+    mode=M_CENTERED
+    font=MEDIUMFONT
+  endc
+  if step==0 then                      // Step 0: colors and fonts
+    hgraf=control GRAPH
+      window=hdemo
+      bkcolor=BLACK
+      position=5,25,269,199
+      help="OLLYTEST/SCRIPT2支持24种基本颜色"
+    endc
+    draw window=hgraf
+    draw font=INFOFONT
+    for j=0,j<8,j=j+1
+      for i=0,i<3,i=i+1
+        k=i*8+j
+        draw color=k
+        draw bkcolor=k
+        draw at i*90,j*25
+        draw fillrect i*90+89,j*25+24
+        draw color=(i==0?WHITE:BLACK)
+        draw at i*90+2,j*25+20
+        draw text=colors[k]
+      enddo
+    enddo
+    draw show
+    do i=0,9,1
+      dummy=control TEXT
+        window=hdemo
+        position=285,texty[i],DX1-285,texty[i+1]-texty[i]
+        text=texts[i]
+        help=texts[i]
+        color=i
+        font=texti[i]
+      endc
+    enddo
+  else if step==1 then                 // Step 1: simple controls
+    dummy=control WINBUTTON
+      window=hdemo
+      position=5,25,150,30
+      text="WINBUTTON"
+      help="标准窗口按钮"
+      font=MEDIUMFONT
+    endc
+    dummy=control BUTTON
+      window=hdemo
+      position=5,57,150,28
+      text="DOUBLECLICK"
+      help="双击安全按钮,单击两次可激活"
+      font=FIXEDSYS
+      color=WHITE
+      mode=M_DBLCLICK
+      bkcolor=LIGHTRED
+    endc
+    dummy=control BUTTON
+      window=hdemo
+      position=5,87,150,25
+      text="AUTOREPEAT"
+      help="自动重复按钮,按下并享受吧!"
+      font=FIXEDFONT
+      color=GREEN
+      bkcolor=PINK
+      mode=M_REPEAT
+    endc
+    dummy=control BUTTON
+      window=hdemo
+      position=5,114,150,25
+      text="TIMEOUT"
+      help="按钮超时了,看看!"
+      font=FIXEDSYS
+      color=BLUE
+      bkcolor=WHITEBLUE
+      limits=10000,5000
+    endc
+    dummy=control CHECKBOX
+      window=hdemo
+      position=5,141,150,23
+      mode=M_BORDER|M_RIGHT
+      font=MEDIUMFONT
+      text="CHECKBOX"
+      bkcolor=PINK
+      help="带边框右居中复选框"
+    endc
+    dummy=control CUSTOMBOX
+      window=hdemo
+      position=5,165,150,23
+      text="CUSTOMBOX"
+      color=GREEN
+      font=INFOFONT
+      help="左居中的自定义框"
+    endc
+    hfram=control FRAME
+      window=hdemo
+      position=170,25,170,75
+      text="FRAME"
+      font=TERMINALFONT
+      mode=M_BORDER
+      help="具有扩展功能的自定义框架"
+    endc
+    hrad1=control RADIO
+      window=hfram
+      position=5,20,74,25
+      text="RADIO 1"
+      mode=M_RIGHT|M_CHECKED
+      help="右居中单选按钮"
+    endc
+    hrad2=control RADIO
+      window=hfram
+      position=5,45,74,25
+      text="RADIO 2"
+      color=LIGHTRED
+      mode=M_RIGHT
+      help="右居中单选按钮"
+    endc
+    hrad3=control RADIO
+      window=hfram
+      position=90,20,74,25
+      text="RADIO 3"
+      color=GREEN
+      help="左居中单选按钮(默认对齐方式)"
+    endc
+    hrad4=control RADIO
+      window=hfram
+      position=90,45,74,25
+      text="RADIO 4"
+      color=LIGHTBLUE
+      help="左居中单选按钮(默认对齐方式)"
+    endc
+    hprb1=control PROGRESS
+      window=hdemo
+      position=170,110,170,20
+      name="进程"
+      font=FIXEDFONT
+      mode=M_PERCENT
+      help="进度条显示百分比"
+      limits=0,100
+    endc
+    hprb2=control PROGRESS
+      window=hdemo
+      position=170,135,170,20
+      color=LIGHTBLUE
+      bkcolor=YELLOW
+      help="进度条显示数字"
+      name="进程"
+      limits=0,100
+    endc
+    hscr1=control VSCROLL
+      window=hdemo
+      position=DX1-25,25,20,150
+      name="VertDemoBar"
+      help="VSCROLL是垂直滚动条"
+      limits=0,100
+    endc
+    hscr2=control HSCROLL
+      window=hdemo
+      position=170,165,170,20
+      name="HorizDemoBar"
+      color=LIGHTBLUE
+      bkcolor=YELLOW
+      help="HSCROLL是水平滚动条"
+      limits=0,100
+    endc
+    for i=0,i<16,i=i+1
+      dummy=control ICON
+        window=hdemo
+        position=5+34*i,DY1-37,32,32
+        text=icons[i]
+        help=format("图标名字\"%s\"",icons[i])
+      endc
+    enddo
+    htext=control TEXT
+      window=hdemo
+      position=350,25,160,80
+      font=SMALLFONT
+    endc
+    add htext text="This is a TEXT control. Long text "
+    add htext text="is added to it by means of "
+    add htext text="several consequent 'ADD' operators. "
+    add htext text="The length of the text is limited "
+    add htext text="only by Windows capabilities."
+    hedt1=control EDIT
+      window=hdemo
+      position=350,115,160,30
+      font=MEDIUMFONT
+      text="EDIT control"
+      help="EDIT控制理解 \"ENTER\""
+    endc
+    hedt2=control EDIT
+      window=hdemo
+      position=350,155,160,30
+      font=MEDIUMFONT
+      text="EDIT control"
+      color=LIGHTRED
+      bkcolor=LIGHTBLUE
+      help="EDIT控制理解 \"ENTER\""
+    endc
+  else if step==2 then
+    dummy=control COMBOLIST
+      window=hdemo
+      position=10,25,165,200
+      color=YELLOW
+      bkcolor=BLUE
+      help="COMBOLIST允许选择一个备选方案"
+      mode=M_VSCROLL|M_REPEAT
+    endc
+    do i=1,1000,1
+      add dummy text=format("COMBOLIST %i",i)
+    enddo
+    change dummy select=99
+    dummy=control COMBOEDIT
+      window=hdemo
+      position=185,25,170,200
+      font=FIXEDFONT
+      color=RED
+      help="COMBOEDIT允许键入或选择一个备选方案"
+      mode=M_VSCROLL|M_REPEAT
+    endc
+    do i=1,1000,1
+      add dummy text=format("COMBOEDIT %i",i)
+    enddo
+    change dummy select="COMBOEDIT 100"
+    dummy=control LISTBOX
+      window=hdemo
+      position=365,25,165,140
+      font=INFOFONT
+      bkcolor=LIGHTMAGENTA
+      help="列表框将选项列表保留在屏幕上"
+      mode=M_VSCROLL|M_REPEAT
+    endc
+    do i=1,1000,1
+      add dummy text=format("LISTBOX %i",i)
+    enddo
+    change dummy select=format("LISTBOX %i",100)
+    dummy=control BITMAP
+      window=hdemo
+      position=10,55,125,170
+      name="son"
+      help="位图允许显示图片"
+      mode=M_BORDER
+    endc
+    dummy=control COMBOEDIT
+      window=hdemo
+      font=MEDIUMFONT
+      color=GREEN
+      bkcolor=YELLOW
+      position=364,170,167,160
+      name="DemoComboEdit"
+      help="命名COMBOEDIT自动保存和恢复上下文"
+      mode=M_VSCROLL
+    endc
+    dummy=control EDIT
+      window=hdemo
+      font=MEDIUMFONT
+      position=364,200,167,25
+      color=LIGHTRED
+      name="密码保护"
+      mode=M_PASSWORD
+      help="M_PASSWORD选项将字符替换为星号"
+    endc
+    hichi=control CHILD
+      window=hdemo
+      position=146,56,208,168
+      help="智能 CHILD 支持滚动和准元文件绘图操作"
+      size=2000
+      mode=M_VSCROLL|M_HSCROLL
+      limits=500,700
+    endc
+    do i=0,9,1
+      hscbt[i]=control WINBUTTON
+        window=hichi
+        name=format("按钮 %i",i+1)
+        help=format("按钮 %i 带有滚动 CHILD",i+1)
+        position=10,75+25*i,70,20
+      endc
+    enddo
+    draw window=hichi
+    draw at 100,80 bitmap 0,0,0,"son"
+    draw bkcolor=Random(24)
+    draw color=Random(8)
+    for i=0,i<NA/2,i++
+      if (i & 1)==0 then j=50+Random(50);
+      else j=20+Random(20); endif
+      x[i*2]=50+j*Sin(2*3.1415/(NA/2)*i)
+      x[i*2+1]=50+j*Cos(2*3.1415/(NA/2)*i)
+    enddo
+    draw polygon=x,(NA/2)
+    draw at 10,10
+    for i=0,i<50,i=i+1
+      draw at Random(500),Random(700)
+      draw color Random(8)
+      draw bkcolor Random(12)+8
+      draw fillellipse 30,30
+    enddo
+    draw font=MEDIUMFONT
+    draw at 10,30 color=GRAY
+    draw text "This is NOT a GRAPH!"
+    draw at 11,31 color=BLACK
+    draw text "This is NOT a GRAPH!"
+    draw at 30,60 color=GRAY
+    draw text "This is a CHILD!"
+    draw at 31,61 color=BLACK
+    draw text "This is a CHILD!"
+    draw show
+  endif
+end
+
+function int Nextgraph()
+  handle dummy
+  int i,j
+  int x0,y0,x1,y1,r
+  char title[4,50] = {                                                         \
+    "Basic primitives: pixel,line,text,circle,polygon",                        \
+    "Scientifical graphics",                                                   \
+    "Animation",                                                               \
+    "Bitmaps" };
+  if (step==1 && hgraf!=NULL) then
+    draw color=WHITE
+    draw bkcolor=WHITE
+    draw window=hgraf
+    draw at GX0,GY0
+    draw fillrect GX0+257,GY0+161
+    draw color GRAY
+    do i=0,10,1
+      draw at GX0,GY0+16*i
+      draw to GX0+256,GY0+16*i
+    enddo
+    do i=0,8,1
+      draw at GX0+32*i,GY0
+      draw to GX0+32*i,GY0+160
+    enddo
+    draw color LIGHTGREEN
+    draw at GX0+128,GY0
+    draw to GX0+128,GY0+160
+    draw at GX0,GY0+80
+    draw to GX0+256,GY0+80
+    draw color BLACK
+    x[offset]=Max(-1.0,Min(1.0,x[offset]+Random(0.1)-0.05))
+    y[offset]=Max(-1.0,Min(1.0,y[offset]+Random(0.1)-0.05))
+    do i=0,255,1
+      j=i+offset
+      if j>=256 j=j-256
+      if i==0 then
+        draw at i+GX0,x[j]*80+GY0+80
+      else
+        draw to i+GX0,x[j]*80+GY0+80
+      endif
+    enddo
+    draw color LIGHTRED
+    do i=0,255,1
+      j=i+offset
+      if j>=256 j=j-256
+      if i==0 then
+        draw at i+GX0,y[j]*80+GY0+80
+      else
+        draw to i+GX0,y[j]*80+GY0+80
+      endif
+    enddo
+    draw color GRAY
+    draw bkcolor=GRAY
+    draw at GX0+300,GY0+50
+    draw fillrect GX0+400,GY0+110
+    draw color BLACK
+    draw font=TERMINALFONT
+    draw at GX0+300,GY0+80
+    draw text=format("Sin=%6.3f",x[offset])
+    draw at GX0+300,GY0+110
+    draw text=format("Cos=%6.3f",y[offset])
+    offset=offset+1
+    if offset>=256 offset=0
+    draw show
+  else if (step==2 && hgraf!=NULL) then
+    clear hgraf
+    draw window=hgraf
+    for i=0,i<NA,i=i+1
+      draw color=ac[i]
+      draw bkcolor=ab[i]
+      draw at ax[i],ay[i]
+      draw fillellipse ar[i]*2,ar[i]*2
+      ax[i]=ax[i]+vx[i]
+      if ax[i]<ar[i] then
+        ax[i]=ar[i]
+        vx[i]=-vx[i]
+      else if ax[i]>DX1-10-ar[i] then
+        ax[i]=DX1-10-ar[i]
+        vx[i]=-vx[i]
+      endif
+      ay[i]=ay[i]+vy[i]
+      if ay[i]<ar[i] then
+        ay[i]=ar[i]
+        vy[i]=-vy[i]
+      else if ay[i]>200-ar[i] then
+        ay[i]=200-ar[i]
+        vy[i]=-vy[i]
+      endif
+    enddo
+    draw show
+  endif
+  if tstep>Time() return
+  clear hdemo                          // Destroy previous demo controls
+  step=step+1
+  if step>3 step=0
+  tstep=Time()+TQUANTUM
+  dummy=control TEXT
+    window=hdemo
+    position=0,0,DX1,20
+    name=title[step]
+    color=RED
+    mode=M_CENTERED
+    font=MEDIUMFONT
+  endc
+  hgraf=control GRAPH
+    window=hdemo
+    position=5,25,DX1-10,200
+    bkcolor=WHITE
+    color=BLACK
+    help="GRAPH使用位图保存当前图像"
+  endc
+  if step==0 then                      // Step 0: colors and fonts
+    draw window=hgraf
+    draw color=BLACK
+    for i=0,i<5000,i=i+1
+      draw pixel Random(DX1-10),Random(200)
+    enddo
+    draw color=WHITE
+    draw bkcolor=WHITE
+    draw at 100,100
+    draw fillellipse 210,210
+    draw color=BROWN
+    draw font=HUGEFONT
+    draw at 20,130
+    draw text="OLLYTEST"
+    for i=0,i<NP,i=i+1
+      x[i]=Sin(i*2*3.14159265/NP)*100+100
+      y[i]=Cos(i*2*3.14159265/NP)*100+100
+    enddo
+    for i=0,i<NP,i++
+      for j=i+1,j<NP,j++
+        draw color=i
+        draw at x[i],y[i]
+        draw to x[j],y[j]
+      enddo
+    enddo
+    draw color=DARKGRAY
+    draw at 190,10
+    draw rect DX1-20,190
+    draw clip DX1-20,190
+    for i=0,i<50,i=i+1
+      draw bkcolor=Random(24)
+      draw color=Random(8)
+      x0=Random(320)+180
+      y0=Random(170)-10
+      x1=Random(70)+5
+      y1=Random(70)+5
+      if Random(100)<50 then
+        draw at x0,y0
+        draw fillrect x0+x1,y0+y1
+      else
+        draw at x0+x1/2,y0+y1/2
+        draw fillellipse x1,y1
+      endif
+    enddo
+    draw bkcolor=Random(24)
+    draw color=Random(8)
+    x0=(170+DX1)/2
+    y0=100
+    for j=0,j<NA/2,j++
+      if (j & 1)==0 then r=50+Random(50);
+      else r=20+Random(20); endif
+      x[j*2]=x0+r*Sin(2*3.1415/(NA/2)*j)
+      x[j*2+1]=y0+r*Cos(2*3.1415/(NA/2)*j)
+    enddo
+    draw polygon=x,(NA/2)
+    draw clip=NULL
+    draw color=BLACK
+    draw bkcolor=GRAY
+    draw at 55,168
+    draw fillrect DX1-55,197
+    draw font=MEDIUMFONT
+    draw at 63,193
+    draw text "Demonstration of graphic capabilities of the SCRIPT2"
+    draw show
+  else if step==1 then
+    draw window=hgraf
+    draw color=GRAY
+    draw bkcolor=GRAY
+    draw at 0,0
+    draw fillrect DX1,200
+    draw font=SMALLFONT
+    draw color=BLACK
+    draw at GX0-1,GY0
+    draw to GX0-1,GY0+161
+    draw to GX0+256,GY0+161
+    do i=0,10,1
+      j=GY0+160-16*i
+      draw at GX0-1,j
+      draw to GX0-6,j
+      draw at GX0-26,j+6
+      draw text=format("%4.1f",(i-5)*0.2)
+    enddo
+    do i=0,8,1
+      j=GX0+32*i
+      draw at j,GY0+161
+      draw to j,GY0+166
+      draw at j-11,GY0+178
+      draw text=format("%4.2f",i/8.0)
+    enddo
+    for i=0,i<256,i=i+1
+      x[i]=Sin(3.1415926535/64.0*i)
+      y[i]=Cos(3.1415926535/64.0*i)
+    enddo
+    offset=0
+  else if step==2 then
+    for i=0,i<NA,i=i+1
+      ax[i]=Random(DX1-10)
+      ay[i]=Random(200)
+      ar[i]=Random(20)+10
+      if (ax[i]<ar[i]) ax[i]=ar[i]
+      if (ax[i]>DX1-10-ar[i]) ax[i]=DX1-10-ar[i]
+      if (ay[i]<ar[i]) ay[i]=ar[i]
+      if (ay[i]>200-ar[i]) ay[i]=200-ar[i]
+      vx[i]=Random(11)-5
+      vy[i]=Random(11)-5
+      ac[i]=Random(15)
+      ab[i]=Random(24)
+    enddo
+  else if step==3 then
+    draw window=hgraf
+    draw at 0,0
+    draw bitmap=DX1-10,200,1,"redbrick"
+    draw at 10,10
+    draw bitmap=10,10,0,"ect"
+    draw at 10,60
+    draw bitmap=90,130,0,"son"
+    draw at 110,100
+    draw bitmap=80,60,0,"ect"
+    draw at 110,170
+    draw bitmap=80,20,0,"ect"
+    draw at 30,10                            
+    draw bitmap=20,20,0,"ect"
+    draw at 60,10
+    draw bitmap=40,40,0,"ect"
+    draw at 110,10
+    draw bitmap=80,80,0,"ect"
+    draw at 200,10
+    draw bitmap=160,160,0,"ect"                  
+    draw at 370,10
+    draw bitmap=0,0,0,"ect"
+    draw show
+  endif
+end
+                                                                 
+function float Func(float x)
+  return x*x                       
+end
+                                                  
+function float Intsimp(float a,float b,int n)
+  int i          
+  float s,w
+  s=0.0; w=(b-a)/n 
+  for i=1,i<=n,i++ do
+    s=s+w*(Func(a+(i-1)*w)+4.0*Func(a-w/2.0+i*w)+Func(a+i*w))/6.0
+  enddo
+  return s
+end                                                      
+
+function int Makespline(int n)
+  int i
+  float x[502],y[502],d[502],u[502],w[502],p[502]
+float f
+  for i=0,i<n,i++ do
+    x[i]=i*3.14159265359/n
+    y[i]=Sin(x[i])
+  enddo
+  for i=2,i<n,i++ do
+    d[i]=2.0*(x[i+1]-x[i-1])
+  enddo
+  for i=1,i<n,i++ do
+    u[i]=x[i+1]-x[i]
+  enddo
+  for i=2,i<n,i++ do
+    w[i]=6.0*((y[i+1]-y[i])/u[i]-(y[i]-y[i-1])/u[i-1])
+  enddo
+  p[1]=0.0; p[n]=0.0
+  for i=2,i<n-1,i++ do
+    w[i+1]=w[i+1]-w[i]*u[i]/d[i]
+    d[i+1]=d[i+1]-u[i]*u[i]/d[i]
+  enddo
+  for i=n-1,i>1,i-- do
+    p[i]=(w[i]-u[i]*p[i+1])/d[i]
+  enddo
+end
+
+function int Speed(format winname)
+  int t,tcurr,tlast,ns,nc
+  handle hmodal,htext,hsimpson,hspline,hok
+  hmodal=control WINDOW
+    window=NULL
+    position=0,0,280,108
+    name=winname
+    mode=M_MODAL
+    bkcolor=YELLOW
+  endc
+  htext=control TEXT
+    window=hmodal
+    position=10,10,260,42
+    mode=M_BORDER|M_CENTERED
+    font=MEDIUMFONT
+  endc
+  hsimpson=control BUTTON
+    window=hmodal
+    position=10,62,80,35
+    name="Simpson"
+  endc
+  hspline=control BUTTON
+    window=hmodal
+    position=100,62,80,35
+    name="样条"
+  endc
+  hok=control BUTTON
+    window=hmodal
+    position=190,62,80,35
+    text="关闭"
+  endc
+  while 1 do
+    if Pressed(hsimpson) then
+      tlast=Time(); t=tlast+10000; ns=0
+      while 1 do
+        tcurr=Time()
+        if t<tcurr break
+        if tlast<tcurr then
+          change htext text=format("Please wait %i seconds...",(t-tlast)/1000)
+          tlast=tlast+1000
+        endif
+        Intsimp(0,3.1415926535,1000)
+        ns++
+      enddo
+      change htext text="Now testing C code..."
+      nc=Cspeedtst(0)
+      change htext text=format("%.1f Simpsons/sec\n(C code: %i,  %.2g:1)",     \
+      ns/10.0,nc,nc*10.0/ns)
+    else if Pressed(hspline) then
+      tlast=Time(); t=tlast+10000; ns=0
+      while 1 do
+        tcurr=Time()
+        if t<tcurr break
+        if tlast<tcurr then
+          change htext text=format("Please wait %i seconds...",(t-tlast)/1000)
+          tlast=tlast+1000
+        endif
+        Makespline(500)
+        ns++
+      enddo
+      change htext text="Now testing C code..."
+      nc=Cspeedtst(1)
+      change htext text=format("%.1f Splines/sec\n(C code: %i,  %.2g:1)",      \
+      ns/10.0,nc,nc*10.0/ns)
+    else if Pressed(hok) then
+      break
+    endif
+    wait
+  enddo
+  destroy hmodal
+end
+
+// Function smoothes set of equidistant data points of length n.
+function int Smooth13(float *y,int n)
+  int i
+  float a,b,c,d
+  if n<5 return
+  b=y[0]; c=y[1]
+  for i=5,i<=n,i++ do
+    a=b; b=c; c=y[i-3]; d=c-b-y[i-2]
+    d=d+d+c; d=d+d+a+y[i-1]
+    if (i-5<=0) then
+      y[0]=a-0.01428571428*d; y[1]=b+0.05714285714*d
+    endif
+    y[i-3]=c-0.08571428571*d
+  enddo
+  y[n-2]=y[n-2]+0.05714285714*d
+  y[n-1]=y[n-1]-0.01428571428*d
+end
+
+// Function smoothes set of equidistant data points of length n.
+function int Smooth35(float *y,int n)
+  int i
+  float a,b,c,d
+  if n<5 return
+  b=y[0]; c=y[1]
+  for i=5,i<=n,i++ do
+    a=b; b=c; c=y[i-3]
+    d=c-b-y[i-2]
+    d=d+d+c
+    d=d+d+a+y[i-1]
+    if i==5 then
+      y[0]=a-0.01428571428*d
+      y[1]=b+0.05714285714*d
+    endif
+    y[i-3]=c-0.08571428571*d
+  enddo
+  y[n-2]=y[n-2]+0.05714285714*d
+  y[n-1]=y[n-1]-0.01428571428*d
+end
+
+function int Nextmath()
+  handle dummy
+  int i,j
+  float r
+  float fit[10] = { 0.0, 2.0, 3.0, 5.0, 10.0, 20.0, 30.0, 50.0, 100.0, 200.0 };
+  if step==3 then
+    do j=1,10,1
+      i=Random(NS)
+      yin[i]=Max(10,Min(190,yin[i]+Random(11)-5))
+    enddo
+    respline=1
+  endif
+  if Pressed(hgraf) || Status(hgraf)==1 then
+    i=((Limit0(hgraf)-50)*NS)/(DX1-180)+0.5
+    if i>=0 && i<NS then
+      yin[i]=Limit1(hgraf)
+      respline=1
+    endif
+  endif
+  if Pressed(hspls) then
+    fitindex=Max(0,Min(9,fitindex+Status(hspls)))
+    change hspls select=0
+    respline=1
+  else if Pressed(hpols) then
+    fitorder=Max(0,Min(15,fitorder+Status(hpols)))
+    change hpols select=0
+    respline=1
+  else if Pressed(hshowlin) then
+    respline=1
+  else if Pressed(hshowspl) then
+    respline=1
+  else if Pressed(hshowpol) then
+    respline=1
+  else if Pressed(hsmoo) then
+    Smooth35(yin,NS)
+    respline=1
+  else if Pressed(hspeed) then
+    Speed("Speed test")
+  endif
+  if respline!=0 then
+    r=fit[fitindex]
+    change hspld text=format("%g",r)
+    change hpold text=format("%i",fitorder)
+    draw window=hgraf color=LIGHTGRAY bkcolor=LIGHTGRAY
+    draw at 0,0 fillrect DX1-80,200
+    draw color=BLACK
+    draw at 5,190 font=SMALLFONT text=graphtype
+    for i=0,i<NS,i++
+      draw at xin[i]-3,yin[i]-3 rect xin[i]+4,yin[i]+4
+    enddo
+    if Status(hshowlin) then
+      SYS.Linfit(NS,xin,yin,&r,DX1-80,x,y)
+      draw color=BLACK
+      draw at x[0],y[0]
+      for i=1,i<DX1-80,i++
+        draw to x[i],Max(-100000.0,Min(100000.0,y[i]))
+      enddo
+    endif
+    if Status(hshowspl) then
+      SYS.Splinefit(NS,xin,yin,&r,DX1-80,x,y)
+      draw color=LIGHTBLUE
+      draw at x[0],y[0]
+      for i=1,i<DX1-80,i++
+        draw to x[i],Max(-100000.0,Min(100000.0,y[i]))
+      enddo
+    endif
+    if Status(hshowpol) then
+      SYS.Polyfit(NS,xin,yin,fitorder,DX1-80,x,y)
+      draw color=LIGHTRED
+      draw at x[0],y[0]
+      for i=1,i<DX1-80,i++
+        draw to x[i],Max(-100000.0,Min(100000.0,y[i]))
+      enddo
+    endif
+    draw show
+    respline=0
+  endif
+  if tstep>Time() return
+  step++; if step>3 step=0
+  tstep=Time()+TQUANTUM
+  if step==0 then
+    clear hdemo                        // Destroy previous demo controls
+    dummy=control TEXT
+      window=hdemo
+      position=0,0,DX1,20
+      name="线性LSQ拟合，多元拟合和三次样条"
+      color=RED
+      mode=M_CENTERED
+      font=MEDIUMFONT
+    endc
+    hgraf=control GRAPH
+      window=hdemo
+      position=5,25,DX1-80,200
+      help="移动点以查看最小方形和样条线拟合如何变化"
+      bkcolor=LIGHTGRAY
+    endc
+    hspld=control TEXT
+      window=hdemo
+      position=DX1-70,24,45,24
+      help="样条曲线拟合的松散度(以屏幕像素为单位)"
+      mode=M_CENTERED|M_BORDER
+      font=MEDIUMFONT
+      color=LIGHTBLUE
+    endc
+    hspls=control VSCROLL
+      window=hdemo
+      position=DX1-25,24,20,24
+      help="按下可更改样条曲线拟合的松散度"
+      limits=1,-1
+    endc
+    hpold=control TEXT
+      window=hdemo
+      position=DX1-70,54,45,24
+      help="多项式拟合的顺序"
+      mode=M_CENTERED|M_BORDER
+      font=MEDIUMFONT
+      color=RED
+    endc
+    hpols=control VSCROLL
+      window=hdemo
+      position=DX1-25,54,20,24
+      help="按可更改多项式拟合的顺序"
+      limits=1,-1
+    endc
+    hshowlin=control CUSTOMBOX
+      window=hdemo
+      position=DX1-70,90,65,24
+      text="Linear"
+      help="选中可以显示线性最小方形拟合"
+      color=BLACK
+      mode=M_CHECKED
+    endc
+    hshowspl=control CUSTOMBOX
+      window=hdemo
+      position=DX1-70,114,65,24
+      text="Spline"
+      help="显示样条曲线拟合"
+      color=BLUE
+      mode=M_CHECKED
+    endc
+    hshowpol=control CUSTOMBOX
+      window=hdemo
+      position=DX1-70,138,65,24
+      text="Poly"
+      help="显示多项式拟合"
+      color=RED
+      mode=M_CHECKED
+    endc
+    hsmoo=control BUTTON
+      window=hdemo
+      position=DX1-70,170,65,24
+      text="Smooth"
+      help="按下可平滑数据集"
+    endc
+    hspeed=control BUTTON
+      window=hdemo
+      position=DX1-70,202,65,24
+      text="Speed"
+      help="按下可测试数学计算速度"
+    endc
+    for i=0,i<NS,i++
+      xin[i]=50+(DX1-180)*(i+0.5)/NS
+    enddo
+    for i=0,i<DX1-80,i++
+      x[i]=i
+    enddo
+  endif
+  if step==0 then
+    for i=0,i<NS,i++
+      r=(i-NS/2)*(i-NS/2)
+      yin[i]=100-r*0.2+r*r*0.0005
+    enddo
+    Strcpy(graphtype,"100-0.2*x*x+0.0005*x*x*x*x, x=i-25")
+    respline=1
+  else if step==1 then
+    for i=0,i<NS,i++
+      yin[i]=70+(10+i)*Sin(i/2.0)+i
+    enddo
+    Strcpy(graphtype,"70+i+(10+i)*sin(i/2)")
+    respline=1
+  else if step==2 then
+    for i=0,i<NS,i++
+      yin[i]=100+Random(50)+Random(50)-50
+    enddo
+    Strcpy(graphtype,"100+(random(50)+random(50)-50)")
+    respline=1
+  else
+    graphtype[0]='\0'
+  endif
+end
+

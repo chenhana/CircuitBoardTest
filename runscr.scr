@@ -1,0 +1,147 @@
+#include "ls.icl"
+#define NSCR           6
+#define DX             490
+#define STEPY          30
+
+#define VERSION        "1.03"
+#define EDITOR         "notepad.exe"
+
+// 1.01: Run buttons display name of selected script.
+// 1.02: Allows parameters (separated from script file name by semicolon).
+// 1.03: Option to edit scripts, 6 slots.
+
+function int main()
+  int i,j,k,n
+  char s[260],drv[3],dir[260],fna[260],ext[260],parm[80]
+  char cmd[512],path[NSCR][260]
+  handle hmain
+  handle hedit[NSCR],hselect[NSCR],hbrowse[NSCR],hstart[NSCR]
+  handle hinfo,htop,hdebug,hquit
+  hmain=control WINDOW
+    window=NULL
+    position=10,10,DX,(NSCR+1)*STEPY+10
+    name="开始脚本"
+    help=" "
+    bkcolor=GRAY
+  endc
+  for i=0,i<NSCR,i++ do
+    hedit[i]=control BUTTON
+      window=hmain
+      position=8,10+i*STEPY,45,30
+      name="编辑"
+      mode=M_DBLCLICK
+      bkcolor=GRAY
+      help=format("双击可使用%s编辑脚本#%i",EDITOR,i+1)
+    endc
+    hselect[i]=control COMBOEDIT
+      window=hmain
+      position=54,10+i*STEPY,DX-175,120
+      name=format("运行程序[%i]",i)
+      help=format("编写#%i脚本，用分号(；)分隔参数",i+1)
+      mode=M_VSCROLL
+    endc
+    hbrowse[i]=control BUTTON
+      window=hmain
+      position=DX-119,10+i*STEPY,24,24
+      name=">"
+      help=format("按下可浏览脚本名称#%i",i+1)
+    endc
+    hstart[i]=control BUTTON
+      window=hmain
+      position=DX-89,10+i*STEPY,84,24
+      name=""
+      help=format("按下启动脚本#%i",i+1)
+      bkcolor=LIGHTGRAY
+    endc
+  enddo
+  htop=control CHECKBOX
+    window=hmain
+    position=8,10+NSCR*STEPY,43,24
+    name="顶"
+    help="选中可将此窗口置顶"
+  endc
+  hdebug=control CHECKBOX
+    window=hmain
+    position=55,10+NSCR*STEPY,60,24
+    name="调试"
+    help="使用行号信息编译"
+  endc
+  hinfo=control TEXT
+    window=hmain
+    position=120,12+NSCR*STEPY,DX-210,24
+    name=""
+    help=" "
+    font=MEDIUMFONT
+    color=LIGHTRED
+  endc
+  hquit=control BUTTON
+    window=hmain
+    position=DX-89,10+NSCR*STEPY,84,24
+    name="退出"
+    help="按退出开始脚本"
+  endc
+  while 1 do
+    if Pressed(hquit) then
+      break
+    else if Pressed(htop) then
+      if Status(htop)==0 then
+        change hmain mode=0
+      else
+        change hmain mode=M_TOPMOST
+      endif
+    endif
+    for i=0,i<NSCR,i++ do
+      n=Text(hselect[i],s)
+      for j=0,j<n,j++ do
+        if s[j]==';' break
+      enddo
+      if j<n then
+        s[j]='\0'; j++
+        k=0
+        for j=j,j<n,j++ do
+          parm[k]=s[j]; k++
+        enddo
+        parm[k]='\0'
+      else
+        parm[0]='\0'
+      endif
+      if Strcmp(path[i],s)!=0 then
+        Strcpy(path[i],s)
+        Fnsplit(s,drv,dir,fna,ext)
+        for j=0,fna[j]!=0,j++ do
+          if j==0 then
+            fna[j]=Toupper(fna[j])
+          else
+            fna[j]=Tolower(fna[j])
+          endif
+        enddo
+        change hstart[i] text=fna
+      endif
+      if Pressed(hedit[i]) then
+        sprintf(cmd,"\"%s\" \"%s\"",EDITOR,s)
+        SYS.Winexec(cmd)
+      else if Pressed(hbrowse[i]) then
+        change hinfo text=""
+        confirm hselect[i]
+        if s[0]=='\0' Strcpy(s,"*.scr")
+        if SYS.Browse(hmain,s,"Select script",0)!=0 then
+          change hselect[i] text=s
+          confirm hselect[i]
+        endif
+      else if Pressed(hstart[i]) then
+        confirm hselect[i]
+        i=SYS.Compile(s,Status(hdebug)==0)
+        if i!=0 then      
+          change hinfo text="Compilation error"
+        else
+          change hinfo text=""
+          Fnsplit(s,drv,dir,fna,ext)
+          SYS.Start(fna,0,parm)
+        endif
+      endif
+    enddo
+    wait
+  enddo
+end
+
+

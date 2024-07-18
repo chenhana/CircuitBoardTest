@@ -1,0 +1,834 @@
+#include "ls.icl"
+
+#define DX       498
+#define DY       348
+#define NHISTORY 512
+#define VMAX     100                   // Maximal velocity index
+#define NV       201                   // Number of velocity points, VMAX*2+1
+#define TRO      5                     // Halftime of main Ro motor vibrations
+#define TFI      5                     // Halftime of main Fi motor vibrations
+
+#define RH       15                    // Radius of head's motor
+
+#define r        150.0                 // Radius of finger, mm
+#define h        200.0                 // Height of working area, mm
+
+handle hgraph
+handle htime
+int    tmove
+int    showhead
+handle hlist
+float  scale,ofsx,ofsy
+
+#define right    0.0                   // Right restrictor, micrometers
+#define top      (h*500.0)             // Top restrictor, micrometers
+#define bottom   (-h*500.0)            // Bottom restrictor, micrometers
+#define delta    35000                 // Width of restricted area, micrometers
+#define d        5000                  // Width of slow restricted area, um
+#define rotofilimit 50                 // Micrometers
+
+#define NY       250001                // No. of points in Y conversion tables
+#define NYHALF   125000
+
+int    *dxfromfi                       // dx as a function of |fi|, micrometers
+int    *fifromdx                       // fi as a function of |dx|, micrometers
+int    *topro30                        // Curve y=-x*tg(30) as ro(fi)
+int    *topro60                        // Curve y=-x*tg(60) as ro(fi)
+
+int    x,y                             // Actual head coordinates, micrometers
+int    ro,fi                           // Actual step-motor coordinates, um
+
+int    x0,y0                           // Departure point, micrometers
+int    ro0,fi0                         // Step-motor departure, micrometers
+
+int    x1,y1                           // Destination point, micrometers
+int    ro1,fi1                         // Step-motor destination, micrometers
+int    vro,vfi                         // Velocities as indexes in tables
+int    movetoro,movetofi
+
+int    velocityro[NV]                  // Ro velocities, micrometers/step
+int    accelro[NV]                     // Ro istance to accelerate, micrometers
+int    decelro[NV]                     // Ro distance to decelerate, micrometers
+
+int    velocityfi[NV]                  // Fi velocities, micrometers/step
+int    accelfi[NV]                     // Fi istance to accelerate, micrometers
+int    decelfi[NV]                     // Fi distance to decelerate, micrometers
+
+int    historyx[NHISTORY]
+int    historyy[NHISTORY]
+int    historyhead                     // Index of last added point
+
+// Converts cartesian X-Y (um) to Ro-Fi (um).
+function int Xytorofi(int x,int y,int *ro,int *fi)
+  float angle
+  angle=Asin(y/1000.0/r)
+  fi[0]=angle*r*1000.0
+  ro[0]=x+r*(1.0-Cos(angle))*1000.0
+end
+
+function int Rofitoxy(int ro,int fi,int *x,int *y)
+  float angle
+  angle=fi/r/1000.0
+  y[0]=r*Sin(angle)*1000.0
+  x[0]=ro+r*(Cos(angle)-1.0)*1000.0
+end
+
+int isecmin,isecmax                    // Range where there are intersections
+int *isectop                           // Top right intersection
+int *isecbot                           // Top bottom intersection
+float isecslant                        // Slant (tangent of slant angle)
+
+
+
+function int Initrightintersection()
+  int i
+  float e,f,g,fi1,sinfi1
+  fi1=60.0/180.0*3.14159265359 //Atan(2.0)
+  isecslant=Tan(fi1)
+  sinfi1=Sin(fi1)
+  isecmin=(r-r/sinfi1)*1000.0+1
+  isecmax=(r+r/sinfi1)*1000.0-1
+  alloc(isectop,(isecmax-isecmin)*4)
+  alloc(isecbot,(isecmax-isecmin)*4)
+  for i=isecmin,i<isecmax,i++ do
+    f=(i/r/1000.0-1.0)*sinfi1
+    f=Max(-1.0,Min(1.0,f))
+    g=Asin(f)
+    isectop[i-isecmin]=(g+fi1)*r*1000.0
+    isecbot[i-isecmin]=(fi1-g-3.14159265359)*r*1000.0
+  enddo
+end
+
+// Search intersections of a cone from point (ro,fi) with circle made by finger
+// at ro0.
+function int Findintersections(int ro,int fi,int ro0,int *topfi,int *botfi)
+  int x0,dx,fitemp
+  // Calculate intersection with top wall.
+  x0=ro+topro60[NYHALF]-topro60[NYHALF+fi]
+  dx=ro0-x0
+  if dx<isecmin then
+    topfi[0]=99999999
+  else if dx>isecmax then
+    topfi[0]=fi
+  else
+    fitemp=-isectop[dx-isecmin]
+    if fitemp>fi then
+      topfi[0]=fitemp
+    else
+      topfi[0]=fi //WRONG IN DOUBLE RESTRICTED AREA
+    endif
+  endif
+  // Calculate intersection with bottom wall.
+  x0=ro+topro60[NYHALF]-topro60[NYHALF-fi]
+  dx=ro0-x0
+  if dx<isecmin then
+    botfi[0]=-99999999
+  else if dx>isecmax then
+    botfi[0]=fi
+  else
+    fitemp=isectop[dx-isecmin]
+    if fitemp<fi then
+      botfi[0]=fitemp
+    else
+      botfi[0]=fi //WRONG IN DOUBLE RESTRICTED AREA
+    endif
+  endif
+end
+
+int itopmin,itopmax                    // Range where there are intersections
+int *itoptop                           // Top right intersection
+int *itopbot                           // Top bottom intersection
+float itopslant                        // Slant (tangent of slant angle)
+
+function int Inittopintersection()
+  int i
+  float e,f,g,fi1,sinfi1
+  fi1=30.0/180.0*3.14159265359
+  itopslant=Tan(fi1)
+  sinfi1=Sin(fi1)
+  itopmin=(r-r/sinfi1)*1000.0+1
+  itopmax=(r+r/sinfi1)*1000.0-1
+  alloc(itoptop,(itopmax-itopmin)*4)
+  alloc(itopbot,(itopmax-itopmin)*4)
+  for i=itopmin,i<itopmax,i++ do
+    f=(i/r/1000.0-1.0)*sinfi1
+    f=Max(-1.0,Min(1.0,f))
+    g=Asin(f)
+    itoptop[i-itopmin]=(g+fi1)*r*1000.0
+    itopbot[i-itopmin]=(fi1-g-3.14159265359)*r*1000.0
+  enddo
+end
+
+// Search intersection of a top cone from point (ro,fi) with circle made by
+// finger at ro0.
+function int Findtopintersection(int ro,int fi,int ro0,int toplimit)
+  int x0,dx,fitemp
+  if ro0>=ro then
+    // Calculate intersection with right wall.
+    x0=ro+topro30[NYHALF]-topro30[NYHALF+fi]+1  //1 corrects for rounding errors
+    dx=ro0-x0
+    if dx<itopmin then
+      return 99999999   //Can't happen?
+    else if dx>itopmax then
+      return toplimit
+    else
+      fitemp=1-itoptop[dx-itopmin]
+      if fitemp<toplimit return toplimit
+      return fitemp
+    endif
+  else
+    // Calculate intersection with left wall.
+    x0=ro+topro30[NYHALF]-topro30[NYHALF-fi]-1  //1 corrects for rounding errors
+    dx=ro0-x0
+    if dx<itopmin then
+      return toplimit
+    else if dx>itopmax then
+      return toplimit
+    else
+      fitemp=itoptop[dx-itopmin]+1
+      if fitemp<toplimit return toplimit
+      return fitemp
+    endif
+  endif
+end
+
+// Search intersection of a bottom cone from point (ro,fi) with circle made by
+// finger at ro0.
+function int Findbotintersection(int ro,int fi,int ro0,int botlimit)
+  int x0,dx,fitemp
+  if ro0>=ro then
+    // Calculate intersection with right wall.
+    x0=ro+topro30[NYHALF]-topro30[NYHALF-fi]+1  //1 corrects for rounding errors
+    dx=ro0-x0
+    if dx<itopmin then
+      return -99999999  //Can't happen?
+    else if dx>itopmax then
+      return botlimit
+    else
+      fitemp=itoptop[dx-itopmin]-1
+      if fitemp>botlimit return botlimit
+      return fitemp
+    endif
+  else
+    // Calculate intersection with left wall.
+    x0=ro+topro30[NYHALF]-topro30[NYHALF+fi]-1  //1 corrects for rounding errors
+    dx=ro0-x0
+    if dx<itopmin then
+      return botlimit
+    else if dx>itopmax then
+      return botlimit
+    else
+      fitemp=-(itoptop[dx-itopmin]+1)
+      if fitemp>botlimit return botlimit
+      return fitemp
+    endif
+  endif
+end
+
+function int Findtopleftright(int ro,int fi,int fi0,int filimit,int *lef,int *rig)
+  if fi0<=filimit then
+    lef[0]=-99999999; rig[0]=99999999
+  else if fi0>fi then
+    lef[0]=ro; rig[0]=ro
+  else
+    lef[0]=ro+topro30[NYHALF-fi0]-topro30[NYHALF-fi] -10
+    rig[0]=ro+topro30[NYHALF+fi0]-topro30[NYHALF+fi] +10
+  endif
+end
+
+//////////////////////////////////////////////////////
+
+function int Drawgraph()
+  int i,j,a[6],tox,toy
+  float fi,xt,yt
+  draw window=hgraph
+  draw color=WHITE bkcolor=WHITE at 0,0 fillrect DX,DY
+  // Draw equator.
+  draw color=LIGHTGRAY
+  draw at 0,ofsy to DX,ofsy
+  // Draw limits of restricted area.
+  draw color=GRAY
+  draw at 0,ofsy-(top-delta)/1000.0*scale
+  draw to ofsx,ofsy-(top-delta)/1000.0*scale
+  draw at 0,ofsy-(bottom+delta)/1000.0*scale
+  draw to ofsx,ofsy-(bottom+delta)/1000.0*scale
+  draw at ofsx-delta/1000.0*scale,ofsy-h/2.0*scale
+  draw to ofsx-delta/1000.0*scale,ofsy+h/2.0*scale
+  draw color=DARKGRAY
+  draw at 0,ofsy-h/2.0*scale to ofsx,ofsy-h/2.0*scale
+  draw to ofsx,ofsy+h/2.0*scale to -1,ofsy+h/2.0*scale
+  // Draw history.
+  j=historyhead+1
+  if j>=NHISTORY j=0
+  draw color=LIGHTGREEN at historyx[j],historyy[j]
+  for i=0,i<NHISTORY/2,i++ do
+    j++
+    if j>=NHISTORY j=0
+    draw to historyx[j],historyy[j]
+  enddo
+  draw color=GREEN
+  for i=i,i<NHISTORY-1,i++ do
+    j++
+    if j>=NHISTORY j=0
+    draw to historyx[j],historyy[j]
+  enddo
+  // Draw right holes
+  draw color=WHITEBLUE
+  draw at ofsx+x0/1000.0*scale,ofsy+y0/1000.0*scale
+  draw to ofsx+x0/1000.0*scale-1000,ofsy+y0/1000.0*scale-1000*isecslant
+  draw at ofsx+x0/1000.0*scale,ofsy+y0/1000.0*scale
+  draw to ofsx+x0/1000.0*scale-1000,ofsy+y0/1000.0*scale+1000*isecslant
+  draw at ofsx+x1/1000.0*scale,ofsy+y1/1000.0*scale
+  draw to ofsx+x1/1000.0*scale-1000,ofsy+y1/1000.0*scale-1000*isecslant
+  draw at ofsx+x1/1000.0*scale,ofsy+y1/1000.0*scale
+  draw to ofsx+x1/1000.0*scale-1000,ofsy+y1/1000.0*scale+1000*isecslant
+
+
+  // Draw destination cross.
+  draw color=LIGHTRED
+  draw at ofsx+x1/1000.0*scale-5,ofsy+y1/1000.0*scale
+  draw to ofsx+x1/1000.0*scale+6,ofsy+y1/1000.0*scale
+  draw at ofsx+x1/1000.0*scale,ofsy+y1/1000.0*scale-5
+  draw to ofsx+x1/1000.0*scale,ofsy+y1/1000.0*scale+6
+
+  // Draw point to move to now.
+  Rofitoxy(/*moveto*/ro,movetofi,&tox,&toy)
+  draw color=LIGHTBLUE
+  draw at ofsx+tox/1000.0*scale-5,ofsy+toy/1000.0*scale
+  draw to ofsx+tox/1000.0*scale+6,ofsy+toy/1000.0*scale
+  draw at ofsx+tox/1000.0*scale,ofsy+toy/1000.0*scale-5
+  draw to ofsx+tox/1000.0*scale,ofsy+toy/1000.0*scale+6
+
+
+  // Draw finger.
+  if showhead then
+    fi=Asin(y/1000.0/r)
+    xt=x/1000.0-r*Cos(fi)
+    a[0]=ofsx+x/1000.0*scale; a[1]=ofsy+y/1000.0*scale
+    a[2]=ofsx+(xt+RH*Sin(fi))*scale; a[3]=ofsy-RH*Cos(fi)*scale
+    a[4]=ofsx+(xt-RH*Sin(fi))*scale; a[5]=ofsy+RH*Cos(fi)*scale
+    draw color=BLACK bkcolor=PINK polygon=a,3
+    draw at ofsx+xt*scale,ofsy fillellipse RH*2*scale+4,RH*2*scale+4
+  endif
+  // Update picture on the screen.
+  draw show
+end
+
+function int Nextstep()
+  int i,circlimit,dist,v
+  int xi,yi,roi,fii                    // Local destination
+  int s0,s1,d0,d1,topcirc,botcirc
+  int leftlim,rightlim,toplim,botlim
+  int toprestrict,botrestrict,rightrestrict
+
+  tmove++
+
+delay 300
+
+  // Already at final point?
+  if ro==ro1 && fi==fi1 && vro==0 && vfi==0 then
+    ro0=ro1; fi0=fi1
+    x0=x1; y0=y1
+    return                             // Movement finished
+  endif
+  // Prepare for default non-restricted movement.
+  roi=ro1; xi=x1
+  fii=fi1; yi=y1
+  // If final point is outside the restricted area, stop movement at the border
+  // of unrestricted area.
+  if xi>right then
+    roi=roi-(xi-right+delta)
+    xi=right-delta
+  endif
+  if yi<bottom then
+    yi=bottom+delta
+    Xytorofi(xi,yi,&roi,&fii)
+  else if yi>top then
+    yi=top-delta
+    Xytorofi(xi,yi,&roi,&fii)
+  endif
+  movetoro=roi
+  movetofi=fii
+  // Calculate safe right Ro limit for unrestricted movements.
+  if fi>=0 then
+    if fii>0 then
+      rightrestrict=right-delta-dxfromfi[Min(fi,fii)]-rotofilimit
+    else
+      rightrestrict=right-delta-rotofilimit
+    endif
+  else
+    if fii<0 then
+      rightrestrict=right-delta-dxfromfi[-Max(fi,fii)]-rotofilimit
+    else
+      rightrestrict=right-delta-rotofilimit
+    endif
+  endif
+  if fi>=fii then
+    i=roi+topro60[NYHALF+fi]-topro60[NYHALF+fii]
+  else
+    i=roi+topro60[NYHALF-fi]-topro60[NYHALF-fii]
+  endif
+
+// CHECK ALSO THE INTERSECTION OF TWO DIGGED CONES!!!
+
+  if rightrestrict<i rightrestrict=i
+  if movetoro>rightrestrict movetoro=rightrestrict
+
+  // Right border and digged cones can split circle ro=const into as many as 4
+  // separate areas. Find area where head can move now.
+  i=ro+delta-right
+  if i<=0 then                         // Circle undefined, all area available
+    topcirc=99999999
+    botcirc=-99999999
+  else
+    Findintersections(ro0,fi0,ro,&s1,&s0)
+    Findintersections(roi,fii,ro,&d1,&d0)
+    if s0<=fi && s1>=fi then
+      botcirc=s0; topcirc=s1
+      if d0<=s1 && d1>=s0 then
+        botcirc=Min(botcirc,d0)
+        topcirc=Max(topcirc,d1)
+      endif
+    else if d0<=fi && d1>=fi then
+      botcirc=d0; topcirc=d1
+      if s0<=d1 && s1>=d0 then
+        botcirc=Min(botcirc,s0)
+        topcirc=Max(topcirc,s1)
+      endif
+    else
+      botcirc=fi; topcirc=fi
+    endif
+    circlimit=fifromdx[i]
+    if botcirc<=(-circlimit) then
+      botcirc=-99999999
+      topcirc=Max(topcirc,-circlimit)
+    endif
+    if topcirc>=circlimit then
+      topcirc=99999999
+      botcirc=Min(botcirc,circlimit)
+    endif
+  endif
+  // Top and bottom restricted areas can additionally limit rotational
+  // movements. Take this restrictions into account.
+  Xytorofi(0,top-delta,&i,&toplim)
+  Xytorofi(0,bottom+delta,&i,&botlim)
+  toprestrict=toplim
+  botrestrict=botlim
+
+  if fi>toprestrict then
+    leftlim=ro
+    rightlim=ro
+    Findtopleftright(ro0,fi0,fi,toplim,&s0,&s1)
+    Findtopleftright(roi,fii,fi,toplim,&d0,&d1)
+    if s0<=ro && s1>=ro then
+      leftlim=s0; rightlim=s1
+      if d0<=s1 && d1>=s0 then
+        leftlim=Min(leftlim,d0)
+        rightlim=Max(rightlim,d1)
+      endif
+    else if d0<=ro && d1>=ro then
+      leftlim=d0; rightlim=d1
+      if s0<=d1 && s1>=d0 then
+        leftlim=Min(leftlim,s0)
+        rightlim=Max(rightlim,s1)
+      endif
+    endif
+    if movetoro<leftlim movetoro=leftlim
+    if movetoro>rightlim movetoro=rightlim
+  endif
+
+
+  if fii>toprestrict then
+    toprestrict=Findtopintersection(roi,fii,ro,toprestrict)
+  else if fii<botrestrict then
+    botrestrict=Findbotintersection(roi,fii,ro,botrestrict)
+  endif
+  movetofi=Min(toprestrict,Max(botrestrict,movetofi))
+  movetofi=Min(topcirc,Max(botcirc,movetofi))
+
+add hlist text=format("tofi=%i dest=%i toprestr=%i botrestr=%i topcirc=%i botcirc=%i",\
+movetofi,fii,toprestrict,botrestrict,topcirc,botcirc)
+
+  if fi0>toprestrict then
+    toprestrict=Findtopintersection(ro0,fi0,ro,toprestrict)
+  else if fi0<botrestrict then
+    botrestrict=Findbotintersection(ro0,fi0,ro,botrestrict)
+  endif
+  if topcirc>toprestrict topcirc=toprestrict
+  if botcirc<botrestrict botcirc=botrestrict
+  // Head can freely move in fi within the interval [botcirc..topcirc].
+  fii=movetofi
+  roi=movetoro
+
+  // Now move to the local destination.
+  dist=roi-ro
+  v=velocityro[VMAX+vro]
+  if dist<decelro[VMAX+vro] then
+    vro--
+  else if dist>accelro[VMAX+vro] then
+    vro++
+  endif
+  ro=ro+velocityro[VMAX+vro]
+  dist=fii-fi
+  v=velocityfi[VMAX+vfi]
+  if dist<decelfi[VMAX+vfi] then
+    vfi--
+  else if dist>accelfi[VMAX+vfi] then
+    vfi++
+  endif
+  fi=fi+velocityfi[VMAX+vfi]
+  Rofitoxy(ro,fi,&x,&y)
+  // Add new point to history and to list.
+  historyhead++
+  if historyhead>=NHISTORY historyhead=0
+  historyx[historyhead]=ofsx+x/1000.0*scale
+  historyy[historyhead]=ofsy+y/1000.0*scale
+  change htime text=format("t=%i",tmove)
+end
+
+
+
+
+
+function int Nextstepold()
+  int xi,yi,roi,fii                    // Local destination
+  int i,j,v,dist,dx,decision
+  int rightrestrict,toprestrict,botrestrict,circlimit,topcirc,botcirc
+  int topofangle,botofangle,pulltofi
+
+  int ar,br,as,bs,ad,bd,dummy,svalid,dvalid
+  tmove++
+
+  // Already at final point?
+  if ro==ro1 && fi==fi1 && vro==0 && vfi==0 then
+    ro0=ro1; fi0=fi1
+    x0=x1; y0=y1
+    return                             // Movement finished
+  endif
+
+  // Prepare for default non-restricted movement.
+  roi=ro1; xi=x1
+  fii=fi1; yi=y1
+  // If final point is outside the restricted area, stop movement at the border
+  // of unrestricted area.
+  if xi>right then
+    roi=roi-(xi-right+delta)
+    xi=right-delta
+  endif
+  if yi<bottom then
+    yi=bottom+delta
+    Xytorofi(xi,yi,&roi,&fii)
+  else if yi>top then
+    yi=top-delta
+    Xytorofi(xi,yi,&roi,&fii)
+  endif
+
+  // Calculate safe right Ro limit for unrestricted movements.
+  if fi>=0 then
+    if fii>0 then
+      rightrestrict=right-delta-dxfromfi[Min(fi,fii)]-rotofilimit
+    else
+      rightrestrict=right-delta-rotofilimit
+    endif
+  else
+    if fii<0 then
+      rightrestrict=right-delta-dxfromfi[-Max(fi,fii)]-rotofilimit
+    else
+      rightrestrict=right-delta-rotofilimit
+    endif
+  endif
+  // Calculate top and bottom Fi limits.
+  Xytorofi(0,top-delta,&i,&toprestrict)
+  Xytorofi(0,bottom+delta,&i,&botrestrict)
+  dist=roi-ro
+  if fii>=0 then
+    toprestrict=Findtopintersection(roi,fii,ro,toprestrict)
+  else
+    botrestrict=Findbotintersection(roi,fii,ro,botrestrict)
+  endif
+
+
+  // Dig destination hole in right restricted area.
+//  if fi<=toprestrict && fi>=botrestrict then
+    if fi>=fii then
+      i=roi+topro60[NYHALF+fi]-topro60[NYHALF+fii]
+    else
+      i=roi+topro60[NYHALF-fi]-topro60[NYHALF-fii]
+    endif
+    if rightrestrict<i rightrestrict=i
+//  endif
+  // When leaving right restricted area, dig departure hole.
+  i=ro+delta-right
+  pulltofi=fii
+  if fii>fi then //fi<botrestrict || (fi<toprestrict && fii>fi) then
+    // Move up.
+    if i>=0 then                       // Circle is defined
+      decision=0
+      br=fifromdx[i]; ar=-br
+      Findintersections(ro0,fi0,ro,&bs,&as)
+      Findintersections(roi,fii,ro,&bd,&ad)
+      pulltofi=fi
+      if pulltofi<ar then
+        pulltofi=ar
+        decision=decision+1
+      endif
+      if pulltofi>=as && pulltofi<bs then
+        pulltofi=bs
+        decision=decision+2
+      endif
+      if pulltofi>=ad && pulltofi<bd then
+        pulltofi=bd
+        decision=decision+4
+      endif
+      if pulltofi>=br then
+        pulltofi=99999999
+        decision=decision+8
+      endif
+
+      if pulltofi>fii pulltofi=fii
+      add hlist text=format("%i: fi=%i pul=%i ar=%i as=%i bs=%i ad=%i bd=%i br=%i",\
+        decision,fi,pulltofi,ar,as,bs,ad,bd,br)
+
+    endif
+//    if botrestrict>pulltofi pulltofi=botrestrict
+    if toprestrict<pulltofi pulltofi=toprestrict
+  else
+    // Move down.
+    if i>=0 then                       // Circle is defined
+      decision=16
+      br=fifromdx[i]; ar=-br
+      Findintersections(ro0,fi0,ro,&bs,&as)
+      Findintersections(roi,fii,ro,&bd,&ad)
+      pulltofi=fi
+      if pulltofi>br then
+        pulltofi=br
+        decision=decision+1
+      endif
+      if pulltofi<=bs && pulltofi>as then
+        pulltofi=as
+        decision=decision+2
+      endif
+      if pulltofi<=bd && pulltofi>ad then
+        pulltofi=ad
+        decision=decision+4
+      endif
+      if pulltofi<=ar then
+        pulltofi=-99999999
+        decision=decision+8
+      endif
+
+      if pulltofi<fii pulltofi=fii
+      add hlist text=format("%i: fi=%i pul=%i ar=%i as=%i bs=%i ad=%i bd=%i br=%i",\
+        decision,fi,pulltofi,ar,as,bs,ad,bd,br)
+
+    endif
+//    if toprestrict<pulltofi pulltofi=toprestrict
+    if botrestrict>pulltofi pulltofi=botrestrict
+  endif
+
+  add hlist text=format("pulltofi=%i",pulltofi)
+
+  fii=pulltofi
+  roi=Min(roi,rightrestrict)
+
+
+  // Now move to the local destination. Velocity limiting is not very precise.
+  dist=roi-ro
+  v=velocityro[VMAX+vro]
+  if dist<decelro[VMAX+vro] then
+    vro--
+  else if dist>accelro[VMAX+vro] then
+    vro++
+  endif
+  ro=ro+velocityro[VMAX+vro]
+  dist=fii-fi
+  v=velocityfi[VMAX+vfi]
+  if dist<decelfi[VMAX+vfi] then
+    vfi--
+  else if dist>accelfi[VMAX+vfi] then
+    vfi++
+  endif
+  fi=fi+velocityfi[VMAX+vfi]
+  Rofitoxy(ro,fi,&x,&y)
+  // Add new point to history and to list.
+  historyhead++
+  if historyhead>=NHISTORY historyhead=0
+  historyx[historyhead]=ofsx+x/1000.0*scale
+  historyy[historyhead]=ofsy+y/1000.0*scale
+//  add hlist text=format("T%7i B%7i",toprestrict,botrestrict)
+  change htime text=format("t=%i",tmove)
+end
+
+function int main()
+  int i,dv,paused
+  float tan30,tan60
+  handle hmain,hpause,hhead,hexit
+  hmain=control WINDOW
+    window=NULL
+    position=10,10,800,350
+    name="防撞模拟"
+    help=" "
+    bkcolor=LIGHTGRAY
+  endc
+  hgraph=control GRAPH
+    window=hmain
+    position=1,1,DX,DY
+    help=" "
+    color=BLACK
+    bkcolor=WHITE
+  endc
+  scale=DY*0.9/h                       // Pixel/mm
+  ofsx=DX-20                           // Pixel
+  ofsy=DY/2                            // Pixel
+  htime=control TEXT
+    window=hmain
+    position=500,0,300,25
+    help=" "
+    mode=M_BORDER|M_CENTERED
+    font=MEDIUMFONT
+  endc
+  hlist=control LIST
+    window=hmain
+    position=500,25,300,300
+    help=" "
+    font=TERMINALFONT
+    mode=M_VSCROLL
+    size=100000
+    menu="1Clear"
+  endc
+  hpause=control BUTTON
+    window=hmain
+    position=500,325,100,25
+    name="暂停"
+    help="暂停/继续模拟"
+  endc
+  hhead=control BUTTON
+    window=hmain
+    position=600,325,100,25
+    name="测试头"
+    help="隐藏/显示测试头"
+  endc
+  showhead=1
+  hexit=control BUTTON
+    window=hmain
+    position=700,325,100,25
+    name="退出"
+    help="按下可以关闭此窗口"
+  endc
+  // Initialize history
+  for i=0,i<NHISTORY,i++ do
+    historyx[i]=ofsx
+    historyy[i]=ofsy
+  enddo
+  // Initialize table of ro velocities.
+  for i=1,i<VMAX,i++ do
+    dv=Min(i/2+1,25,700/i)
+    if velocityro[VMAX+i-1]>1000 dv=0
+    velocityro[VMAX+i]=velocityro[VMAX+i-1]+dv
+    velocityro[VMAX-i]=-velocityro[VMAX+i]
+  enddo
+  // Initialize tables of ro accelerations and decelerations.
+  for i=1,i<VMAX,i++ do
+    decelro[VMAX+i]=decelro[VMAX+i-1]+velocityro[VMAX+i]
+    accelro[VMAX-i]=-decelro[VMAX+i]
+    if i==VMAX-1 then
+      accelro[VMAX+i]=10000000
+    else
+      accelro[VMAX+i]=velocityro[VMAX+i+1]+                                    \
+      decelro[VMAX+i]+velocityro[VMAX+i]*TRO-1
+    endif
+    decelro[VMAX-i]=-accelro[VMAX+i]
+  enddo
+  // Initialize table of fi velocities.
+  for i=1,i<VMAX,i++ do
+    dv=Min(i,30,1000/i)
+    velocityfi[VMAX+i]=velocityfi[VMAX+i-1]+dv
+    velocityfi[VMAX-i]=-velocityfi[VMAX+i]
+  enddo
+  // Initialize tables of fi accelerations and decelerations.
+  for i=1,i<VMAX,i++ do
+    decelfi[VMAX+i]=decelfi[VMAX+i-1]+velocityfi[VMAX+i]
+    accelfi[VMAX-i]=-decelfi[VMAX+i]
+    if i==VMAX-1 then
+      accelfi[VMAX+i]=10000000
+    else
+      accelfi[VMAX+i]=velocityfi[VMAX+i+1]+                                    \
+      decelfi[VMAX+i]+velocityfi[VMAX+i]*TFI-1
+    endif
+    decelfi[VMAX-i]=-accelfi[VMAX+i]
+  enddo
+
+  Initrightintersection()
+  Inittopintersection()
+
+
+  // Initialize conversion table dx(fi).
+  alloc(dxfromfi,NYHALF*4)
+  for i=0,i<NYHALF,i++ do
+    dxfromfi[i]=r*1000.0*(Cos(i/1000.0/r)-1.0)
+  enddo
+  // Initialize conversion table fi(dx).
+  alloc(fifromdx,NYHALF*4)
+  for i=0,i<NYHALF,i++ do
+    fifromdx[i]=r*1000.0*Sin(Acos(1.0-i/1000.0/r))
+  enddo
+  // Initialize topro30 and topro60.
+  tan30=r*1000.0/itopslant
+  tan60=r*1000.0/isecslant
+  alloc(topro30,NY*4)
+  alloc(topro60,NY*4)
+  for i=-NYHALF,i<=NYHALF,i++ do
+    topro30[NYHALF+i]=r*1000.0*(1.0-Cos(i/r/1000.0))-tan30*Sin(i/r/1000.0)
+    topro60[NYHALF+i]=r*1000.0*(1.0-Cos(i/r/1000.0))-tan60*Sin(i/r/1000.0)
+/*    if i>(-NYHALF) then
+      if topro60[NYHALF+i]>topro60[NYHALF+i-1] topro60[NYHALF+i]=topro60[NYHALF+i-1]
+    endif*/
+  enddo
+
+
+
+  int ro,fi,lef,rig,xl,xr,xm,y
+
+Xytorofi(0,100000,&ro,&fi)
+
+for i=fi-12000,i<fi+12000,i=i+1000 do
+Findtopleftright(ro,fi,i,fi-10000,&lef,&rig)
+Rofitoxy(lef,i,&xl,&y)
+Rofitoxy(rig,i,&xr,&y)
+
+lprintf(GREEN,"%8i: %7i..%7i",i,xl,xr)
+enddo
+
+
+
+
+
+
+
+  while 1 do
+    // Finish?
+    if Pressed(hexit) then
+      break
+    endif
+    // New destination selected?
+    if (Pressed(hgraph) || Status(hgraph)==1) then
+      x1=(Max(0,Min(DX-1,Limit0(hgraph)))-ofsx)/scale*1000.0
+      y1=(Max(0,Min(DY-1,Limit1(hgraph)))-ofsy)/scale*1000.0
+      Xytorofi(x1,y1,&ro1,&fi1)
+      tmove=0
+    else if Pressed(hpause) then
+      paused=!paused
+    else if Pressed(hhead) then
+      showhead=!showhead
+      Drawgraph()
+    else if Menu(hlist)==1 then
+      clear hlist
+    endif
+    // Move to new destination.
+    if paused==0 then
+      Nextstep()
+      Drawgraph()
+    endif
+    wait
+  enddo
+end

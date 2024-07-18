@@ -1,0 +1,1158 @@
+#include "ls.icl"
+#include "ly.icl"
+#include "or.icl"
+#cmdbuff 2
+#zeroid                                // Process answers with zero command ID
+
+#define VERSION "v1.16"
+
+#define WARMUP   10                    // Warm-up timeout, minutes (!)
+#define NTESTS   100                   // Number of tests after warm-up
+
+// Brief history of development:
+// 1.13 - extended head-related information previously displayed only as summary
+// 1.16 - AC only test mode
+
+#define IDX      501
+#define IX0      3
+#define IX1      250
+#define IX2      300
+#define IX3      350
+#define IX4      400
+#define DY       17
+#define NCHAR    60
+
+int cmin[192],cmax[192]                // Crate parameters & pseudoparameters
+int fmin[32,64],fmax[32,64]            // Head parameters
+int y                                  // Y coordinate in child, pixels
+int mainok,hvok
+int nmain,nhv
+int hvtype
+int amuxerr
+int extdata
+
+char cratedata[54,NCHAR] = {                                                   \
+  "0Parameters of measurement card (BEL257)",                                  \
+  ">and analog multiplexer (BEL285)",                                          \
+  ".For all AC measurements, first line gives the sine",                       \
+  ".and second line - the cosine component.",                                  \
+  "~:3,0,42,67 AC mains frequency, Hz",                                        \
+  "~1,1,0 Direct ADC reading used to determine",                               \
+  ">the ADC type (>0: 16-bit, <0: 12-bit)",                                    \
+  "2,-160,160,5 DC zero shift at K=1",                                         \
+  "3,25488,31152,5 9V DC measurement at K=1",                                  \
+  "4,-50,50,5 I1_GND level (ABUS is ON)",                                      \
+  "5,-50,50,5 O2_GND level (ABUS is ON)",                                      \
+  "6,1,0,5 10 V DC applied to analog bus",                                     \
+  "7,-160,160,5 DC zero shift at K=10",                                        \
+  "8,25387,31029,5 0.9 V DC, measured at K=10",                                \
+  ":6,9,19296,23584,10 9 V DC, measured in quick mode at",                     \
+  ">K=1",                                                                      \
+  ":6,10,19206,23474,10 0.9 V DC, measured in quick mode at",                  \
+  ">K=1",                                                                      \
+  "11,17000,26000 Resistance of temperature sensor",                           \
+  "12,32000,99999 Resistance between analog buses at",                         \
+  ">I=10 uA",                                                                  \
+  "13,1,0 9 V DC in \"direct bus measurement\"",                               \
+  ">(ACCH presence detection)",                                                \
+  "14,100,150 Time, microseconds, corresponding",                              \
+  ">to 1 period of monovibrator",                                              \
+  "*16,-320,320,5 AC zero shift at K=1",                                       \
+  "17,-320,320,5",                                                             \
+  "*18,-320,320,5 AC zero shift at K=10",                                      \
+  "19,-320,320,5",                                                             \
+  "*20,-27500,-22500,20 Channel alignment when sin=cos",                       \
+  "21,-27500,-22500,20",                                                       \
+  "*22,-26012,-21284,20 Phase shift at K=1 (special mode)",                    \
+  "23,3168,3872,20",                                                           \
+  "*24,-320,320,5 AC zero shift at K=1 once more",                             \
+  "25,-320,320,5",                                                             \
+  "*26,7113,8694,10 1.0 V AC measurement at K=1",                              \
+  "27,-1390,-1137,10",                                                         \
+  "*28,7142,8729,10 0.1 V AC measurement at K=10",                             \
+  "29,-1390,-1137,10",                                                         \
+  ". ",                                                                        \
+  ".The following parameters of the multiplexer card are",                     \
+  ".measured using head controllers and on-head boards:",                      \
+  "139,-930,930,10 Zero shift of PSIN multiplexer channel",                    \
+  "140,-930,930,10 Zero shift of MSIN multiplexer channel",                    \
+  "141,-32,32,5 Zero shift of GOUT multiplexer channel",                       \
+  "142,8496,10384,20 PSIN multiplexer output voltage that",                    \
+  ">corresponds to 3 V DC",                                                    \
+  "143,8496,10384,20 MSIN multiplexer output voltage that",                    \
+  ">corresponds to 3 V DC",                                                    \
+  "*144,-25850,-21150,30 PSIN output corresponding to 3 V AC",                 \
+  "145,3600,4400,30",                                                          \
+  "*146,21150,25850,30 MSIN output corresponding to 3 V AC",                   \
+  "147,-4400,-3600,30",                                                        \
+  "" };
+
+char crateac[23,NCHAR] = {                                                     \
+  "0AC parameters of measurement card (BEL257)",                               \
+  ">and analog multiplexer (BEL285)",                                          \
+  ".For all AC measurements, first line gives the sine",                       \
+  ".and second line - the cosine component.",                                  \
+  "*16,-320,320,5 AC zero shift at K=1",                                       \
+  "17,-320,320,5",                                                             \
+  "*24,-320,320,5 AC zero shift at K=1 once more",                             \
+  "25,-320,320,5",                                                             \
+  "*18,-320,320,5 AC zero shift at K=10",                                      \
+  "19,-320,320,5",                                                             \
+  "*20,-27500,-22500,20 Channel alignment when sin=cos",                       \
+  "21,-27500,-22500,20",                                                       \
+  "*22,-26012,-21284,20 Phase shift at K=1 (special mode)",                    \
+  "23,3168,3872,20",                                                           \
+  "*26,7113,8694,10 1.0 V AC measurement at K=1",                              \
+  "27,-1390,-1137,10",                                                         \
+  "*28,7142,8729,10 0.1 V AC measurement at K=10",                             \
+  "29,-1390,-1137,10",                                                         \
+  "*144,-25850,-21150,30 PSIN output corresponding to 3 V AC",                 \
+  "145,3600,4400,30",                                                          \
+  "*146,21150,25850,30 MSIN output corresponding to 3 V AC",                   \
+  "147,-4400,-3600,30",                                                        \
+  "" };
+
+char headdata[38,NCHAR] = {                                                    \
+  "0Individual parameters of head",                                            \
+  "0,-99999,950,50 Loop resistance of measurement cable at",                   \
+  ">I=30 mA (detection of broken cable)",                                      \
+  "1,-99999,-32000 Resistance to shield at I=10 uA",                           \
+  "30,-1024,1024,10 Hi-res shift in I mode at K=1",                            \
+  "2,-1024,1024,10 Hi-res shift in I mode at K=10",                            \
+  "3,-6000,99999 Acceleration chain test for multiplexer",                     \
+  ">relays 1-2",                                                               \
+  "4,-1900,99999,20 ON resistance of multiplexer relays 1-2",                  \
+  "5,-99999,-32000 OFF resistance of multiplexer relay 1",                     \
+  "6,-99999,-32000 OFF resistance of multiplexer relay 2",                     \
+  "7,-6000,99999 Acceleration chain test for multiplexer",                     \
+  ">relays 3-4",                                                               \
+  "8,-1900,99999,20 ON resistance of multiplexer relays 3-4",                  \
+  "9,-99999,-32000 OFF resistance of multiplexer relay 3",                     \
+  "10,-99999,-32000 OFF resistance of multiplexer relay 4",                    \
+  "*20,1,0,5 Field zero shift at K=1",                                         \
+  "21,1,0,5",                                                                  \
+  "*22,1,0,5 PSIN capacity zero shift at K=1",                                 \
+  "23,1,0,5",                                                                  \
+  "*24,1,0,5 MSIN capacity zero shift at K=1",                                 \
+  "25,1,0,5",                                                                  \
+  "*26,1,0,20 PSIN capacity zero shift at K=10",                               \
+  "27,1,0,20",                                                                 \
+  "*28,1,0,20 MSIN capacity zero shift at K=10",                               \
+  "29,1,0,20",                                                                 \
+  "31,-99999,10000,100 Capacity of wires, pF",                                 \
+  "+.Parameters of multiplexer card measured with this head:",                 \
+  "+11,-930,930,10 Zero shift of PSIN multiplexer channel",                    \
+  "+12,-930,930,10 Zero shift of MSIN multiplexer channel",                    \
+  "+13,-32,32,5 Zero shift of GOUT multiplexer channel",                       \
+  "+14,8496,10384,20 PSIN voltage corresponding to 3 V DC",                    \
+  "+15,8496,10384,20 MSIN voltage corresponding to 3 V DC",                    \
+  "+*16,-25850,-21150,30 PSIN output corresponding to 3 V AC",                 \
+  "+17,3600,4400,30",                                                          \
+  "+*18,21150,25850,30 MSIN output corresponding to 3 V AC",                   \
+  "+19,-4400,-3600,30",                                                        \
+  "" };
+
+char headac[12,NCHAR] = {                                                      \
+  "0Individual AC parameters of head",                                         \
+  "*20,1,0,5 Field zero shift at K=1",                                         \
+  "21,1,0,5",                                                                  \
+  "*22,1,0,5 PSIN capacity zero shift at K=1",                                 \
+  "23,1,0,5",                                                                  \
+  "*24,1,0,5 MSIN capacity zero shift at K=1",                                 \
+  "25,1,0,5",                                                                  \
+  "*26,1,0,20 PSIN capacity zero shift at K=10",                               \
+  "27,1,0,20",                                                                 \
+  "*28,1,0,20 MSIN capacity zero shift at K=10",                               \
+  "29,1,0,20",                                                                 \
+  "" };
+
+char amuxdata[12,NCHAR] = {                                                    \
+  "0Multiplexer channel",                                                      \
+  "3,-6000,99999 Acceleration chain test for multiplexer",                     \
+  ">relays 1-2",                                                               \
+  "4,-1900,99999,20 ON resistance of multiplexer relays 1-2",                  \
+  "5,-99999,-32000 OFF resistance of multiplexer relay 1",                     \
+  "6,-99999,-32000 OFF resistance of multiplexer relay 2",                     \
+  "7,-6000,99999 Acceleration chain test for multiplexer",                     \
+  ">relays 3-4",                                                               \
+  "8,-1900,99999,20 ON resistance of multiplexer relays 3-4",                  \
+  "9,-99999,-32000 OFF resistance of multiplexer relay 3",                     \
+  "10,-99999,-32000 OFF resistance of multiplexer relay 4",                    \
+  "" };
+
+char hvdata[41,NCHAR] = {                                                      \
+  "1Parameters of HV card (BEL292)",                                           \
+  ".If two values are specified in one cell, then first value",                \
+  ".is for positive and second is for negative HV500 channel",                 \
+  "~32,250,500,Type of detected HV card",                                      \
+  "33,-5,5,5 ADC zero shift",                                                  \
+  "?34,-10,10,5 Zero shift at K=1",                                            \
+  "35,-10,10,5",                                                               \
+  "?36,-10,10,5 Zero shift at K=10",                                           \
+  "37,-10,10,5",                                                               \
+  ":7,?38,-40,40,5 Zero shift at K=100",                                          \
+  "39,-10,10,5",                                                               \
+  "?42,1325,1650,10 HV source",                                                \
+  "43,-1650,-1325,10",                                                         \
+  ":4,?42,265,330 (HV source, volts)",                                         \
+  ":4,43,-330,-265",                                                           \
+  "?44,-2,4,5 Output voltage when 0 V is set",                                 \
+  "45,-4,2,5",                                                                 \
+  "?56,487,537,5 Output voltage when 64 V is set",                             \
+  "57,-537,-487,5",                                                            \
+  "?58,978,1070,5 Output voltage when 128 V is set",                           \
+  "59,-1070,-978,5",                                                           \
+  "?60,1468,1604,5 Output voltage when 192 V is set",                          \
+  "61,-1604,-1468,5",                                                          \
+  "?62,1951,99999,5 Output voltage when 255 V is set",                         \
+  "63,-99999,-1951,5",                                                         \
+  "?46,-50,50,5 Residual current through the bypass",                          \
+  "47,-50,50,5",                                                               \
+  "?48,1474,1842,5 Limited output current",                                    \
+  "49,-1842,-1474,5",                                                          \
+  ":5,?48,1,0 (Limited output current, mA)",                                   \
+  ":5,49,1,0",                                                                 \
+  "50,1,0,20 8/16 times sampled current through the",                          \
+  ">reference resistor",                                                       \
+  "51,1,0,20 8/16 times sampled voltage on the",                               \
+  ">reference resistor",                                                       \
+  "~:1,?52,756,924 Rough accuracy check at K=10",                              \
+  "~:1,53,14,26",                                                              \
+  "~:2,?54,171,209 Rough accuracy check at K=100",                             \
+  "~:2,55,171,209",                                                            \
+  "" };
+
+// Interrupt handler, receives and processes asynchronous messages and errors.
+function int Answerproc(char *answer,int info)
+  int i
+  if answer[4]==S_ERROR && answer[5]==E_COMMUTATOR then
+    i=$uint2(answer+10)
+    if (i & 0x1800)!=0 amuxerr=1
+  endif
+end
+
+// Parameter mode=-1: crate, otherwise head number (0..31)
+function int Drawdata(int mode,char st[])
+  int i,j,k,y0,lmin,lmax,sign,cplx,spec,tabstart,quick,diff,diffmax
+  float imin,imax
+  char s[128]
+  i=0;
+  draw mode=M_CENTERED font=MEDIUMFONT
+  if mode<0 then
+    draw at IDX/2,y+25 text=st+1
+  else
+    draw at IDX/2,y+25 text=format("%s %i%c",st+1,mode/2,(mode & 1)==0?'L':'R')
+  endif
+  i++; y=y+30
+  if st[NCHAR]=='>' then
+    draw at IDX/2,y+16 text=st+NCHAR+1
+    i++; y=y+21
+  endif
+  if mode<0 then
+    sprintf(s,"(Number of tests = %i)",st[0]=='0'?nmain:nhv)
+    draw font=INFOFONT
+    draw at IDX/2,y+12 text=s
+    y=y+20
+  endif
+  y0=y; cplx=0; tabstart=0
+  while st[i*NCHAR]!='\0' do
+    draw mode=M_LEFT font=TIMESFONT
+    j=i*NCHAR; spec=0; quick=0; diff=1
+    if st[j]=='+' then
+      if extdata==0 then
+        i++; continue
+      endif
+      j++
+    endif
+    if st[j]=='.' then                 // Comment to be printed within the table
+      draw color=BLACK
+      if y0!=y then
+        draw at IX0,y to IDX-3,y
+        draw at IX0,y0 to IX0,y
+        draw at IX1,y0 to IX1,y
+        draw at IX3,y0 to IX3,y
+        draw at IX4,y0 to IX4,y
+        draw at IDX-3,y0 to IDX-3,y
+        y0=y; y=y+5
+      else
+        y0=y
+      endif
+      draw mode=M_CENTERED font=INFOFONT
+      draw at IDX/2,y+DY-1 text=st+j+1
+      y=y+DY
+      if tabstart!=0 then
+        draw at IX0,y0 to IX0,y
+        draw at IDX-3,y0 to IDX-3,y
+      endif
+      y0=y; i=i+1
+      continue
+    endif
+    tabstart=1
+    if st[j]=='~' then                 // No diff display
+      diff=0; j++
+    endif
+    if st[j]==':' then                 // Special function
+      j++
+      while Isdigit(st[j]) do
+        spec=spec*10+st[j]-'0'; j++; enddo
+      while st[j]==' ' || st[j]==',' do j++; enddo;
+    endif
+    if cplx<0 then
+      cplx=0; i++
+      continue
+    else if cplx==0 then
+      draw at IX0,y to IDX-3,y
+      if st[j]=='*' then
+        cplx=2; j++
+      else if st[j]=='?' then
+        if hvtype!=250 then
+          cplx=2; j++
+        else
+          cplx=-1; j++
+        endif
+      endif
+    endif
+    k=0; while Isdigit(st[j]) do       // Index of item
+      k=k*10+st[j]-'0'; j++; enddo
+    if (mode<0) then
+      imin=cmin[k]; imax=cmax[k]
+    else
+      imin=fmin[mode,k]; imax=fmax[mode,k]
+    endif
+    if spec==3 then                    // Convert to mains frequency
+      imin=imin*2.5; imax=imax*2.5
+      diff=0
+    else if spec==4 then               // Convert to HV volts
+      imin=imin/5.0; imax=imax/5.0
+      diff=0
+    else if spec==5 then               // Convert to HV current
+      imin=Round(imin/2000.0,0.01); imax=Round(imax/2000.0,0.01)
+      diff=0
+    else if spec==6 then               // Don't error on quick mode parms
+      if (imin==0 && imax==0) quick=1
+    endif
+    while st[j]==' ' || st[j]==',' do j++; enddo;
+    lmin=0; sign=1; if st[j]=='-' then sign=-1; j++; endif;
+    while Isdigit(st[j]) do            // Lower item limit
+      lmin=lmin*10+st[j]-'0'; j++; enddo
+    lmin=lmin*sign
+    while st[j]==' ' || st[j]==',' do j++; enddo;
+    lmax=0; sign=1; if st[j]=='-' then sign=-1; j++; endif;
+    while Isdigit(st[j]) do            // Upper item limit
+      lmax=lmax*10+st[j]-'0'; j++; enddo
+    lmax=lmax*sign
+    diffmax=999999
+    if st[j]==',' then                 // Difference limit present
+      j++; diffmax=0
+      while Isdigit(st[j]) do
+        diffmax=diffmax*10+st[j]-'0'; j++
+      enddo
+    endif
+    while st[j]==' ' || st[j]==',' do j++; enddo;
+    if cmax[32]!=250 then              // HV500 only!
+      if spec==1 then                  // Rough HV x10 accuracy check
+        k=(cmin[48]+cmax[48]-cmin[49]-cmax[49])/380
+        lmin=k-5; lmax=k+5
+      else if spec==2 then             // Rough HV x100 accuracy check
+        k=(cmin[48]+cmax[48]-cmin[49]-cmax[49])/38
+        lmin=k-20; lmax=k+20
+      else if spec==7 then             // Zero shift at K=100
+        lmin=-10; lmax=10;
+      endif
+    endif
+    y=y+DY
+    draw at IX0+5,y text=st+j
+    draw mode=M_CENTERED
+    if quick then
+      draw color=DARKGRAY at IX2,y text="Not used" color=BLACK
+    else if imin==imax then
+      if lmin<=lmax && (imin<lmin || imin>lmax) draw color=LIGHTRED
+      draw at IX2,y text=format("%g",imin) color=BLACK
+    else
+      if lmin<=lmax && (imin<lmin || imax>lmax) draw color=LIGHTRED
+      draw at IX2,y text=format("%g...%g",imin,imax) color=BLACK
+      if diff then
+        if imax-imin>diffmax draw color=LIGHTRED
+        draw at (IX3+IX4)/2,y text=format("%i",imax-imin) color=BLACK
+      endif
+    endif
+    if lmin<=(-99999) then
+      draw at (IX4+IDX)/2,y text=format("<%i",lmax)
+    else if lmax>=99999 then
+      draw at (IX4+IDX)/2,y text=format(">%i",lmin)
+    else if lmin<=lmax then
+      draw at (IX4+IDX)/2,y text=format("%i...%i",lmin,lmax)
+    endif
+    i++
+    if cplx==0 then
+      y=y+DY
+      if st[i*NCHAR]=='>' then         // Continuation requested
+        draw color=BLACK mode=M_LEFT
+        draw at IX0+5,y text=st+i*NCHAR+1
+        i++
+      endif
+    endif
+    if cplx>0 cplx--
+  enddo
+  draw color=BLACK
+  draw at IX0,y to IDX-3,y
+  draw at IX0,y0 to IX0,y
+  draw at IX1,y0 to IX1,y
+  draw at IX3,y0 to IX3,y
+  draw at IX4,y0 to IX4,y
+  draw at IDX-3,y0 to IDX-3,y
+  y=y+5
+end
+
+function int Waddspaces(int n)
+  char s[32]
+  if n<=0 || n>31 return
+  Memset(s,' ',n)
+  s[n]='\0'
+  WAddtext(s)
+end
+
+// Same as Drawdata(), but writes data to file in .WRI format
+function int Wdrawdata(int mode,char st[])
+  int i,j,k,lmin,lmax,sign,cplx,spec,quick,diff,diffmax
+  float imin,imax
+  char s[128]
+  i=0
+  WParagraph(WRI_CENTERED); WFmt(WRI_ARIAL,WRI_BOLD,17)
+  WAddtext(" "); WParagraph(WRI_CENTERED)
+  if mode<0 then
+    WAddtext(st+1)
+  else
+    sprintf(s,"%s %i%c",st+1,mode/2,(mode & 1)==0?'L':'R')
+    WAddtext(s)
+  endif
+  if st[NCHAR]=='>' then
+    WParagraph(WRI_CENTERED)
+    WAddtext(st+NCHAR+1); i++
+  endif
+  if mode<0 then
+    WParagraph(WRI_CENTERED); WFmt(WRI_TIMES,WRI_ITALIC,11)
+    sprintf(s,"(Number of tests = %i)",st[0]=='0'?nmain:nhv)
+    WAddtext(s)
+  endif
+  i++; cplx=0
+  while st[i*NCHAR]!='\0' do
+    j=i*NCHAR; spec=0; quick=0; diff=1
+    if st[j]=='+' then
+      if extdata==0 then
+        i++; continue
+      endif
+      j++
+    endif
+    if st[j]=='.' then                 // Comment to be printed within the table
+      WParagraph(WRI_CENTERED); WFmt(WRI_TIMES,WRI_ITALIC,11)
+      WAddtext(st+j+1)
+      i++; continue
+    endif
+    WParagraph(WRI_LEFT); WFmt(WRI_COURNEW,0,8)
+    if st[j]=='~' then                 // No diff display
+      diff=0; j++
+    endif
+    if st[j]==':' then                 // Special function
+      j++
+      while Isdigit(st[j]) do
+        spec=spec*10+st[j]-'0'; j++; enddo
+      while st[j]==' ' || st[j]==',' do j++; enddo;
+    endif
+    if cplx<0 then
+      cplx=0; i++
+      continue
+    else if cplx==0 then
+      WAddtext(" "); WParagraph(WRI_LEFT)
+      if st[j]=='*' then
+        cplx=2; j++
+      else if st[j]=='?' then
+        if hvtype!=250 then
+          cplx=2; j++
+        else
+          cplx=-1; j++
+        endif
+      endif
+    endif
+    k=0; while Isdigit(st[j]) do       // Index of item
+      k=k*10+st[j]-'0'; j++; enddo
+    if (mode<0) then
+      imin=cmin[k]; imax=cmax[k]
+    else
+      imin=fmin[mode,k]; imax=fmax[mode,k]
+    endif
+    if spec==3 then                    // Convert to mains frequency
+      imin=imin*2.5; imax=imax*2.5
+      diff=0
+    else if spec==4 then               // Convert to HV volts
+      imin=imin/5.0; imax=imax/5.0
+      diff=0
+    else if spec==5 then               // Convert to HV current
+      imin=Round(imin/2000.0,0.01); imax=Round(imax/2000.0,0.01)
+      diff=0
+    else if spec==6 then               // Don't error on quick mode parms
+      if (imin==0 && imax==0) quick=1
+    endif
+    while st[j]==' ' || st[j]==',' do j++; enddo;
+    lmin=0; sign=1; if st[j]=='-' then sign=-1; j++; endif;
+    while Isdigit(st[j]) do            // Lower item limit
+      lmin=lmin*10+st[j]-'0'; j++; enddo
+    lmin=lmin*sign
+    while st[j]==' ' || st[j]==',' do j++; enddo;
+    lmax=0; sign=1; if st[j]=='-' then sign=-1; j++; endif;
+    while Isdigit(st[j]) do            // Upper item limit
+      lmax=lmax*10+st[j]-'0'; j++; enddo
+    lmax=lmax*sign
+    diffmax=999999
+    if st[j]==',' then                 // Difference limit present
+      j++; diffmax=0
+      while Isdigit(st[j]) do
+        diffmax=diffmax*10+st[j]-'0'; j++
+      enddo
+    endif
+    while st[j]==' ' || st[j]==',' do j++; enddo;
+    if cmax[32]!=250 then              // HV500 only!
+      if spec==1 then                  // Rough HV x10 accuracy check
+        k=(cmin[48]+cmax[48]-cmin[49]-cmax[49])/380
+        lmin=k-5; lmax=k+5
+      else if spec==2 then             // Rough HV x100 accuracy check
+        k=(cmin[48]+cmax[48]-cmin[49]-cmax[49])/38
+        lmin=k-20; lmax=k+20
+      else if spec==7 then             // Zero shift at K=100
+        lmin=-10; lmax=10;
+      endif
+    endif
+    Sprintf(s,"%-41.41s ",st+j); WAddtext(s);
+    if quick then
+      WFmt(WRI_COURNEW,WRI_ITALIC,8);
+      k=Sprintf(s,"Not used")
+    else if imin==imax then
+      if lmin<=lmax && (imin<lmin || imin>lmax) then
+        WFmt(WRI_COURNEW,WRI_BOLD|WRI_UL,8); endif
+      k=Sprintf(s,"%g",imin)
+    else
+      if lmin<=lmax && (imin<lmin || imax>lmax) then
+        WFmt(WRI_COURNEW,WRI_BOLD|WRI_UL,8); endif
+      k=Sprintf(s,"%g%g",imin,imax)
+    endif
+    WAddtext(s)
+    WFmt(WRI_COURNEW,0,8)
+    Waddspaces(16-k)
+    if diff && imax>imin then
+      if imax-imin>diffmax then
+        WFmt(WRI_COURNEW,WRI_BOLD|WRI_UL,8); endif
+      k=Sprintf(s,"%i",imax-imin)
+    else
+      k=0
+    endif
+    if k>0 WAddtext(s)
+    WFmt(WRI_COURNEW,0,8)
+    Waddspaces(8-k)
+    if lmin<=(-99999) then
+      Sprintf(s,"<%i",lmax); WAddtext(s)
+    else if lmax>=99999 then
+      Sprintf(s,">%i",lmin); WAddtext(s)
+    else if lmin<=lmax then
+      Sprintf(s,"%i%i",lmin,lmax); WAddtext(s)
+    endif
+    i++
+    if cplx==0 then
+      WParagraph(WRI_LEFT)
+      if st[i*NCHAR]=='>' then         // Continuation requested
+        WAddtext(st+i*NCHAR+1)
+        i++
+      endif
+    endif
+    if cplx>0 cplx--
+  enddo
+end
+
+function int Drawhvleak()
+  int i,j,y0,imin,imax,lmin,lmax
+  char s[128]
+  draw mode=M_CENTERED font=MEDIUMFONT
+  draw at IDX/2,y+25 text="Individual HV head leakages"
+  y=y+30
+  draw font=INFOFONT
+  draw at IDX/2,y+12 text="(Always 0 if some critical error detected)"
+  y=y+20
+  y0=y
+  for j=0,j<($LAY.nfing==0?32:$LAY.nfing*2),j++
+    draw mode=M_LEFT font=TIMESFONT
+    draw at IX0,y to IDX-3,y
+    y=y+DY
+    draw at IX0+5,y
+    draw text=format("Leakages of finger %i%c",j/2,(j & 1)==0?'L':'R')
+    draw mode=M_CENTERED
+    lmin=-550; lmax=550
+    imin=fmin[j,32]; imax=fmax[j,32]
+    if imin==imax then
+      if (imin<lmin || imin>lmax) draw color=LIGHTRED
+      draw at IX2,y text=format("%i",imin) color=BLACK
+    else
+      if (imin<lmin || imax>lmax) draw color=LIGHTRED
+      draw at IX2,y text=format("%i...%i",imin,imax) color=BLACK
+      draw at (IX3+IX4)/2,y text=format("%i",imax-imin)
+    endif
+    draw at (IX4+IDX)/2,y text=format("%i...%i",lmin,lmax)
+    y=y+DY
+    imin=fmin[j,33]; imax=fmax[j,33]
+    if imin==imax then
+      if (imin<lmin || imin>lmax) draw color=LIGHTRED
+      draw at IX2,y text=format("%i",imin) color=BLACK
+    else
+      if (imin<lmin || imax>lmax) draw color=LIGHTRED
+      draw at IX2,y text=format("%i...%i",imin,imax) color=BLACK
+      draw at (IX3+IX4)/2,y text=format("%i",imax-imin)
+    endif
+    draw at (IX4+IDX)/2,y text=format("%i...%i",lmin,lmax)
+  enddo
+  draw color=BLACK
+  draw at IX0,y to IDX-3,y
+  draw at IX0,y0 to IX0,y
+  draw at IX1,y0 to IX1,y
+  draw at IX3,y0 to IX3,y
+  draw at IX4,y0 to IX4,y
+  draw at IDX-3,y0 to IDX-3,y
+  y=y+5
+end
+
+function int Wdrawhvleak()
+  int i,j,k,imin,imax,lmin,lmax
+  char s[128]
+  WParagraph(WRI_CENTERED); WFmt(WRI_ARIAL,WRI_BOLD,17)
+  WAddtext(" "); WParagraph(WRI_CENTERED)
+  WAddtext("Individual HV head leakages");
+  WParagraph(WRI_CENTERED); WFmt(WRI_TIMES,WRI_ITALIC,11)
+  WAddtext("(Always 0 if some critical error detected)")
+  WParagraph(WRI_CENTERED); WAddtext(" ")
+  for j=0,j<($LAY.nfing==0?32:$LAY.nfing*2),j++
+    WParagraph(WRI_LEFT); WFmt(WRI_COURNEW,0,8)
+    Sprintf(s,"Leakages of finger %i%c                     ",                  \
+      j/2,(j & 1)==0?'L':'R')
+    WAddtext(s)
+    lmin=-550; lmax=550
+    imin=fmin[j,32]; imax=fmax[j,32]
+    if imin==imax then
+      if (imin<lmin || imin>lmax) then
+        WFmt(WRI_COURNEW,WRI_BOLD|WRI_UL,8); endif
+      k=Sprintf(s,"%i",imin)
+    else
+      if (imin<lmin || imax>lmax) then
+        WFmt(WRI_COURNEW,WRI_BOLD|WRI_UL,8); endif
+      k=Sprintf(s,"%i%i",imin,imax)
+    endif
+    WAddtext(s)
+    WFmt(WRI_COURNEW,0,8)
+    Waddspaces(16-k)
+    if imax>imin then
+      k=Sprintf(s,"%i",imax-imin)
+    else
+      k=0
+    endif
+    while (k<7) do s[k]=' '; k++; enddo
+    s[k]='\0'; WAddtext(s)
+    Sprintf(s,"%i%i",lmin,lmax); WAddtext(s)
+    WParagraph(WRI_LEFT)
+    imin=fmin[j,33]; imax=fmax[j,33]
+    WAddtext("                                          ")
+    if imin==imax then
+      if (imin<lmin || imin>lmax) then
+        WFmt(WRI_COURNEW,WRI_BOLD|WRI_UL,8); endif
+      k=Sprintf(s,"%i",imin)
+    else
+      if (imin<lmin || imax>lmax) then
+        WFmt(WRI_COURNEW,WRI_BOLD|WRI_UL,8); endif
+      k=Sprintf(s,"%i%i",imin,imax)
+    endif
+    WAddtext(s)
+    WFmt(WRI_COURNEW,0,8)
+    Waddspaces(16-k)
+    if imax>imin then
+      k=Sprintf(s,"%i",imax-imin)
+    else
+      k=0
+    endif
+    while (k<7) do s[k]=' '; k++; enddo
+    s[k]='\0'; WAddtext(s)
+    Sprintf(s,"%i%i",lmin,lmax); WAddtext(s)
+    WParagraph(WRI_LEFT)
+    WAddtext(" ")
+  enddo
+end
+
+function int main()
+  handle hmain,hinfo,hmtst,hextmux,hextdat,haconly,hwarmup
+  handle hdelay,hvtst,hrept,htest,hstop,hclear,hprot,hexit
+  int i,j,jmax,k,t,run,err,id,redraw,repeat,tstart,tlastmeas,warmup
+  int p0,p1,p2,p3,p4,p5,p6
+  char buf[320]
+  char protname[256]="SELFTEST.WRI"
+  hmain=control WINDOW
+    window=NULL
+    position=10,10,620,359
+    name=format("测量系统自检 %s",VERSION)
+    help=" "
+    bkcolor=WHITEMAGENTA
+    size=256
+  endc
+  draw window=hmain color=MAGENTA font=INFOFONT
+  draw at IX0+50,17 text="参数"
+  draw at IX1+28,17 text="测量"
+  draw at IX3+21,17 text="偏差"
+  draw at IX4+28,17 text="期望值"
+  draw show
+  p0=1; p1=0; p2=0; p3=0; p4=0; p5=0; p6=0
+  getini("Debug","Electronics self-test","%i,%i,%i,%i,%i,%i,%i",               \
+    &p0,&p1,&p2,&p3,&p4,&p5,&p6)
+  getini("Debug","Electronics protocol",protname)
+  hinfo=control CHILD
+    window=hmain
+    position=6,18,518,336
+    help="自检结果，除非说明其他单位，否则总是以ADC位为单位"
+    mode=M_VSCROLL
+    limits=IDX,340
+    size=131072                        // The amount of data is very large
+  endc
+  hmtst=control CUSTOMBOX
+    window=hmain
+    position=529,15,85,20
+    name="主测试"
+    help="初始化和测试测量卡和多路卡"
+    mode=(p0==0?0:M_CHECKED)
+  endc
+  hextmux=control CUSTOMBOX
+    window=hmain
+    position=538,35,80,20
+    name="全多路复用"
+    help="测试所有多路卡通道"
+    mode=((p0==0 || p2==0)?0:M_CHECKED)
+  endc
+  hextdat=control CUSTOMBOX
+    window=hmain
+    position=538,55,80,20
+    name="外部数据"
+    help="检查收集其他手臂相关数据"
+    mode=((p0==0 || p3==0)?0:M_CHECKED)
+  endc
+  haconly=control CUSTOMBOX
+    window=hmain
+    position=529,79,85,20
+    name="AC测试"
+    help="选中此项仅初始化和测试交流参数"
+    mode=(p5==0 || p0!=0?0:M_CHECKED)
+  endc
+  hwarmup=control CUSTOMBOX
+    window=hmain
+    position=538,99,80,20
+    name="热身"
+    help=format("在%i分钟预热后开始测量",WARMUP)
+    mode=((p5==0 || p6==0)?0:M_CHECKED)
+  endc
+  hvtst=control CUSTOMBOX
+    window=hmain
+    position=529,123,85,20
+    name="高压测试"
+    help="选中可以初始化至250 V并测试高压卡"
+    mode=(p1==0?0:M_CHECKED)
+  endc
+  hdelay=control CUSTOMBOX
+    window=hmain
+    position=529,147,85,20
+    name="延时"
+    help="选中将测试速度降低到每分钟一次"
+    mode=(p4==0?0:M_CHECKED)
+  endc
+  hrept=control BUTTON
+    window=hmain
+    position=529,180,85,24
+    name="重复"
+    help="按下可连续重复自检"
+  endc
+  htest=control BUTTON
+    window=hmain
+    position=529,209,85,24
+    name="单个"
+    help="按下进行单次自检"
+  endc
+  hstop=control BUTTON
+    window=hmain
+    position=529,238,85,24
+    name="停止"
+    help="按下可停止自检"
+  endc
+  disable hstop
+  hclear=control BUTTON
+    window=hmain
+    position=529,273,85,24
+    name="清除"
+    help="按下可清除当前测试结果"
+  endc
+  hprot=control BUTTON
+    window=hmain
+    position=529,302,85,24
+    name="协议"
+    help="按下可将当前测试结果保存到文件"
+  endc
+  disable hprot
+  hexit=control BUTTON
+    window=hmain
+    position=529,331,85,24
+    name="退出"
+    help="关闭此窗口"
+  endc
+  run=0; repeat=0; hvtype=0; mainok=0;
+  hvok=0; nmain=0; nhv=0; extdata=0;
+  tlastmeas=Time();
+  if Status(hmtst)==0 && Status(hvtst)==0 && Status(haconly)==0 then
+    change hmtst mode=M_CHECKED        // Always keep some item selected
+  endif
+  while 1 do
+    if Pressed(hmtst) then
+      if Status(hmtst)==0 then
+        disable hextmux
+        disable hextdat
+        if Status(hvtst)==0 && Status(haconly)==0 then
+          change hvtst mode=M_CHECKED
+        endif
+      else
+        if nmain==0 then
+          enable hextmux
+          enable hextdat
+        endif
+        change haconly mode=0
+        disable hwarmup
+      endif
+      redraw=1
+    else if Pressed(hextmux) then
+      redraw=1
+    else if Pressed(hvtst) then
+      if Status(hvtst)!=0 then
+        change haconly mode=0
+        disable hwarmup
+      else if Status(hmtst)==0 && Status(haconly)==0 then
+        change hmtst mode=M_CHECKED
+        if nmain==0 then
+          enable hextmux
+          enable hextdat
+          disable hwarmup
+        endif
+      endif
+      redraw=1
+    else if Pressed(haconly) then
+      if Status(haconly)!=0 then
+        change hmtst mode=0
+        change hvtst mode=0
+        disable hextmux
+        disable hextdat
+        enable hwarmup
+      else if Status(hmtst)==0 && Status(hvtst)==0 then
+        change hmtst mode=M_CHECKED
+        if nmain==0 then
+          enable hextmux
+          enable hextdat
+          disable hwarmup
+        endif
+      endif
+      redraw=1
+    else if Pressed(hrept) then
+      run=1; amuxerr=0; repeat=1
+      tstart=Time()
+      if Status(hwarmup)!=0 then
+        tstart=tstart+WARMUP*60000
+        hvtype=0; mainok=0; hvok=0; nmain=0; nhv=0
+        redraw=1
+      endif
+      disable hrept
+      disable htest
+      enable hstop
+    else if Pressed(htest) then
+      run=1; amuxerr=0; repeat=0
+      tstart=Time()
+      disable hrept
+      disable htest
+      disable hstop
+    else if Pressed(hstop) then
+      run=0; repeat=0
+      enable hrept
+      enable htest
+      disable hstop
+    else if Pressed(hexit) then
+      break
+    endif
+    warmup=0
+    if run!=0 && (Status(hdelay)==0 || tlastmeas+60000<Time()) then
+      tlastmeas=Time()
+      err=0
+      t=tlastmeas+10000
+      if Status(hmtst)!=0 || Status(haconly)!=0 then
+        disable hextmux
+        disable hextdat
+        disable hwarmup
+        if Status(hextmux)!=0 then
+          buf[0]=S_OUTPORT
+          $uint2(buf+1)=0x2007         // Request extended AMUX test
+          $uint2(buf+3)=1
+          id=SYS.Sendimm(0,5,buf)
+          while $A[0].length==0 do
+            if Time()>t || Pressed(hstop) then
+              SYS.Killsend(id)
+              err=1; break
+            endif
+            wait
+          enddo
+          if $A[0].answer!=S_OUTPORT then
+            change hextmux mode=0      // Extended AMUX test not supported
+          endif
+        endif
+        err=SYS.Softimm(0)
+        while $A[0].length==0 && err==0 do
+          if (Time()>t || Pressed(hstop)) err=1
+          wait
+        enddo
+        if $A[0].rawdata[4]==S_RESET then
+          mainok=mainok|1
+        else
+          err=1
+        endif
+      endif
+      if (repeat!=0 && Status(haconly)!=0 && tstart>Time()) warmup=1
+      if err==0 && Status(hvtst)!=0 then
+        buf[0]=S_HVINIT
+        $uint2(buf+1)=250              // Initialize to 250 V
+        $uint2(buf+3)=1000             // Max capacity 1000 nF
+        $uint2(buf+5)=50               // Accuracy 5%
+        $uint2(buf+7)=150              // Timeout 150 ms
+        id=SYS.Sendimm(0,9,buf)
+        while $A[0].length==0 do
+          if Time()>t || Pressed(hstop) then
+            SYS.Killsend(id)
+            err=1; break
+          endif
+          wait
+        enddo
+        if $A[0].rawdata[4]==S_HVINIT then
+          hvok=hvok|1
+        else
+          err=1
+        endif
+      endif
+      if repeat==0 ||                                                          \
+        (Status(haconly)!=0 && Status(hwarmup)!=0 && nmain>=NTESTS-1) then
+        run=0
+        enable hrept
+        enable htest
+        disable hstop
+      endif
+      if err==0 && warmup==0 then
+        buf[0]=S_DUMP                  // Collect crate data
+        buf[1]=255                     // Request to crate controller
+        buf[2]=0x16                    // Self-test data
+        $long(buf+3)=0                 // Zero (default) length and adr
+        id=SYS.Sendimm(0,7,buf)
+        while $A[0].length==0 do
+          if Time()>t || Pressed(hstop) then
+            SYS.Killsend(id)
+            err=1; break
+          endif
+          wait
+        enddo
+        if $A[0].answer==S_DUMP then
+          mainok=mainok|2; hvok=hvok|2
+        else
+          err=1
+        endif
+        if err==0 then
+          if Status(hmtst)!=0 || Status(haconly)!=0 nmain=nmain+1
+          if Status(hvtst)!=0 nhv=nhv+1
+          for i=0,i<128,i++
+            if nmain<2 && (i<32 || i>=64) then
+              cmin[i]=$int2($A[0]+5+2*i)
+              cmax[i]=$int2($A[0]+5+2*i)
+            else if nhv<2 && i>=32 && i<64 then
+              cmin[i]=$int2($A[0]+5+2*i)
+              cmax[i]=$int2($A[0]+5+2*i)
+            else
+              cmin[i]=Min(cmin[i],$int2($A[0]+5+2*i))
+              cmax[i]=Max(cmax[i],$int2($A[0]+5+2*i))
+            endif
+          enddo
+          if $uint2($A[0]+69)!=0 hvtype=$uint2($A[0]+69)
+        endif
+        if $LAY.nfing==0 then
+          jmax=32
+        else
+          jmax=$LAY.nfing*2
+          if Status(hextmux)!=0 jmax=Max(jmax,16)
+        endif
+        if amuxerr!=0 change hextmux mode=0
+        for j=0,j<jmax,j++
+          buf[0]=S_DUMP                // Collect individual head data
+          buf[1]=j/2                   // Request to head controller
+          buf[2]=0x08+(j & 1)          // Self-test data
+          $long(buf+3)=0               // Zero (default) length and adr
+          id=SYS.Sendimm(0,7,buf)
+          while $A[0].length==0 do
+            if Time()>t || Pressed(hstop) then
+              SYS.Killsend(id)
+              err=1; break
+            endif
+            wait
+          enddo
+          if err==0 && $A[0].answer==S_ERROR then
+            change hextmux mode=0
+          else if err==0 && $A[0].answer==S_DUMP then
+            for i=0,i<64,i++
+              k=$int2($A[0]+5+2*i)
+              if j<$LAY.nfing*2 || (i>=3 && i<=10) then
+                if nmain<2 && (i<32 || i>=34) then
+                  fmin[j,i]=k; fmax[j,i]=k
+                else if nhv<2 && i>=32 && i<34 then
+                  fmin[j,i]=k; fmax[j,i]=k
+                else
+                  fmin[j,i]=Min(fmin[j,i],k)
+                  fmax[j,i]=Max(fmax[j,i],k)
+                endif
+                if nmain<2 && j==0 then
+                  cmin[i+128]=k; cmax[i+128]=k
+                else
+                  cmin[i+128]=Min(cmin[i+128],k)
+                  cmax[i+128]=Max(cmax[i+128],k)
+                endif
+              endif
+            enddo
+          else
+            break
+          endif
+        enddo
+      endif
+      if err==0 then
+        redraw=1
+      else
+        run=0; repeat=0
+        enable hrept
+        enable htest
+        disable hstop
+      endif
+    endif
+    if Pressed(hclear) then
+      hvtype=0; mainok=0; hvok=0; nmain=0; nhv=0
+      redraw=1
+      if Status(haconly)==0 then
+        enable hextmux
+        enable hextdat
+        disable hwarmup
+      else
+        disable hextmux
+        disable hextdat
+        enable hwarmup
+      endif
+    endif
+    if redraw!=0 && warmup!=0 then
+      clear hinfo
+      change hinfo mode=0
+      change hinfo limits=0,0
+      draw window=hinfo color=BLACK mode=M_CENTERED
+      draw at IDX/2,100 font=HUGEFONT text="Warm-up"
+      draw at IDX/2,150 font=MEDIUMFONT
+      t=(tstart-Time())/1000
+      draw text=format("Please wait for another %i seconds",t)
+      draw show
+      redraw=0
+    else if redraw!=0 then
+      k=0; y=10
+      clear hinfo
+      draw window=hinfo
+      extdata=Status(hextdat)
+      if (nmain>0 && Status(hmtst)!=0 && mainok==3) then
+        Drawdata(-1,cratedata)
+        for j=0,j<($LAY.nfing==0?32:$LAY.nfing*2),j++
+          Drawdata(j,headdata)
+        enddo
+        if Status(hextmux)!=0 then
+          for j=j,j<16,j++
+            Drawdata(j,amuxdata)
+          enddo
+        endif
+        k=1
+      else if (nmain>0 && Status(haconly)!=0 && mainok==3) then
+        Drawdata(-1,crateac)
+        for j=0,j<($LAY.nfing==0?32:$LAY.nfing*2),j++
+          Drawdata(j,headac)
+        enddo
+        k=1
+      endif
+      if (nhv>0 && Status(hvtst)!=0 && hvok==3) then
+        Drawdata(-1,hvdata)
+        if hvtype==500 Drawhvleak()
+        k=1
+      endif
+      if k==0 then
+        disable hprot
+      else
+        enable hprot
+      endif
+      change hinfo limits=IDX,y
+      change hinfo mode=M_VSCROLL
+      draw show
+      redraw=0
+    endif
+    if Pressed(hprot) then             // Protocol requested
+      i=SYS.Browse(hmain,protname,"Select file for self-test protocol",0)
+      if i==1 && protname[0]!='\0' then
+        extdata=Status(hextdat)
+        if WOpen(protname)==0 then
+          Strtime(buf,"%a %d-%b-%Y %H:%M",0,0)
+          WParagraph(WRI_CENTERED|WRI_HEADER|WRI_NOFIRST)
+          WFmt(WRI_ARIAL,WRI_ITALIC,8)
+          WAddtext("Self-test of measurement system - "); WAddtext(buf)
+          WAddtext(" - Page "); WAddpagenumber()
+          WParagraph(WRI_CENTERED|WRI_HEADER|WRI_NOFIRST)
+          WAddtext(" ")
+          WParagraph(WRI_CENTERED)
+          WFmt(WRI_ARIAL,WRI_BOLD,22)
+          WAddtext("Self-test of measurement system")
+          WParagraph(WRI_CENTERED)
+          WFmt(WRI_ARIAL,0,12)
+          WAddtext("Printed on ")
+          WAddtext(buf)
+          WParagraph(WRI_CENTERED)
+          WAddtext("File name ")
+          WAddtext(protname)
+          WParagraph(WRI_CENTERED)
+          if (nmain>0 && Status(hmtst)!=0 && mainok==3) then
+            Wdrawdata(-1,cratedata)
+            for j=0,j<($LAY.nfing==0?32:$LAY.nfing*2),j++
+              Wdrawdata(j,headdata)
+            enddo
+            if Status(hextmux)!=0 then
+              for j=j,j<16,j++
+                Wdrawdata(j,amuxdata)
+              enddo
+            endif
+          else if (nmain>0 && Status(haconly)!=0 && mainok==3) then
+            Wdrawdata(-1,crateac)
+            for j=0,j<($LAY.nfing==0?32:$LAY.nfing*2),j++
+              Wdrawdata(j,headac)
+            enddo
+          endif
+          if (nhv>0 && Status(hvtst)!=0 && hvok==3) then
+            Wdrawdata(-1,hvdata)
+            if hvtype==500 Wdrawhvleak()
+          endif
+          WParagraph(WRI_CENTERED)
+          WClose()
+          sprintf(buf,"write %s",protname)
+          SYS.Winexec(buf)             // Start viewer immediately
+        endif
+      endif
+    endif
+    wait
+  enddo
+  setini("Debug","Electronics self-test","%i,%i,%i,%i,%i,%i,%i",               \
+    Status(hmtst),Status(hvtst),Status(hextmux),Status(hextdat),               \
+    Status(hdelay),Status(haconly),Status(hwarmup))
+  setini("Debug","Electronics protocol",protname)
+  destroy hmain
+end
+

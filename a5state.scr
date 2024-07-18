@@ -1,0 +1,1546 @@
+#define VERSION        ""
+#define DESCRIPTION    "A5/A6 state and statistics"
+
+// 1.01: Support for movement queues.
+// 1.02: Check of data conversion by measurement card.
+// 1.03: Unused bits in GAL version masked.
+// 1.04: Post-mortem dump.
+// 1.05: No contact statistics.
+// 1.06: Head camera model.
+// 1.07: Reading of PHY registers.
+// 1.08: Support for A7/A8 controllers.
+// 1.09: Extended Firewire camera information.
+// 1.10: Small bugfixes.
+// 1.11: Total movement times.
+// 1.12: Bug in dump of post-mortem command.
+// 1.13: Statistics of measurement commands.
+// 1.14: Phy layer register page 0.
+// 1.15: Number of X-Y movements and contactings.
+// 1.16: Mean duration of Kelvin measurements.
+
+#include "ls.icl"                  // Standard functions
+#include "or.icl"                // A2 command names
+#cmdbuff 35
+#zeroid                                // Process answers with zero command ID
+
+#define DX             701             // Size of client area of main window
+#define DY             480             //
+#define X0             5               // Position of info window
+#define Y0             5               //
+#define QY             240             // Height of qmove window
+#define IX             505             // Dimensions of info window
+#define IY             470             //
+#define X1             515             // Position of controls
+#define Y1             5               //
+#define NTASK          1024            // Max number of tasks
+#define NFLASH         9               // Number of flash parameters
+#define NACCEL         12              // Number of acceleration parameters
+
+handle           hmain                 // Main window
+handle           hlist                 // Information
+handle           hqmove                // Number of movements per head
+
+handle           hversion              // Get version
+handle           hqueues               // Get queues
+handle           hvars                 // Get variables
+handle           hparms                // Get parameters
+handle           hstat                 // Get statistics
+handle           hdelay                // Get delay tables
+handle           hextended             // Extended info, where applies
+handle           hoverwrite            // Overwrite gathered data
+handle           hreset                // Reset statistics
+handle           htestmeas             // Test data conversion
+
+handle           hpmdump[4]            // Get post-mortem dump
+handle           hpmdhex               // Whether to dump commands and answers
+
+handle           hcrate                // Crate
+handle           hhead[32]             // Heads and video cameras
+handle           hmeas                 // Measurement card
+handle           hall                  // Get everything
+handle           hphyreg               // Get registers of PHY ports
+
+handle           hnomoves              // Don't show number of movements
+handle           hshowmoves            // Show number of movements per head
+handle           hshowqmove            // Show number of movements in queue
+handle           hlog                  // Open log file
+handle           hstoplog              // Close log file
+handle           hexit                 // Exit button
+
+handle           log                   // Log file
+
+#define K_TASKMASK     0xFF000000      // Mask to extract task
+#define   K_MAINTITLE  0x01000000      // No command, just draw title
+#define   K_MAINVERS   0x10000000      // Version of embedded software
+#define   K_FEATURES   0x11000000      // Features of Crate controller
+#define   K_CRATEQUEUE 0x12000000      // Queues of crate controller
+#define   K_CRATEVARS  0x13000000      // Variables of crate controller
+#define   K_ACCEL      0x14000000      // Acceleration parameters
+#define   K_CSTAT1     0x15000000      // Statistics from crate, page 1
+#define   K_DELAYS     0x16000000      // Head delay tables
+#define   K_HEADVERS   0x20000000      // Versions of head controller hardware
+#define   K_HEADVARS   0x21000000      // Variables of head controller
+#define   K_FLASHPARMS 0x22000000      // Individual parameters from flash
+#define   K_HEADSTAT   0x23000000      // General head statistics
+#define   K_XYSTAT     0x24000000      // X-Y movement statistics
+#define   K_ZSTAT      0x26000000      // Z movement statistics
+#define   K_TIMES      0x27000000      // Total movement time
+#define   K_CONTSTAT   0x28000000      // No contact statistics
+#define   K_MEASSTAT   0x29000000      // Measurements statistics
+#define   K_KELVSTAT   0x2A000000      // Duration of precise Kelvin
+#define   K_DATACONV   0x30000000      // Data conversion
+#define   K_PHYREG     0x40000000      // Registers of PHY ports
+
+#define K_HEADMASK     0x000000FF      // Mask to extract info source
+#define   K_CRATE      0x000000FF      // Crate controller
+#define   K_PHY        0x000000FE      // PHY registers
+#define   K_MEAS       0x00000080      // Measurement card
+
+#define STEP_IDLE      0               // No pending command
+#define STEP_WAITA     1               // Wait for answers
+#define STEP_LISTA     2               // List answers
+
+#define L_TEXT         0               // Plain text
+#define L_TITLE        1               // Title
+#define L_MAIN         2               // Main title
+#define L_ERR          3               // Error message
+#define L_COMMAND      4               // Command
+#define L_ANSWER       5               // Answer
+#define L_DUMP         6               // Dump of command or answer
+
+#define NODE_UNKNOWN   0x00            // Unknown node type
+#define NODE_CRATE     0x01            // Crate controller
+#define NODE_HEAD      0x02            // Head controller or measurement card
+#define NODE_CAMERA    0x03            // Firewire camera
+#define NODE_REPEATER  0x04            // Repeater
+
+#define CF_PRESSFACT   0x00000001      // Support for psensfact
+#define CF_RETEST      0x00000002      // Instant retest (M_LIMITHI, M_LIMITLO)
+#define CF_CAMINFO     0x00000004      // Support for S_DEBUG:0x48
+
+#define CAM_ALLIED     0x00000A47      // Allied Vision (Marlin/Guppy)
+#define CAM_SONYXCD    0x00000046      // Sony (XCD), high word is zeroed
+#define CAM_POINTGREY  0x0000B09D      // Point Grey Research (Flea)
+#define CAM_BAUMER     0x000006BE      // Baumer Electronic (distributor?)
+
+int              task[NTASK]           // Microcommands
+int              ntask                 // Number of microcommands
+int              taskrunning           // Whether task is running
+int              currtask              // Index of executed task
+int              currstep              // Step in execution of current task
+int              tstep                 // Time when step was started
+int              listdumps             // Add dumps to list
+int              qmovetime             // Time of last qmove request
+int              qmovemax[32]          // Maximal registered number of commands
+int              nmovemax[32]          // Maximal number of commands in second
+int              features              // Features of Crate controller, CF_xxx
+
+char             fdata[NFLASH,32] = { \// Flash parameters
+  "00 Proportional X",                \
+  "01 Integral X",                    \
+  "02 Velocity X",                    \
+  "08 Proportional Y",                \
+  "09 Integral Y",                    \
+  "10 Velocity Y",                    \
+  "16*Proportional Z",                \
+  "17*Integral Z",                    \
+  "18*Velocity Z" }
+char             accel[NACCEL,32] = { \// Acceleration parameters
+  "00aHead X acceleration",           \
+  "01vHead X velocity",               \
+  "02bHead X vibrations",             \
+  "04aHead Y acceleration",           \
+  "05vHead Y velocity",               \
+  "06bHead Y vibrations",             \
+  "08aCamera X acceleration",         \
+  "09vCamera X velocity",             \
+  "10bCamera X vibrations",           \
+  "12aCamera Y acceleration",         \
+  "13vCamera Y velocity",             \
+  "14bCamera Y vibrations" }
+
+external int SERV.Decodecommand(char *command,char *s,int mask);
+external int SERV.Decodeanswer(char *answer,char *text,char *extra,int mask);
+
+// Adds string to list and, if RTF file is open, to RTF.
+function int List(int type,char *name,format s)
+  switch type
+  case L_TEXT:
+    change hlist color=BLACK
+  case L_TITLE:
+    add hlist text=""
+    if log!=NULL fprintf(log,"\n")
+    change hlist color=GREEN
+  case L_MAIN:
+    add hlist text=""
+    if log!=NULL then
+      fprintf(log,"\n---------------------------------------------")
+      fprintf(log,"--------------\n")
+    endif
+    change hlist color=BLACK
+  case L_ERR:
+    change hlist color=LIGHTRED
+  case L_COMMAND:
+    change hlist color=BLACK
+  case L_ANSWER:
+    change hlist color=GREEN
+  case L_DUMP:
+    change hlist color=DARKGRAY
+  default:
+    change hlist color=BLACK
+  endsw
+  if type==L_MAIN then
+    change hlist bkcolor=WHITEGREEN
+    add hlist text=format("---------------------- %s",s)
+    if log!=NULL fprintf(log,"   %s\n",s)
+    change hlist bkcolor=WHITE
+  else if name[0]!='\0' then
+    add hlist text=format(" %-22s %s",name,s)
+    if log!=NULL fprintf(log," %-22s %s\n",name,s)
+  else
+    add hlist text=s
+    if log!=NULL fprintf(log,"%s\n",s)
+  endif
+end
+
+// Decodes and adds to list/RTF error reported in specified command buffer.
+function int Listerror(int index)
+  char text[256],extra[4096]
+  SERV.Decodeanswer($A[index],text,extra,0x7FFFFFFF)
+  List(L_ERR,"Error:","%s",text)
+end
+
+// Interrupt function that processes answers sent by tester.
+function int Answerproc(char *answer,int info)
+  int i
+  char text[256],extra[4096]
+  if listdumps && answer[4]==S_SYSTEM && answer[5]==127 then
+    SERV.Decodeanswer(answer,text,extra,0x7FFFFFFF)
+    if Memicmp(text,"Dump: ",6)==0 then
+      i=5
+    else
+      i=0
+    endif
+    if text[i]!='\0' && text[i+1]!='\0' &&                                     \
+      (i>=240 || Memcmp(text+i," -----------",12)!=0) then
+      List(L_TEXT,"","%s",text+i)
+    endif
+  endif
+end
+
+// Adds next task to task queue.
+function int Addtask(int command)
+  if ntask>=NTASK return
+  task[ntask]=command
+  ntask++
+end
+
+// Starts execution of task queue.
+function int Starttask()
+  int i
+  if Status(hoverwrite) then
+    clear hlist
+  else
+    add hlist text=""
+    change hlist bkcolor=PINK
+    add hlist text=""
+    change hlist bkcolor=WHITE
+  endif
+  // Disable all controls.
+  disable hversion
+  disable hqueues
+  disable hvars
+  disable hparms
+  disable hstat
+  disable hdelay
+  disable hextended
+  disable hreset
+  disable htestmeas
+  disable hcrate
+  for i=0,i<32,i++ do disable hhead[i]; enddo
+  disable hmeas
+  disable hall
+  disable hphyreg
+  // Start execution.
+  currtask=0
+  currstep=STEP_IDLE
+  taskrunning=1
+end
+
+// Stops execution of task queue.
+function int Finishtask()
+  int i
+  // Stop execution.
+  ntask=0
+  currtask=0
+  currstep=STEP_IDLE
+  taskrunning=0
+  // Enable all controls.
+  enable hversion
+  enable hqueues
+    enable hvars
+  enable hparms
+  enable hstat
+  enable hdelay
+  enable hextended
+  enable hreset
+  enable htestmeas
+  enable hcrate
+  for i=0,i<32,i++ do enable hhead[i]; enddo
+  enable hmeas
+  enable hall
+  enable hphyreg
+end
+
+// Call this function periodically to execute listed tasks.
+function int Step()
+  int i,j,n,head
+  char s[256],buf[256]
+  if taskrunning==0 return             // No task to execute
+  if currtask>=ntask then              // All tasks are finished
+    Finishtask()
+    return
+  endif
+  head=task[currtask] & K_HEADMASK
+  if currstep==STEP_IDLE then
+    // Send command(s).
+    listdumps=0
+    for i=0,i<32,i++ do
+      $A[i].length=1                   // Mark all command buffers as unuswed
+    enddo
+    switch (task[currtask] & K_TASKMASK)
+    case K_MAINTITLE:                  // No command, just draw title
+      if head==0xFF then
+        List(L_MAIN,"","C R A T E   C O N T R O L L E R")
+      else if head==0xFE then
+        List(L_MAIN,"","P H Y S I C A L   L A Y E R   R E G I S T E R S")
+      else if head==0x80 then
+        List(L_MAIN,"","M E A S U R E M E N T   C A R D")
+      else if head>=$LAY.nfing*2 then
+        List(L_MAIN,"","%s  C A M E R A",                                      \
+        head==$LAY.nfing*2?"T O P ":"B O T T O M ")
+      else
+        List(L_MAIN,"","H E A D   %i %c",head/2,head & 1?'R':'L')
+      endif
+      currtask++                       // Task finished
+      return
+    case K_MAINVERS:                   // Get software version
+      List(L_TITLE,"","Loaded software:")
+      buf[0]=S_DUMP
+      buf[1]=255                       // Crate
+      buf[2]=0x14                      // Software version
+      $int4(buf+3)=0
+      SYS.Sendimm(0,7,buf)
+    case K_FEATURES:                   // Features of Crate controller
+      buf[0]=S_INPORT32
+      buf[1]=0xFF                      // Crate
+      $int4(buf+2)=0x10000012          // Features register
+      SYS.Sendimm(0,6,buf)
+    case K_CRATEQUEUE:
+      List(L_TITLE,"","Internal movement queues of Crate Controller:")
+      buf[0]=S_DEBUG
+      buf[1]=0x0D                      // Dump status
+      buf[2]=0                         // Movement queues
+      buf[3]=0xFF                      // Crate
+      $int2(buf+4)=Status(hextended)
+      SYS.Sendimm(0,6,buf)
+      listdumps=1
+    case K_CRATEVARS:                  // Variables of crate controller
+      List(L_TITLE,"","Internal variables of Crate Controller:")
+      buf[0]=S_DEBUG
+      buf[1]=0x0D                      // Dump status
+      buf[2]=1                         // Internal variables
+      buf[3]=0xFF
+      $int2(buf+4)=64                  // Limit dump to max. 64-word arrays
+      SYS.Sendimm(0,6,buf)
+      listdumps=1
+    case K_ACCEL:                      // Acceleration parameters
+      List(L_TITLE,"","Velocities and accelerations:")
+      buf[0]=S_DEBUG
+      buf[1]=0x23                      // Accelerations
+      SYS.Sendimm(0,2,buf)
+    case K_CSTAT1:                     // Statistics from crate, page 1
+      List(L_TITLE,"","Crate timing:")
+      buf[0]=S_DEBUG
+      buf[1]=0x2F                      // Statistical data
+      buf[2]=0xFF                      // Crate controller
+      buf[3]=0                         // Don't reset statistics
+      $int2(buf+4)=1                   // Page
+      $int4(buf+6)=0
+      SYS.Sendimm(0,10,buf)
+    case K_DELAYS:                     // Head delay tables
+      List(L_TITLE,"","Head delay tables:")
+      buf[0]=S_DEBUG
+      buf[1]=0x0D                      // Dump status
+      buf[2]=2                         // Acceleration tables
+      buf[3]=0xFF                      // Crate
+      $int2(buf+4)=Status(hextended)
+      SYS.Sendimm(0,6,buf)
+      listdumps=1
+    case K_HEADVERS:                   // Versions of head controller hardware
+      if head==0x80 then
+        List(L_TITLE,"","Version information of measurement card:")
+      else if head>=$LAY.nfing*2 then
+        List(L_TITLE,"","Version information of %s camera:",                   \
+        head==$LAY.nfing*2?"top":"bottom")
+      else
+        List(L_TITLE,"","Version information of head %i%c:",head/2,            \
+        head & 1?'R':'L')
+      endif
+      buf[0]=S_DEBUG
+      buf[1]=0x2E                      // Version information
+      buf[2]=head
+      SYS.Sendimm(0,3,buf)
+      if (features & CF_CAMINFO)!=0 && head<$LAY.nfing*2 then
+        buf[0]=S_DEBUG
+        buf[1]=0x48                    // Firewire camera information
+        buf[2]=head|0x40
+        $int4(buf+3)=0
+        $int4(buf+7)=0
+        SYS.Sendimm(1,11,buf)
+      endif
+    case K_HEADVARS:                   // Variables of head controller
+      if head==0x80 then
+        List(L_TITLE,"","Internal variables of measurement card:")
+      else if head>=$LAY.nfing*2 then
+        List(L_TITLE,"","Internal variables of %s camera:",                    \
+        head==$LAY.nfing*2?"top":"bottom")
+      else
+        List(L_TITLE,"","Internal variables of head %i%c:",head/2,             \
+        head & 1?'R':'L')
+      endif
+      buf[0]=S_DEBUG
+      buf[1]=0x0D                      // Dump status
+      buf[2]=1                         // Internal variables
+      buf[3]=head
+      $int2(buf+4)=64                  // Limit dump to max. 64-word arrays
+      SYS.Sendimm(0,6,buf)
+      listdumps=1
+    case K_FLASHPARMS:                 // Individual parameters from flash
+      if head>=$LAY.nfing*2 then
+        List(L_TITLE,"","Individual parameters of %s camera:",                 \
+        head==$LAY.nfing*2?"top":"bottom")
+      else
+        List(L_TITLE,"","Individual parameters of head %i%c:",head/2,          \
+        head & 1?'R':'L')
+      endif
+      for i=0,i<NFLASH,i++ do
+        if head>=$LAY.nfing*2 && fdata[i,2]=='*' continue
+        buf[0]=S_DEBUG
+        buf[1]=0x25                    // Get individual parameter
+        buf[2]=head
+        $int2(buf+3)=(fdata[i,0]-'0')*10+fdata[i,1]-'0'
+        SYS.Sendimm(i,5,buf)
+      enddo
+    case K_HEADSTAT:                   // General head statistics
+      List(L_TITLE,"","General statistics for head %i%c:",head/2,              \
+        head & 1?'R':'L')
+      buf[0]=S_DEBUG
+      buf[1]=0x2F                      // Statistical data
+      buf[2]=head                      // Crate controller
+      buf[3]=0                         // Don't reset statistics
+      $int2(buf+4)=0x21                // Page
+      $int4(buf+6)=0
+      SYS.Sendimm(0,10,buf)
+    case K_XYSTAT:                     // X-Y movement statistics
+      List(L_TITLE,"","Statistics of X-Y movements for head %i%c:",head/2,     \
+        head & 1?'R':'L')
+      buf[0]=S_DEBUG
+      buf[1]=0x2F                      // Statistical data
+      buf[2]=head                      // Crate controller
+      buf[3]=0                         // Don't reset statistics
+      $int2(buf+4)=0x22                // Page
+      $int4(buf+6)=0
+      SYS.Sendimm(0,10,buf)
+      $int2(buf+4)=0x23                // Page
+      SYS.Sendimm(1,10,buf)
+    case K_ZSTAT:                      // Z movement statistics
+      List(L_TITLE,"","Statistics of Z movements for head %i%c:",head/2,       \
+        head & 1?'R':'L')
+      buf[0]=S_DEBUG
+      buf[1]=0x2F                      // Statistical data
+      buf[2]=head                      // Crate controller
+      buf[3]=0                         // Don't reset statistics
+      $int2(buf+4)=0x24                // Page
+      $int4(buf+6)=0
+      SYS.Sendimm(0,10,buf)
+    case K_TIMES:                      // Total movement time
+      List(L_TITLE,"","Accumulated movement time for head %i%c:",head/2,       \
+        head & 1?'R':'L')
+      buf[0]=S_DEBUG
+      buf[1]=0x2F                      // Statistical data
+      buf[2]=head                      // Crate controller
+      buf[3]=0                         // Don't reset statistics
+      $int2(buf+4)=0x27                // Page
+      $int4(buf+6)=0
+      SYS.Sendimm(0,10,buf)
+    case K_CONTSTAT:                   // No contact statistics
+      List(L_TITLE,"","Statistics of no contacts and high-resistance contacts")
+      buf[0]=S_DEBUG
+      buf[1]=0x2F                      // Statistical data
+      buf[2]=head                      // Measurement card
+      buf[3]=0                         // Don't reset statistics
+      $int2(buf+4)=0x30                // Page
+      $int4(buf+6)=0
+      SYS.Sendimm(0,10,buf)
+      $int2(buf+4)=0x31                // Page
+      SYS.Sendimm(1,10,buf)
+    case K_MEASSTAT:                   // Measurements statistics
+      List(L_TITLE,"","Statistics of measurements")
+      buf[0]=S_DEBUG
+      buf[1]=0x2F                      // Statistical data
+      buf[2]=head                      // Measurement card
+      buf[3]=0                         // Don't reset statistics
+      $int2(buf+4)=0x32                // Page
+      $int4(buf+6)=0
+      SYS.Sendimm(0,10,buf)
+    case K_KELVSTAT:                   // Duration of precise Kelvin
+      List(L_TITLE,"","Duration of precise Kelvin measurements")
+      buf[0]=S_DEBUG
+      buf[1]=0x2F                      // Statistical data
+      buf[2]=head                      // Measurement card
+      buf[3]=0                         // Don't reset statistics
+      $int2(buf+4)=0x33                // Page
+      $int4(buf+6)=0
+      SYS.Sendimm(0,10,buf)
+    case K_DATACONV:                   // Data conversion
+      List(L_TITLE,"","Data conversion test for measurement card:")
+      buf[0]=S_DEBUG
+      buf[1]=0x30                      // Data conversion
+      $int4(buf+02)=0x7A18FF40         // Conversion data
+      $int4(buf+06)=0x7C53C5F6
+      $int4(buf+10)=0x13DD9365
+      $int4(buf+14)=0xA54BEED1
+      $int4(buf+18)=0x7DCF250B
+      $int4(buf+22)=0xDFA70C7D
+      $int4(buf+26)=0xF632A7CC
+      $int4(buf+30)=0xA34108B8
+      $int4(buf+34)=0xF99146C6
+      $int4(buf+38)=0x443E4866
+      $int4(buf+42)=0x03CBB96F
+      $int4(buf+46)=0x8E5693B6
+      $int4(buf+50)=0x967DB4D8
+      $int4(buf+54)=0x84CBDAA2
+      $int4(buf+58)=0x68297629
+      $int4(buf+62)=0x95ABB155
+      $int4(buf+66)=0x73AF745A
+      SYS.Sendimm(0,38,buf)
+      SYS.Sendimm(1,70,buf)
+    case K_PHYREG:                     // Registers of PHY ports
+      buf[0]=S_DEBUG
+      buf[1]=0x43
+      buf[2]=head
+      buf[3]=0xFF
+      buf[4]=0
+      buf[5]=0
+      SYS.Sendimm(0,6,buf)
+      buf[3]=0
+      SYS.Sendimm(1,6,buf)
+      buf[3]=1
+      SYS.Sendimm(2,6,buf)
+    default:
+      currtask++                       // Unknown task, skip
+      return
+    endsw
+    currstep=STEP_WAITA
+    tstep=Time()
+  else if currstep==STEP_WAITA then
+    // Wait till all answer(s) come.
+    for i=0,i<32,i++ do
+      if $A[i].length==0 break
+    enddo
+    if i>=32 then                      // All answers are back
+      currstep=STEP_LISTA
+    else if Time()-tstep>2000 then     // Timeout 2 seconds
+      List(L_ERR,"","Timeout while waiting for answer from tester")
+      Finishtask()
+    endif
+  else if currstep==STEP_LISTA then
+    // Process answer(s). Default action is to ignore answer, if not error.
+    switch (task[currtask] & K_TASKMASK)
+    case K_MAINVERS:                   // Software version
+      if $A[0].answer!=S_DUMP then
+        Listerror(0)
+      else
+        j=5
+        for i=j,i<$A[0].length,i++
+          if $A[0].rawdata[i]==0x0A then
+            $A[0].rawdata[i]='\0'; i++
+            break
+          endif
+        enddo
+        List(L_TEXT,"内核控制器","%s",$A[0]+j)
+        j=i
+        for i=j,i<$A[0].length,i++
+          if $A[0].rawdata[i]==0x0A then
+            $A[0].rawdata[i]='\0'; i++
+            break
+          endif
+        enddo
+        List(L_TEXT,"布局","%s",$A[0]+j)
+        j=i
+        for i=j,i<$A[0].length,i++
+          if $A[0].rawdata[i]==0x0A then
+            $A[0].rawdata[i]='\0'; i++
+            break
+          endif
+        enddo
+        List(L_TEXT,"测试头控制器","%s",$A[0]+j)
+      endif
+    case K_FEATURES:                   // Features of Crate controller
+      if $A[0].answer!=S_INPORT32 then
+        features=0
+      else
+        features=$int4($A[0]+5)
+      endif
+    case K_ACCEL:                      // Acceleration parameters
+      if $A[0].answer!=S_DEBUG then
+        Listerror(0)
+      else
+        for i=0,i<NACCEL,i++ do
+          List(L_TEXT,accel[i]+3,"%8.3f %s",                                   \
+          $float4($A[0]+5+4*((accel[i,0]-'0')*10+accel[i,1]-'0')),             \
+          (accel[i,2]=='a'?"m/s2":(accel[i,2]=='v'?"m/s":"ms")))
+        enddo
+      endif
+    case K_CSTAT1:                     // Statistics from crate, page 1
+      if $A[0].answer!=S_DEBUG then
+        Listerror(0)
+      else
+        List(L_TEXT,"Time since start","%id %ih %im %is",                      \
+          $uint4($A[0]+5)/86400,($uint4($A[0]+5+4*0)/3600)%24,                 \
+          ($uint4($A[0]+5)/60)%60,$uint4($A[0]+5+4*0)%60)
+        List(L_TEXT,"t(RT driver)","mean=%4i, max=%6i us",                     \
+          $uint4($A[0]+5+4*2),$uint4($A[0]+5+4*3))
+        List(L_TEXT,"t(main loop)","mean=%4i, max=%6i us",                     \
+          $uint4($A[0]+5+4*4),$uint4($A[0]+5+4*5))
+        List(L_TEXT,"t(Processnextcmd)","mean=%4i, max=%6i us",                \
+          $uint4($A[0]+5+4*6),$uint4($A[0]+5+4*7))
+        List(L_TEXT,"t(Response)","mean=%4i, max=%6i us",                      \
+          $uint4($A[0]+5+4*8),$uint4($A[0]+5+4*9))
+        List(L_TEXT,"t(Movementproc)","mean=%4i, max=%6i us",                  \
+          $uint4($A[0]+5+4*10),$uint4($A[0]+5+4*11))
+        List(L_TEXT,"t(Zprocessor)","mean=%4i, max=%6i us",                    \
+          $uint4($A[0]+5+4*12),$uint4($A[0]+5+4*13))
+        List(L_TEXT,"t(Measurementproc)","mean=%4i, max=%6i us",               \
+          $uint4($A[0]+5+4*14),$uint4($A[0]+5+4*15))
+        List(L_TEXT,"t(Checkserial)","mean=%4i, max=%6i us",                   \
+          $uint4($A[0]+5+4*16),$uint4($A[0]+5+4*17))
+        List(L_TEXT,"t(Checkhardware)","mean=%4i, max=%6i us",                 \
+          $uint4($A[0]+5+4*18),$uint4($A[0]+5+4*19))
+        List(L_TEXT,"t(Checkio)","mean=%4i, max=%6i us",                       \
+          $uint4($A[0]+5+4*20),$uint4($A[0]+5+4*21))
+        ;
+      endif
+    case K_HEADVERS:                   // Versions of head controller hardware
+      if $A[0].answer!=S_DEBUG then
+        Listerror(0)
+      else
+        if ($uint2($A[0]+5) & 0xF800)==0x3800 then
+          List(L_TEXT,"GAL version","A7 vers. %i",($uint2($A[0]+5) & 0x07F0)>>4)
+        else if $uint2($A[0]+5)>0x50 then
+          List(L_TEXT,"GAL version","%i",($uint2($A[0]+5) & 0x07F8)>>3)
+        else                           // Older GAL, without encoder error bits
+          List(L_TEXT,"GAL version","%i",($uint2($A[0]+5) & 0x07FE)>>1)
+        endif
+        n=sprintf(s,"%02X-%02X-%02X-%02X",                                     \
+          $uint1($A[0]+12),$uint1($A[0]+11),$uint1($A[0]+10),$uint1($A[0]+9))
+        if $uint4($A[0]+9)==0x30313042 then
+          sprintf(s+n," (TSB12LV01A)")
+        else if $uint4($A[0]+9)==0x30313043 then
+          sprintf(s+n," (TSB12LV01B)")
+        endif
+        List(L_TEXT,"Link Layer","%s",s)
+        if ($uint3($A[0]+13) & 0x00FFFFFF)==0x00080028 then
+          n=sprintf(s,"%s","TI")
+        else
+          n=sprintf(s,"Vendor %02X-%02X-%02X",                                 \
+          $uint1($A[0]+15),$uint1($A[0]+14),$uint1($A[0]+13))
+        endif
+        n=n+sprintf(s+n,", product %02X-%02X-%02X",                            \
+          $uint1($A[0]+19),$uint1($A[0]+18),$uint1($A[0]+17))
+        if ($uint3($A[0]+13) & 0x00FFFFFF)==0x00080028 then
+          if ($uint3($A[0]+17) & 0x00FFFFFF)==0x0046318A then
+            sprintf(s+n," (TSB41LV03A)")
+          else if ($uint3($A[0]+17) & 0x00FFFFFF)==0x00434195 then
+            sprintf(s+n," (TSB41AB3)")
+          endif
+        endif
+        List(L_TEXT,"Physical Layer","%s",s)
+        if (features & CF_CAMINFO)!=0 && $A[1].answer==S_DEBUG &&              \
+          ($int2($A[1]+5) & 0x0001)!=0 then
+          List(L_TEXT,"Head camera model","%s",$A[1]+16)
+          n=sprintf(s,"%02X",$uint2($A[1]+10))
+          if $uint2($A[1]+10)==CAM_ALLIED then
+            Strcpy(s+n," (Allied Vision)")
+          else if $uint2($A[1]+10)==CAM_SONYXCD then
+            Strcpy(s+n," (Sony)")
+          else if $uint2($A[1]+10)==CAM_POINTGREY then
+            Strcpy(s+n," (Point Grey Research)")
+          else if $uint2($A[1]+10)==CAM_BAUMER then
+            Strcpy(s+n," (Baumer)")
+          endif
+          List(L_TEXT,"Camera vendor","%s",s)
+          List(L_TEXT,"Camera ID","%04X.%04X (%i)",                            \
+            $uint2($A[1]+14),$uint2($A[1]+12),$uint4($A[1]+12))
+          for i=39,i<45,i++ do
+            if $uint1($A[0]+i)!=0 break
+          enddo
+          if i<45 List(L_TEXT,"Camera MAC","%02X:%02X:%02X:%02X:%02X:%02X",    \
+            $uint1($A[0]+39),$uint1($A[0]+40),$uint1($A[0]+41),                \
+            $uint1($A[0]+42),$uint1($A[0]+43),$uint1($A[0]+44))
+          List(L_TEXT,"Camera resolution","%i x %i pixel",                     \
+            $int2($A[1]+48),$int2($A[1]+50))
+          if ($int2($A[1]+54) & 0x0007)==0x0000 then
+            List(L_TEXT,"Color mode","Grayscale")
+          else if ($int2($A[1]+54) & 0x0007)==0x0001 then
+            List(L_TEXT,"Color mode","Color (RGGB)")
+          else if ($int2($A[1]+54) & 0x0007)==0x0003 then
+            List(L_TEXT,"Color mode","Color (GBRG)")
+          else if ($int2($A[1]+54) & 0x0007)==0x0005 then
+            List(L_TEXT,"Color mode","Color (GRBG)")
+          else if ($int2($A[1]+54) & 0x0007)==0x0007 then
+            List(L_TEXT,"Color mode","Color (BGGR)")
+          else
+            List(L_TEXT,"Color mode","0x%X",$int2($A[1]+54) & 0x0007)
+          endif
+        else
+          if $A[0].length>=77 && $uint1($A[0]+45)!=0 then
+            List(L_TEXT,"Head camera model","%s",$A[0]+45)
+          endif
+          if $uint4($A[0]+21)!=0 then
+            List(L_TEXT,"Camera ID","%04X.%04X (%i)",                          \
+            $uint2($A[0]+23),$uint2($A[0]+21),$uint4($A[0]+21))
+          endif
+        endif
+        List(L_TEXT,"Flash loader","%i.%02i",$uint1($A[0]+26),$uint1($A[0]+25))
+        if $uint3($A[0]+29)==0 then
+          List(L_TEXT,"Embedded software","Not loaded")
+        else
+          List(L_TEXT,"Embedded software","%X.%02X.%02X",                      \
+          $uint1($A[0]+31),$uint1($A[0]+30),$uint1($A[0]+29))
+        endif
+      endif
+    case K_FLASHPARMS:                 // Individual parameters from flash
+      for i=0,i<NFLASH,i++ do
+        if head>=$LAY.nfing*2 && fdata[i,2]=='*' continue
+        if $A[i].answer!=S_DEBUG then
+          Listerror(i)
+        else
+          List(L_TEXT,fdata[i]+3,"%8.3f",$float4($A[i]+5))
+        endif
+      enddo
+    case K_HEADSTAT:                   // General head statistics
+      if $A[0].answer!=S_DEBUG then
+        Listerror(0)
+      else
+        List(L_TEXT,"t(interrupt)","mean=%8.3f ms, max=%8.3f ms",              \
+          $uint4($A[0]+5+0*4)/1000.0,$uint4($A[0]+5+1*4)/1000.0)
+        List(L_TEXT,"t(main loop)","mean=%8.3f ms, max=%8.3f ms",              \
+          $uint4($A[0]+5+2*4)/1000.0,$uint4($A[0]+5+3*4)/1000.0)
+        ;
+      endif
+    case K_XYSTAT:                     // X-Y movement statistics
+      if $A[0].answer!=S_DEBUG then
+        Listerror(0)
+      else if $A[1].answer!=S_DEBUG then
+        Listerror(1)
+      else
+        List(L_TEXT,"t(X vibrations)","mean=%8.3f ms",                         \
+          $uint4($A[0]+5+0*4)/1000.0)
+        List(L_TEXT,"t(Y vibrations)","mean=%8.3f ms",                         \
+          $uint4($A[1]+5+0*4)/1000.0)
+        List(L_TEXT,"X accuracy at contact","mean=%8i um, max=%8i um",         \
+          $uint4($A[0]+5+2*4),$uint4($A[0]+5+3*4))
+        List(L_TEXT,"Y accuracy at contact","mean=%8i um, max=%8i um",         \
+          $uint4($A[1]+5+2*4),$uint4($A[1]+5+3*4))
+        ;
+      endif
+    case K_ZSTAT:                      // Z movement statistics
+      if $A[0].answer!=S_DEBUG then
+        Listerror(0)
+      else
+        List(L_TEXT,"t(Z down vibr)","mean=%8.3f ms",                          \
+          $uint4($A[0]+5+0*4)/1000.0)
+        List(L_TEXT,"t(Z minmove down)","mean=%8.3f ms",                       \
+          $uint4($A[0]+5+1*4)/1000.0)
+        List(L_TEXT,"t(Z down)","mean=%8.3f ms",                               \
+          $uint4($A[0]+5+2*4)/1000.0)
+        List(L_TEXT,"t(Z up)","mean=%8.3f ms",                                 \
+          $uint4($A[0]+5+3*4)/1000.0)
+        List(L_TEXT,"PSens up contact dist","mean=%8i um, max=%8i um",         \
+          $uint4($A[0]+5+4*4),$uint4($A[0]+5+5*4))
+        ;
+      endif
+    case K_TIMES:                      // Total movement time
+      if $A[0].answer!=S_DEBUG then
+        Listerror(0)
+      else
+        if $uint4($A[0]+5+6*4)!=0 then
+          List(L_TEXT,"t(X-Y)","t=%11.3f s (%i movements)",                    \
+          $uint4($A[0]+5+0*4)/1000.0,$uint4($A[0]+5+6*4))
+        else
+          List(L_TEXT,"t(X-Y)","t=%11.3f s",                                   \
+          $uint4($A[0]+5+0*4)/1000.0)
+        endif
+        List(L_TEXT,"t(wait)","t=%11.3f s",                                    \
+          $uint4($A[0]+5+1*4)/1000.0)
+        if $uint4($A[0]+5+7*4)!=0 then
+          List(L_TEXT,"t(down)","t=%11.3f s (%i contacts)",                    \
+          $uint4($A[0]+5+2*4)/1000.0,$uint4($A[0]+5+7*4))
+        else
+          List(L_TEXT,"t(down)","t=%11.3f s",                                  \
+          $uint4($A[0]+5+2*4)/1000.0)
+        endif
+        List(L_TEXT,"t(up)","t=%11.3f s",                                      \
+          $uint4($A[0]+5+4*4)/1000.0)
+        ;
+      endif
+    case K_CONTSTAT:                   // No contact statistics
+      if $A[0].answer!=S_DEBUG then
+        Listerror(0)
+      else if $A[1].answer!=S_DEBUG then
+        Listerror(1)
+      else
+        for i=0,i<$LAY.nfing*2,i++ do
+          sprintf(s,"Head %2i%s",i/2,(i & 1?"R":"L"))
+          List(L_TEXT,s,"nocont=%7.3f %%, highR=%7.3f %%",                     \
+          $uint4($A[0]+5+i*4)/10000.0,$uint4($A[1]+5+i*4)/10000.0)
+        enddo
+      endif
+    case K_MEASSTAT:                   // Measurements statistics
+      if $A[0].answer!=S_DEBUG then
+        Listerror(0)
+      else
+        List(L_TEXT,"Duration of S_MOVE","mean=%10.3f ms, max=%10.3f ms",      \
+          $uint4($A[0]+5+0*4)/1000.0,$uint4($A[0]+5+1*4)/1000.0)
+        ;
+      endif
+    case K_KELVSTAT:                   // Duration of precise Kelvin
+      if $A[0].answer!=S_DEBUG then
+        Listerror(0)
+      else
+        for i=0,i<$LAY.nfing*2,i++ do
+          sprintf(s,"Head %2i%s",i/2,(i & 1?"R":"L"))
+          List(L_TEXT,s,"mean duration=%7.3f ms",$uint4($A[0]+5+i*4)/1000.0)
+        enddo
+      endif
+    case K_DATACONV:                   // Data conversion
+      if $A[0].answer!=S_DEBUG || $A[1].answer!=S_DEBUG then
+        Listerror(0)
+      else if $A[0].length==5 || $A[1].length==5 then
+        List(L_ERR,"Error:","Data conversion is not supported!")
+      else
+        List(L_TEXT,"Data word 1","%08X",$uint4($A[0]+5+0))
+        List(L_TEXT,"Data word 2","%08X",$uint4($A[0]+5+4))
+        List(L_TEXT,"Data word 3","%08X",$uint4($A[0]+5+8))
+        List(L_TEXT,"Data word 4","%08X",$uint4($A[0]+5+12))
+        List(L_TEXT,"Data word 5","%08X",$uint4($A[0]+5+16))
+        List(L_TEXT,"Data word 6","%08X",$uint4($A[0]+5+20))
+        List(L_TEXT,"Data word 7","%08X",$uint4($A[0]+5+24))
+        List(L_TEXT,"Data word 8","%08X",$uint4($A[0]+5+28))
+        List(L_TEXT,"Data word 9","%08X",$uint4($A[1]+5+32))
+        List(L_TEXT,"Data word 10","%08X",$uint4($A[1]+5+36))
+        List(L_TEXT,"Data word 11","%08X",$uint4($A[1]+5+40))
+        List(L_TEXT,"Data word 12","%08X",$uint4($A[1]+5+44))
+        List(L_TEXT,"Data word 13","%08X",$uint4($A[1]+5+48))
+        List(L_TEXT,"Data word 14","%08X",$uint4($A[1]+5+52))
+        List(L_TEXT,"Data word 15","%08X",$uint4($A[1]+5+56))
+        List(L_TEXT,"Data word 16","%08X",$uint4($A[1]+5+60))
+      endif
+    case K_PHYREG:                     // Registers of PHY ports
+      if $A[0].answer!=S_DEBUG || $A[1].answer!=S_DEBUG ||                     \
+        $A[2].answer!=S_DEBUG then
+        Listerror(0)
+      else if $uint2($A[0]+7)==0xFFFF then
+        ntask=currtask
+      else
+        if $uint1($A[0]+5)==NODE_UNKNOWN then
+          sprintf(s,"unknown")
+        else if $uint1($A[0]+5)==NODE_CRATE then
+          sprintf(s,"内核控制器")
+        else if $uint1($A[0]+5)==NODE_HEAD then
+          n=sprintf(s,"SHARC, DIP %02X",$uint1($A[0]+6))
+          if $uint1($A[0]+6)==0x1F sprintf(s+n,", Measurement card")
+          if $uint1($A[0]+6)==0x1E sprintf(s+n,", Slave card")
+        else if $uint1($A[0]+5)==NODE_CAMERA then
+          sprintf(s,"camera, DIP %02X",$uint1($A[0]+6))
+        else if $uint1($A[0]+5)==NODE_REPEATER then
+          sprintf(s,"repeater")
+        else
+          sprintf(s,"%i, DIP %02X",$uint1($A[0]+5),$uint1($A[0]+6))
+        endif
+        List(L_TITLE,"","Physical registers of node %i (%s):",head,s)
+        n=0
+        for i=0,i<8,i++ do
+          if $uint2($A[0]+7+i*2)==0xFFFF then
+            n=n+sprintf(s+n,"??  ")
+          else
+            n=n+sprintf(s+n,"%02X  ",$uint2($A[0]+7+i*2) & 0xFF)
+          endif
+        enddo
+        List(L_TEXT,"Main registers","%s",s)
+        List(L_TEXT,"Status",                                                  \
+          "Root=%i  RootHoldoff=%i  PortCount=%i  LinkActive=%i",              \
+          ($uint1($A[0]+7) & 0x02)!=0,($uint1($A[0]+9) & 0x80)!=0,             \
+          $uint1($A[0]+11) & 0x0F,($uint1($A[0]+15) & 0x80)!=0)
+        n=0
+        for i=0,i<8,i++ do
+          if $uint2($A[1]+7+i*2)==0xFFFF then
+            n=n+sprintf(s+n,"??  ")
+          else
+            n=n+sprintf(s+n,"%02X  ",$uint2($A[1]+7+i*2) & 0xFF)
+          endif
+        enddo
+        List(L_TEXT,"Registers on page 0","%s",s)
+        n=0
+        for i=0,i<8,i++ do
+          if $uint2($A[2]+7+i*2)==0xFFFF then
+            n=n+sprintf(s+n,"??  ")
+          else
+            n=n+sprintf(s+n,"%02X  ",$uint2($A[2]+7+i*2) & 0xFF)
+          endif
+        enddo
+        List(L_TEXT,"Registers on page 1","%s",s)
+      endif
+    default:
+      for i=0,i<32,i++ do
+        if $A[i].length<5 || $A[i].answer!=S_ERROR continue
+        Listerror(i)
+      enddo
+    endsw
+    currtask++                         // Task finished
+    currstep=STEP_IDLE
+    listdumps=0
+  endif
+end
+
+// Call this function periodically to update qmove window.
+function int Qmovestep()
+  int i,x,n
+  char buf[64]
+  if hqmove==NULL then
+    return                             // No window
+  endif
+  if Time()-qmovetime<200 return       // Max frequency: 5 times per second
+  if $A[33].length!=0 && $A[34].length!=0 then
+    if $A[33].length>5 && $A[33].answer==S_DEBUG &&                            \
+      $A[34].length>5 && $A[34].answer==S_DEBUG then
+      draw window=hqmove color=WHITE bkcolor=WHITE mode=M_LEFT font=SMALLFONT
+      draw at 0,0 fillrect IX-2,QY-2
+      draw color=BLACK at 3,QY-3 text="Head"
+      draw color=GREEN at 3,QY-24 text="Cmd/s"
+      if Status(hshowmoves) then
+        draw color=RED at 3,QY-15 text="Moves"
+      else
+        draw color=RED at 3,QY-15 text="Queue"
+      endif
+      draw mode=M_CENTERED
+      for i=0,i<$LAY.nfing*2,i++ do
+        x=i*28+42
+        draw color=BLACK at x+15,QY-3 text=format("%i%c",i/2,i & 1?'R':'L')
+        n=$uint4($A[34]+5+4*i)         // Movements in last second
+        draw color=GREEN at x+15,QY-24 text=format("%i",n)
+        nmovemax[i]=Min(QY-39,Max(0,nmovemax[i]-1,n))
+        draw color=GREEN bkcolor=LIGHTGREEN
+        draw at x+5,QY-39 fillrect x+15,QY-40-n
+        n=$uint4($A[33]+5+4*i)         // Movements in queue
+        draw color=RED at x+15,QY-15 text=format("%i",n)
+        qmovemax[i]=Min(QY-39,Max(0,qmovemax[i]-1,n))
+        draw color=RED bkcolor=LIGHTRED
+        draw at x+15,QY-39 fillrect x+25,QY-40-n
+      enddo
+      draw show
+    endif
+    buf[0]=S_DEBUG
+    buf[1]=0x2F                        // Statistical data
+    buf[2]=0xFF                        // Crate controller
+    buf[3]=0                           // Don't reset statistics
+    if Status(hshowmoves) then
+      $int2(buf+4)=16                  // Page 16: total number of moves
+    else
+      $int2(buf+4)=17                  // Page 17: number of queued moves
+    endif
+    $int4(buf+6)=0
+    SYS.Sendimm(33,10,buf)
+    $int2(buf+4)=18                    // Page 18: number of moves per second
+    SYS.Sendimm(34,10,buf)
+    qmovetime=Time()
+  endif
+end
+
+// Resets all statistics.
+function int Resetallstat()
+  int i
+  char buf[32]
+  buf[0]=S_DEBUG
+  buf[1]=0x2F                          // Statistical data
+  buf[3]=1                             // Reset statistics
+  $int2(buf+4)=0                       // Page 0: reset all statistics at once
+  $int4(buf+6)=0
+  // Reset crate statistics.
+  buf[2]=0xFF                          // Crate controller
+  SYS.Sendimm(32,10,buf)
+  // Reset head statistics.
+  for i=0,i<$LAY.nfing*2,i++ do
+    buf[2]=i                           // Head
+    SYS.Sendimm(32,10,buf)
+  enddo
+  // Reset statistics of video cameras.
+  if $LAY.cameras & 1 then
+    buf[2]=$LAY.nfing*2                // Top video camera
+    SYS.Sendimm(32,10,buf)
+  endif
+  if $LAY.cameras & 2 then
+    buf[2]=$LAY.nfing*2+1              // Bottom video camera
+    SYS.Sendimm(32,10,buf)
+  endif
+  // Reset statistics of measurement card.
+  buf[2]=0x80                          // Measurement card
+  SYS.Sendimm(32,10,buf)
+end
+
+// Gets at most count post-mortem dump items.
+function int Pmdump(int count)
+  int i,j,k,l,m,n,t,c,testertime
+  char buf[1024],s[2048],extra[4096]
+  // Prepare list.
+  if Status(hoverwrite) then
+    clear hlist
+  else
+    add hlist text=""
+    change hlist bkcolor=PINK
+    add hlist text=""
+    change hlist bkcolor=WHITE
+  endif
+  List(L_MAIN,"","P O S T - M O R T E M   D U M P")
+  // Get size of post-mortem dump buffer.
+  buf[0]=S_PMDUMP
+  $int4(buf+1)=0                       // Mode
+  $int4(buf+5)=0x7FFFFFFF              // Definitely non-existing item
+  $int4(buf+9)=0
+  $int4(buf+13)=0
+  SYS.Sendimm(0,17,buf)
+  t=Time()
+  while $A[0].length==0 do
+    if Time()-t>3000 break
+    wait
+  enddo
+  if $A[0].length==0 then
+    List(L_ERR,"","Timeout!")
+    SYS.Killimm(0)
+    return
+  else if $A[0].answer!=S_PMDUMP || $A[0].length<13 then
+    List(L_ERR,"","Crate does not support post-mortem dump!")
+    SYS.Killimm(0)
+    return
+  endif
+  List(L_TEXT,"","")
+  List(L_TEXT,"Ind Time  Data      Total size of PM data:",                    \
+    "%i records",$int2($A[0]+9))
+  testertime=$int2($A[0]+5)
+  if count>$int2($A[0]+9) count=$int2($A[0]+9)
+  for i=count-1,i>=0,i-- do
+    List(L_TEXT,"","")
+    // Get command and answer.
+    buf[0]=S_PMDUMP
+    $int4(buf+1)=0x00000000            // Get command
+    $int4(buf+5)=i                     // Item
+    $int4(buf+9)=0
+    $int4(buf+13)=0
+    SYS.Sendimm(0,17,buf)
+    $int4(buf+1)=0x00000001            // Get answer
+    SYS.Sendimm(1,17,buf)
+    $int4(buf+1)=0x00000002            // Get first error
+    SYS.Sendimm(2,17,buf)
+    $int4(buf+1)=0x00000003            // Get second error
+    SYS.Sendimm(3,17,buf)
+    t=Time()
+    while $A[0].length==0 || $A[1].length==0 || $A[2].length==0 ||             \
+      $A[3].length==0 do
+      if Time()-t>3000 break
+      wait
+    enddo
+    if $A[0].length==0 || $A[0].answer!=S_PMDUMP ||                            \
+      $A[1].length==0 || $A[1].answer!=S_PMDUMP ||                             \
+      $A[2].length==0 || $A[2].answer!=S_PMDUMP ||                             \
+      $A[3].length==0 || $A[3].answer!=S_PMDUMP                                \
+    then
+      List(L_ERR,"","Unexpected end of post-mortem dump!")
+      return
+    endif
+    // Gather and decode command.
+    if $A[0].length>=9 then
+      l=$A[0].length-4
+      $int2(buf)=l
+      buf[2]=$char($A[0]+8)
+      buf[3]=0
+      buf[4]=$char($A[0]+7)
+      Memcpy(buf+5,$A[0]+9,l-5)
+      n=sprintf(s,"%4i %05i ",i,(testertime+65536-$int2($A[0]+5))%65536)
+      SERV.Decodecommand(buf,s+n,0xFFFFFFFF)
+      List(L_COMMAND,"","%s",s)
+      if Status(hpmdhex)!=0 then
+        n=0; j=0
+        while j<l do
+          if n==0 n=sprintf(s,"+%03X",j)
+          if (j & 0x03)==0 then
+            s[n]=' '; n++
+          endif
+          n=n+sprintf(s+n," %02X",buf[j])
+          j++
+          if (j & 0x0F)==0 then
+            List(L_DUMP,"","           %s",s)
+            n=0
+          endif
+        enddo
+        if n>0 List(L_DUMP,"","           %s",s)
+      endif
+    endif
+    // Gather and decode answer.
+    if $A[1].length>=9 then
+      $int2(buf)=$A[1].length-4
+      buf[2]=$char($A[1]+8)
+      buf[3]=0
+      buf[4]=$char($A[1]+7)
+      Memcpy(buf+5,$A[1]+9,$A[1].length-9)
+      if $int2($A[1]+5)==$int2($A[0]+5) then
+        n=sprintf(s,"           ")
+      else
+        n=sprintf(s,"     %05i ",(testertime+65536-$int2($A[1]+5))%65536)
+      endif
+      SERV.Decodeanswer(buf,s+n,extra,0xFFFFFFFF)
+      List((buf[4]==S_ERROR?L_ERR:L_ANSWER),"","%s",s)
+      if extra[0]!='\0' && Status(hpmdhex)!=0 then
+        n=0
+        while 1 do
+          if extra[n]=='+' || extra[n]=='-' n++
+          for k=n,extra[k]!='\n' && extra[k]!='\0',k++ do; enddo
+          c=extra[k]; extra[k]='\0'
+          List(L_DUMP,"","           %s",extra+n)
+          if c=='\0' break
+          n=k+1
+        enddo
+      endif
+    endif
+    // Gather and decode errors.
+    for m=2,m<4,m++ do
+      if $A[m].length>=9 then
+        List(L_TEXT,"","")
+        $int2(buf)=$A[m].length-4
+        buf[2]=$char($A[m]+8)
+        buf[3]=0
+        buf[4]=$char($A[m]+7)
+        Memcpy(buf+5,$A[m]+9,$A[m].length-9)
+        n=sprintf(s," Err %05i ",(testertime+65536-$int2($A[m]+5))%65536)
+        SERV.Decodeanswer(buf,s+n,extra,0xFFFFFFFF)
+        List(L_ERR,"","%s",s)
+        if extra[0]!='\0' && Status(hpmdhex)!=0 then
+          n=0
+          while 1 do
+            if extra[n]=='+' || extra[n]=='-' n++
+            for k=n,extra[k]!='\n' && extra[k]!='\0',k++ do; enddo
+            c=extra[k]; extra[k]='\0'
+            List(L_DUMP,"","           %s",extra+n)
+            if c=='\0' break
+            n=k+1
+          enddo
+        endif
+      endif
+    enddo
+  enddo
+end
+
+// Main program.
+function int main()
+  int i,j,h,x,y,dy,pv,pq,pa,pp,ps,pd,pall,start,isvideo
+  int cversion,cqueues,cvars,cparms,cstat,cextended,coverwrite,cdelays
+  int pmdhex
+  char logname[260]
+  hmain=control WINDOW
+    window=NULL
+    position=10,10,DX,DY
+    name=format("状态信息%s",VERSION)
+    help=" "
+    bkcolor=WHITEGREEN
+    size=1024
+  endc
+  hlist=control LIST
+    window=hmain
+    position=X0,Y0,IX,IY
+    help="收集的信息"
+    color=BLACK
+    bkcolor=WHITE
+    font=TERMINALFONT
+    mode=M_HSCROLL|M_VSCROLL
+    size=1048576
+  endc
+  draw window=hmain color=BLACK
+  draw at X1,Y1 rect DX-5,Y1+297
+  y=Y1+25
+  if $LAY.nfing>=12 then
+    h=15
+  else if $LAY.nfing>=10 then
+    h=17
+  else
+    h=19
+  endif
+  draw color=GREEN font=INFOFONT
+  draw at X1+7,y-5 text="获得状态:"
+  hcrate=control BUTTON
+    window=hmain
+    position=X1+7,y,75,h
+    text="内核"
+    help="按下可以获取内核控制器的信息"
+    font=SMALLFONT
+  endc
+  y=y+h+h/4
+  dy=0
+  for j=0,j<$LAY.nfing,j++ do
+    if $LAY.side[j]!=0 dy=3
+    for i=0,i<2,i++ do
+      x=X1+7+i*40
+      hhead[j*2+i]=control BUTTON
+        window=hmain
+        position=x,y+dy,35,h
+        text=format("%i%c",j,i==0?'L':'R')
+        help=format("按此可获取测试头的信息%i%c",j,i==0?'L':'R')
+        font=SMALLFONT
+      endc
+    enddo
+    y=y+h+1
+  enddo
+  y=y+dy
+  if $LAY.cameras!=0 then
+    y=y+3
+    for i=0,i<2,i++ do
+      if ($LAY.cameras & (1<<i))==0 continue
+      x=X1+7+i*40
+      hhead[$LAY.nfing*2+i]=control BUTTON
+        window=hmain
+        position=x,y,35,h
+        text=format("%s",i==0?"Vtop":"Vbot")
+        help=format("按此可获取%s摄像头的信息",i==0?"top":"bottom")
+        font=SMALLFONT
+      endc
+    enddo
+    y=y+h+1
+  endif
+  y=y+3
+  hmeas=control BUTTON
+    window=hmain
+    position=X1+7,y,75,h
+    text="测量卡"
+    help="按下可以获取有关测量卡的信息"
+    font=SMALLFONT
+  endc
+  y=y+h+4
+  hall=control BUTTON
+    window=hmain
+    position=X1+7,y,75,h
+    text="所有"
+    help="按下可以获取所有系统中部件的信息"
+    font=SMALLFONT
+  endc
+  y=y+h+4
+  hphyreg=control BUTTON
+    window=hmain
+    position=X1+7,y,75,h
+    text="注册"
+    help="按下可以获取所有Firewire节点的PHY端口的寄存器"
+    font=SMALLFONT
+  endc
+  cversion=1; cqueues=1; cvars=0; cparms=1
+  cstat=1; cextended=0; coverwrite=0; cdelays=0
+  getini("A5state","Settings","%i,%i,%i,%i,%i,%i,%i,%i,%i",                    \
+    &cversion,&cqueues,&cvars,&cparms,&cstat,&cextended,&coverwrite,&cdelays,  \
+    &pmdhex)
+  draw at X1+93,Y1+20 text="包含:"
+  hversion=control CHECKBOX
+    window=hmain
+    position=X1+93,30,85,18
+    text="版本"
+    font=INFOFONT
+    help="检查包括版本信息"
+    mode=(cversion?M_CHECKED:0)
+  endc
+  hqueues=control CHECKBOX
+    window=hmain
+    position=X1+93,50,85,18
+    text="列队"
+    font=INFOFONT
+    help="检查以包括内核队列"
+    mode=(cqueues?M_CHECKED:0)
+  endc
+  hvars=control CHECKBOX
+    window=hmain
+    position=X1+93,70,85,18
+    text="变化"
+    font=INFOFONT
+    help="检查包括SHARC控制器的内部变量"
+    mode=(cvars?M_CHECKED:0)
+  endc
+  hparms=control CHECKBOX
+    window=hmain
+    position=X1+93,90,85,18
+    text="参数"
+    font=INFOFONT
+    help="检查包含参数"
+    mode=(cparms?M_CHECKED:0)
+  endc
+  hstat=control CHECKBOX
+    window=hmain
+    position=X1+93,110,85,18
+    text="统计"
+    font=INFOFONT
+    help="检查包括统计信息"
+    mode=(cstat?M_CHECKED:0)
+  endc
+  hdelay=control CHECKBOX
+    window=hmain
+    position=X1+93,130,85,18
+    text="延时"
+    font=INFOFONT
+    help="包含测试头延迟表"
+    mode=(cdelays?M_CHECKED:0)
+  endc
+  hextended=control CHECKBOX
+    window=hmain
+    position=X1+93,158,85,18
+    text="扩展"
+    font=INFOFONT
+    help="显示扩展信息"
+    mode=(cextended?M_CHECKED:0)
+  endc
+  hoverwrite=control CHECKBOX
+    window=hmain
+    position=X1+93,178,85,18
+    text="覆盖"
+    font=INFOFONT
+    help="清除以前记录的数据"
+    mode=(coverwrite?M_CHECKED:0)
+  endc
+  hreset=control BUTTON
+    window=hmain
+    position=X1+94,208,80,19
+    text="重置状态"
+    font=SMALLFONT
+    help="重置所有统计信息"
+  endc
+  htestmeas=control BUTTON
+    window=hmain
+    position=X1+94,238,80,19
+    text="测试"
+    font=SMALLFONT
+    help="测试测量卡的数据转换"
+  endc
+  draw color=BLACK at X1,Y1+296 rect DX-5,Y1+342
+  draw color=GREEN font=INFOFONT
+  draw at X1+7,Y1+315 text="后期:"
+  hpmdump[0]=control BUTTON
+    window=hmain
+    position=X1+7,323,27,19
+    text="30"
+    font=SMALLFONT
+    help="获得30个最新的事后剖析数据项"
+  endc
+  hpmdump[1]=control BUTTON
+    window=hmain
+    position=X1+36,323,27,19
+    text="100"
+    font=SMALLFONT
+    help="获得100个最新的事后剖析数据项"
+  endc
+  hpmdump[2]=control BUTTON
+    window=hmain
+    position=X1+65,323,27,19
+    text="300"
+    font=SMALLFONT
+    help="获得300个最新的事后剖析数据项"
+  endc
+  hpmdump[3]=control BUTTON
+    window=hmain
+    position=X1+94,323,27,19
+    text="All"
+    font=SMALLFONT
+    help="获取所有事后剖析数据项"
+  endc
+  hpmdhex=control CHECKBOX
+    window=hmain
+    position=X1+131,324,44,18
+    text="Hex"
+    font=INFOFONT
+    help="十六进制格式的转储命令和响应"
+    mode=(pmdhex?M_CHECKED:0)
+  endc
+  hnomoves=control RADIO
+    window=hmain
+    position=DX-185,Y1+350,150,18
+    text="无动"
+    font=INFOFONT
+    help="隐藏运动统计信息"
+    mode=M_CHECKED
+  endc
+  hshowqmove=control RADIO
+    window=hmain
+    position=DX-185,Y1+370,150,18
+    text="等待"
+    font=INFOFONT
+    help="显示等待执行的动作数"
+  endc
+  hshowmoves=control RADIO
+    window=hmain
+    position=DX-185,Y1+390,150,18
+    text="全部"
+    font=INFOFONT
+    help="显示每个测试头的待定的动作总数"
+  endc
+  hlog=control BUTTON
+    window=hmain
+    position=DX-185,Y1+415,85,22
+    text="保存日志"
+    help="开始记录到文本文件"
+  endc
+  hstoplog=control BUTTON
+    window=hmain
+    position=DX-90,Y1+415,85,22
+    text="关闭日志"
+    help="关闭日志文件"
+  endc
+  disable hstoplog
+  hexit=control BUTTON
+    window=hmain
+    position=DX-90,DY-27,85,22
+    text="关闭"
+    help="按下可以关闭此窗口"
+  endc
+  draw show
+  taskrunning=0
+  Strcpy(logname,"a5state.txt")
+  while 1 do
+    start=0
+    pall=Pressed(hall)
+    pv=Status(hversion)
+    pq=Status(hqueues)
+    pa=Status(hvars)
+    pp=Status(hparms)
+    ps=Status(hstat)
+    pd=Status(hdelay)
+    if (pv|pq|pa|pp|ps|pd)==0 then
+      change hversion mode=M_CHECKED
+      pv=1
+    endif
+    if Pressed(hcrate) || pall then
+      Addtask(K_MAINTITLE|K_CRATE)
+      if pv Addtask(K_MAINVERS|K_CRATE)
+      if pq Addtask(K_CRATEQUEUE|K_CRATE)
+      if pa Addtask(K_CRATEVARS|K_CRATE)
+      if pp Addtask(K_ACCEL|K_CRATE)
+      if ps Addtask(K_CSTAT1|K_CRATE)
+      if pd Addtask(K_DELAYS|K_CRATE)
+      start=1
+    endif
+    for i=0,i<32,i++ do
+      if hhead[i]==NULL continue
+      if Pressed(hhead[i]) || pall then
+        isvideo=(i>=$LAY.nfing*2)
+        Addtask(K_MAINTITLE|i)
+        if isvideo==0 Addtask(K_FEATURES|i)
+        if pv Addtask(K_HEADVERS|i)
+        if pa Addtask(K_HEADVARS|i)
+        if pp Addtask(K_FLASHPARMS|i)
+        if ps Addtask(K_HEADSTAT|i)
+        if ps Addtask(K_XYSTAT|i)
+        if ps && isvideo==0 Addtask(K_ZSTAT|i)
+        if ps Addtask(K_TIMES|i)
+        start=1
+      endif
+    enddo
+    if Pressed(hmeas) || pall then
+      Addtask(K_MAINTITLE|K_MEAS)
+      if pv Addtask(K_HEADVERS|K_MEAS)
+      if pa Addtask(K_HEADVARS|K_MEAS)
+      if ps Addtask(K_CONTSTAT|K_MEAS)
+      if ps Addtask(K_MEASSTAT|K_MEAS)
+      if ps Addtask(K_KELVSTAT|K_MEAS)
+      start=1
+    endif
+    if Pressed(hphyreg) then
+      Addtask(K_MAINTITLE|K_PHY)
+      for i=0,i<63,i++ do
+        Addtask(K_PHYREG|i)
+      enddo
+      start=1
+    endif
+    if start Starttask()
+    if Pressed(hreset) then
+      Resetallstat()
+    else if Pressed(htestmeas) then
+      Addtask(K_MAINTITLE|K_MEAS)
+      Addtask(K_DATACONV|K_MEAS)
+      start=1
+      Starttask()
+    else if Pressed(hnomoves) then
+      if hqmove!=NULL destroy hqmove
+      hqmove=NULL
+      change hlist position=X0,Y0,IX,IY
+    else if Pressed(hshowmoves) || Pressed(hshowqmove) then
+      if hqmove==NULL then
+        hqmove=control GRAPH
+          window=hmain
+          position=X0+1,Y0+IY-QY+1,IX-2,QY-2
+          help="每个测试头的动作数"
+          bkcolor=WHITE
+        endc
+      endif
+      if hqmove!=NULL then
+        change hlist position=X0,Y0,IX,IY-QY-5
+        SYS.Killimm(33)
+        $A[33].length=1
+        $A[34].length=1
+        for i=0,i<32,i++ do
+          qmovemax[i]=0
+          nmovemax[i]=0
+        enddo
+        qmovetime=0
+      endif
+    else if Pressed(hpmdump[0]) then
+      Pmdump(30)
+    else if Pressed(hpmdump[1]) then
+      Pmdump(100)
+    else if Pressed(hpmdump[2]) then
+      Pmdump(300)
+    else if Pressed(hpmdump[3]) then
+      Pmdump(0x7FFFFFFF)
+    else if Pressed(hlog) then
+      if SYS.Browse(hmain,logname,"Specify name of log file",0)!=0 then
+        if log!=NULL Fclose(log)
+        log=Fopen(logname,"wt")
+        if log!=NULL then
+          disable hlog
+          enable hstoplog
+        endif
+      endif
+    else if Pressed(hstoplog) then
+      if log!=NULL Fclose(log)
+      log=NULL
+      enable hlog
+      disable hstoplog
+    else if Pressed(hexit) then
+      if taskrunning then
+        Finishtask()
+        List(L_ERR,"","Interrupted!")
+      else
+        setini("A5state","Settings","%i,%i,%i,%i,%i,%i,%i,%i,%i",              \
+          Status(hversion),Status(hqueues),Status(hvars),Status(hparms),       \
+          Status(hstat),Status(hextended),Status(hoverwrite),Status(hdelay),   \
+          Status(hpmdhex))
+        break
+      endif
+    endif
+    Step()
+    Qmovestep()
+    wait
+  enddo
+end
+

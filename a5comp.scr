@@ -1,0 +1,4165 @@
+#include "ls.icl"                  // System definitions and functions
+#include "or.icl"                // Command & error mnemonics
+#cmdbuff 34                            // 32+2 command buffers
+
+#define VERSION        "1.00"
+#define DESCRIPTION    "Demonstration of component measurements"
+
+
+// Used resources.
+#bitmap "logo"<"guoke.bmp"               // All bitmaps are compressed
+#bitmap "bkground"<"aluminum.bmp"      // Alternative: "pcb1.bmp"
+#bitmap "comptest"<"comptest.bmp"
+#bitmap "unknown"<"unknown.bmp"
+#bitmap "a5comp"<"a5comp.bmp"
+
+// Dimensions of test window.
+#define MAINX          600
+#define MAINY          400
+#define SPLIT          330
+#define SERVY          25
+#define LEFTX          320             // (SPLIT-10)
+#define LEFTY          365             // (MAINY-SERVY-10)
+#define GRAPHY         280
+#define RIGHTX         265             // (MAINX-SPLIT-5)
+#define RIGHTY         335             // (MAINY-SERVY-SERVY-15)
+#define USERY          250
+
+// Constants determining tester type.
+#define TT_WRONG       (-1)
+#define TT_UNDEF       0
+#define TT_A1          1
+#define TT_A2          2
+#define TT_A2L         3
+#define TT_A2H         4
+#define TT_A3          5
+#define TT_A3L         6
+#define TT_A4          7
+#define TT_A5          8
+#define TT_A5L         9
+#define TT_A6          10
+#define TT_S1          11
+#define TT_S2          12
+#define TT_A7          13
+#define TT_A8          14
+#define TT_S3          15
+#define TT_M2          16
+
+// Layout configuration bits in $LAY.config.
+#define LC_SMASK2      0x20000000      // Extention of LC_SMASK
+#define LC_AUTOPROBE   0x10000000      // Autodetect probes (Kelvin or standard)
+#define LC_TYPEMASK    0x0B000000      // General type of machine
+#define   LC_STD       0x00000000      // LC_TYPEMASK: standard A5/A6 tester
+#define   LC_NEWA1     0x01000000      // LC_TYPEMASK: new A1 (slow A5) tester
+#define   LC_S1        0x02000000      // LC_TYPEMASK: S1/S2
+#define   LC_A8        0x03000000      // LC_TYPEMASK: A7/A8
+#define   LC_S3        0x08000000      // LC_TYPEMASK: S3
+#define LC_VACUUMBOX   0x04000000      // Disable movements on bottom side
+#define LC_MOREMASK    0x00C00000      // Mask for more space bits
+#define   LC_MOREBOT   0x00800000      // Give more space on bottom
+#define   LC_MORETOP   0x00400000      // Give more space on the top
+#define LC_DEADLOCKS   0x00200000      // Autoresolve deadlocks
+#define LC_ILLUM       0x00100000      // Auto switch video illumination on/off
+#define LC_HARDZ       0x00040000      // Hard Z contacting (A2/A4/A5 only)
+#define LC_QUAKE       0x00020000      // Earthquake protection on (M2 only)
+#define LC_SMASK1      0x0001C000      // Mask for type of loading system
+#define LC_RELAYS      0x00002000      // Slow (LATEST-compatible) relays
+#define LC_OHTYPE      0x00001C00      // Mask to extract on-head type
+#define   LC_NOFIELD   0x00001000      // On-heads without field amplifier
+#define   LC_PHADJ     0x00000C00      // On-heads with adjustable field phase
+#define   LC_ACTIVE    0x00000400      // Active on-heads (with Dallas/R1-R4)
+#define   LC_PASSIVE   0x00000000      // Passive on-heads (manual C adjust)
+#define LC_TRAFFICS    0x00000200      // Hitachi-style traffic lights
+#define LC_ZSENSORS    0x00000100      // A series: Z pressure sensors active
+#define LC_LOWBAUD     0x00000100      // M2: low AFMCU I/O baud rate
+#define LC_ISM2        0x00000080      // M2 tester
+#define LC_A2LOADER    0x00000040      // A2-style loader, enables LC_SMASK
+#define LC_ENCODERS    0x00000020      // Tester with encoders
+#define LC_COVER       0x00000010      // I have forgotten what it means
+#define LC_HIGHZ       0x00000008      // Z always moves with full hub (B1)
+#define LC_LDELAY      0x00000004      // Wait after light off (obsolete)
+#define LC_AMASK       0x00000003      // Mask for type of antennae
+#define   LC_EXTANT    0x00000000      // LC_AMASK: external (A1) antennae
+#define   LC_INTANT    0x00000001      // LC_AMASK: internal antennae (void)
+#define   LC_FINGANT   0x00000002      // LC_AMASK: finger antennae
+// Alternative (old) interpretation of LC_OHTYPE bits.
+#define LC_PHASEADJ    0x00000800      // On-heads with adjustable field phase
+#define LC_ACTIVEONHD  0x00000400      // Active on-heads (with Dallas/R1-R4)
+// Tester types in LC_SMASK=(LC_SMASK2|LC_SMASK1).
+#define LC_LMMAN       0x0001C000      // L&M manual tester
+#define LC_LMS2        0x00018000      // L&M for S2a
+#define LC_EPCOS       0x00014000      // L&M for EPCOS tester
+#define LC_LM          0x00010000      // L&M for A5a
+#define LC_A5WIDE      0x0000C000      // A5 wide shuttle
+#define LC_AUTOMATE    0x00008000      // Automatical shuttle
+#define LC_A2XSHUT     0x00004000      // A2X shuttle
+#define LC_A2SHUT      0x00000000      // A2 standard shuttle
+// Useful shortcuts and substitutions.
+#define LC_SMASK       (LC_SMASK2|LC_SMASK1)
+#define LC_LDMASK      (LC_SMASK2|LC_SMASK1|LC_A2LOADER)
+#define LC_LMAUTO      (LC_LM|LC_A2LOADER)
+#define LC_LMS2AUTO    (LC_LMS2|LC_A2LOADER)
+#define LC_EPCOSAUTO   (LC_EPCOS|LC_A2LOADER)
+
+// Type of automation.
+#define AUTO_UNKNOWN   (-1)            // Unknown type of automation
+#define AUTO_NONE      0x00            // Manual mode
+#define AUTO_ERROR     0x01            // Attempt to get type was unsuccessfull
+#define AUTO_DAMAGED   0x80            // Automation out of order
+#define AUTO_SHUTTLE   0x81            // Automatic A2/A4/A6 shuttle
+#define AUTO_A2        0x82            // Automatic A2 loader connected
+#define AUTO_A4SEMI    0x83            // A4 output unit connected
+#define AUTO_A4FULL    0x84            // Full A4 automation
+#define AUTO_A6SEMI    0x85            // A6 output unit connected
+#define AUTO_A6FULL    0x86            // Full A6 automation
+#define AUTO_A5LMMAN   0x90            // A5 L&M automation in manual mode
+#define AUTO_A5LMSEMI  0x91            // A5 L&M semiautomat
+#define AUTO_A5LMFULL  0x92            // Full A5 L&M automation
+#define AUTO_S2LMMAN   0x98            // S2 with manual shuttle
+#define AUTO_S2LMSEMI  0x99            // S2 L&M in manual load/unload mode
+#define AUTO_S2LMFULL  0x9A            // Full robotic S2 L&M automation
+#define AUTO_S2LMDCF   0x9B            // S2 with double CF shuttle
+#define AUTO_A7LMMAN   0xB0            // A7 L&M automation in manual mode
+#define AUTO_A7LMSEMI  0xB1            // A7 L&M semiautomat
+#define AUTO_A7LMFULL  0xB2            // Full A7 L&M automation
+#define AUTO_A7LMNONE  0xB3            // A7 L&M pure manual mode
+#define AUTO_A8LMMAN   0xB4            // A8a L&M automation in manual mode
+#define AUTO_A8LMSEMI  0xB5            // A8a L&M semiautomat
+#define AUTO_A8LMFULL  0xB6            // Full A8a L&M automation
+
+// Features supported by measurement card.
+#define MF_CONTAIR     0x00000001      // Contact check corrections supported
+#define MF_CRT         0x00000002      // CRT measurements supported
+#define MF_KELVSCAN    0x00000004      // Kelvin scan supported
+#define MF_FIXCDC      0x00000008      // Forcing charge-discharge in FastC
+#define MF_CCORR       0x00000010      // Calibration of capacitive phase
+#define MF_SLAVE       0x00000020      // Supports second measurement card
+#define MF_CPHASE      0x00000040      // C phase corrections from layout
+#define MF_MULTIC      0x00000080      // Multiple C supported
+#define MF_DSCAN       0x00000100      // Charge-discharge scan supported
+#define MF_CRTCONCE    0x00000200      // Permanent CRT calibration in air
+#define MF_UNIC        0x00000400      // Universal C supported
+#define MF_CONCE       0x00000800      // Permanent C calibration in air
+#define MF_HVINITEX    0x00001000      // Extended HV initialization (meas card)
+#define MF_POSTAIR     0x00002000      // C in air after M_FASTC (meas card)
+#define MF_EXTMEAS     0x00004000      // External measurement device
+// Measurement features supported by crate.
+#define MF_EXTLAINIT   0x01000000      // Extended S_LAINIT supported
+#define MF_RETEST      0x02000000      // Instant retest (M_LIMITHI, M_LIMITLO)
+#define MF_HVCRATEEX   0x04000000      // Extended HV initialization (crate)
+#define MF_POSTCRATE   0x08000000      // C in air after M_FASTC (crate)
+#define MF_RLINIT      0x10000000      // S_RLINIT supported (crate)
+// Reserved for high-level software, not used by crate.
+#define MF_VALID       0x80000000      // Features valid
+
+#define VSTEP          0.5             // Camera moves in 0.5 mm steps
+#define CROSSDIST      252.98          // Distance between positioning crosses
+
+#define NPOINT         45              // Number of pads
+
+// Coordinates are for the vertical position of EL502-1.
+char   xname[NPOINT][32] = {         \ // Components on dedicated EL502-1
+  "NPN_C     0      0    0.000",     \ // NPN transisor
+  "NPN_B     5      0    0.000",     \
+  "NPN_E     10     0    0.000",     \
+  "PNP_C     0      5    0.000",     \ // PNP transistor
+  "PNP_B     5      5    0.000",     \
+  "PNP_E     10     5    0.000",     \
+  "INV_IN    0      15   0.000",     \ // MOSFET inverter (TP2540/TN2540)
+  "INV_OUT   5      15   0.000",     \
+  "INV_GND   10     15   0.000",     \
+  "INV_VCC   0      20   0.000",     \
+  "TRI_T2    0      30   0.000",     \ // Thyristor (Z0107MN)
+  "TRI_GATE  5      30   0.000",     \
+  "TRI_T1    10     30   0.000",     \
+  "VREG_IN   0      35   0.000",     \ // 7805 voltage regulator
+  "VREG_OUT  5      35   5.000",     \
+  "VREG_GND  10     35   0.000",     \
+  "FUSE_1    0      45   0.050",     \ // Fuse (PTC0.05)
+  "FUSE_2    5      45   0.050",     \
+  "Z27_C     10     45   2.700",     \ // Zener diode 2.7 V
+  "Z27_A     15     45   2.700",     \
+  "Z56_C     0      50   5.600",     \ // Zener diode 5.6 V
+  "Z56_A     5      50   5.600",     \
+  "Z100_C    10     50   10.00",     \ // Zener diode 10 V
+  "Z100_A    15     50   10.00",     \
+  \ // Capacitors...
+  \ // Inductors...
+  "MEM_IO    0      90   0.000",     \ // EEPROM (DS24B33S+, 4096 bit)
+  "MEM_GND   15     90   0.000",     \
+  "RC_C      0      95   0.000",     \ // RC filter, 1 kOhm / 100 nF
+  "RC_R      5      95   0.000",     \
+  "RC_OUT    10     95   0.000",     \
+  "DIV_1     0      105  0.000",     \ // Voltage divider, 100/100/200/200 Ohm
+  "DIV_2     5      105  0.000",     \
+  "DIV_3     10     105  0.000",     \
+  "DIV_4     15     105  0.000",     \
+  "OC_COL    0      110  0.000",     \ // Optocoupler (PC357N)
+  "OC_AN     5      110  0.000",     \
+  "OC_CAT    10     110  0.000",     \
+  "OC_EM     15     110  0.000",     \
+  "RLY_O1    0      120  0.000",     \ // Reed relay
+  "RLY_I1    5      120  0.000",     \
+  "RLY_O2    10     120  0.000",     \
+  "RLY_I2    15     120  0.000",     \
+  "OP_VCC    0      125  0.000",     \ // Operational amplifier
+  "OP_IN     5      125  0.000",     \
+  "OP_GND    10     125  0.000",     \
+  "OP_OUT    15     125  0.000" }
+
+float  xpos[NPOINT]                    // Extracted X coordinates of the pads
+float  ypos[NPOINT]                    // Extracted Y coordinates of the pads
+float  value[NPOINT]                   // Extracted pad values, rarely used
+
+float  crossx[2] = {                 \ // Board X coordinates of 2 scan crosses
+  -5.0,  75.0 }
+float  crossy[2] = {                 \ // Board Y coordinates of 2 scan crosses
+  235.0, -5.0 }
+
+handle hmain                           // Main window
+handle hexit                           // Button "Close"
+handle hserv,hleft,hright              // Left and right subwindows
+handle hinfo                           // Current status of test
+handle htest                           // Test window
+
+char   crateversion[128]               // Version of loaded crate software
+char   layoutversion[128]              // Version of loaded layout
+char   headversion[128]                // Version of loaded head software
+int    loadchanged                     // Loader is closed
+
+int    testertype                      // Type of tester (TT_xxx)
+int    testersides                     // Bit 0x1: top, 0x2: bottom rails
+float  xmin,xmax                       // X extent of working area, mm
+float  ymin,ymax                       // Y extent of working area, mm
+float  leftlimit                       // Left X limit for video camera
+float  rightlimit                      // Right X limit for video camera
+float  headcamradius                   // Radius of head cameras, millimeters
+
+int    features                        // Features of measurement card, MF_xxx
+int    isauto                          // Whether half- or full-automate
+int    automationtype                  // Type of automation, AUTO_xxx
+char   lmteachin[5][256]               // Learned shuttle settings
+int    nlmteachin                      // Number of valid lmteachin
+
+int    orientation                     // 0: vertical, 1: horizontal
+float  pos1x,pos1y                     // First ref cross (tester coordinates)
+float  pos2x,pos2y                     // Second ref cross (tester coordinates)
+float  linewidth=0.200                 // Expected width of cross is 200 um
+float  convsfi,convcfi                 // Board rotation and shrinkage
+float  convdx,convdy                   // Board offset
+
+int    strokev=50                      // Stroke, mm/s
+int    strokep=50                      // Pressure, gramm or units
+float  strokez=6.0                     // Height, millimeters
+
+// Individual per-camera brightness and contrast.
+int    individualbc                    // Whether individual brightness/contrast
+handle hbrititle                       // Brightness title
+handle hbrightness                     // Brightness control
+handle hctrtitle                       // Contrast title
+handle hcontrast                       // Contrast control
+handle hilltitle                       // Illumination title
+handle hilltop                         // Top illumination control
+handle hillskew                        // Skew illumination control
+handle hilllong                        // Long exposition control
+handle hfoctitle                       // Focus title
+handle hfocusup                        // Focus up
+handle hfocus                          // Z camera position
+handle hfocusdn                        // Focus down
+int    illtype                         // Illumination (0x3:on,0x4:top,0x8:skew)
+int    longexp                         // Long exposition
+int    brightness[32]                  // Individual brightness settings
+int    contrast[32]                    // Individual contrast settings
+int    bchead                          // Head selected for individual bri/ctr
+int    focus[2]                        // Focus position of dedicated camera
+int    updatefocus[2]                  // Set focus of dedicated camera
+
+external int SERV.Parsecmdext(char *cmd,char *buf,char *error);
+external int SERV.Decodeanswer(char *answer,char *text,char *extra,int mask);
+
+
+////////////////////////////////////////////////////////////////////////////////
+////////////////////// SERVICE FUNCTIONS: DATA PROCESSING //////////////////////
+
+// Scans signed float number from the cmd. Returns number of scanned bytes or
+// -1 if there is no float number in the cmd.
+function int Scanfloat(char *cmd,float *value)
+  int i,sign,exp,expsign
+  float f,mult
+  i=0
+  while cmd[i]==' ' do i++; enddo
+  if cmd[i]=='-' then sign=-1; i++;
+  else if cmd[i]=='+' then i++;
+  endif
+  if Isdigit(cmd[i])==0 return -1      // Not a number
+  while Isdigit(cmd[i])!=0 do
+    f=f*10.0+cmd[i]-'0'; i++
+  enddo
+  if cmd[i]=='.' then
+    i++; mult=0.1
+    while Isdigit(cmd[i]) do
+      f=f+(cmd[i]-'0')*mult
+      mult=mult/10.0; i++
+    enddo
+  endif
+  if Toupper(cmd[i])=='E' then         // Exponent
+    i++
+    if cmd[i]=='-' then expsign=-1; i++;
+    else if cmd[i]=='+' then i++;
+    endif
+    while Isdigit(cmd[i])!=0 do
+      exp=exp*10+cmd[i]-'0'; i++
+    enddo
+    if expsign<0 exp=-exp
+    f=f*Pow10(exp)
+  endif
+  if sign<0 f=-f
+  value[0]=f
+  return i
+end
+
+
+////////////////////////////////////////////////////////////////////////////////
+/////////////////////// SERVICE FUNCTIONS: VIDEO SUPPORT ///////////////////////
+
+// Reciprocal to Headfromchannel(). Given head, returns associated video
+// channel, or -1 if head is invalid or carries no camera.
+function int Channelfromhead(int head)
+  int i,channel
+  if $LAY.cameras!=0 then
+    if head==$LAY.nfing*2 && ($LAY.cameras & 0x1)!=0 then
+      return 0
+    else if head==$LAY.nfing*2+1 && ($LAY.cameras & 0x2)!=0 then
+      return (($LAY.cameras & 0x1)==0?0:1)
+    endif
+  else if ($LAY.headcameras & (1<<head))!=0 then
+    channel=0
+    for i=0,i<head,i++ do
+      if ($LAY.headcameras & (1<<i))!=0 channel++
+    enddo
+    return channel
+  endif
+  return -1
+end
+
+// Given video channel, returns head that carries corresponding video camera,
+// or -1 if channel is invalid or not assigned.
+function int Headfromchannel(int channel)
+  int head,n
+  if $LAY.cameras!=0 then
+    if channel==0 then
+      return ($LAY.cameras & 0x1?$LAY.nfing*2:$LAY.nfing*2+1)
+    else if channel==1 && $LAY.cameras==0x3 then
+      return $LAY.nfing*2+1
+    endif
+  else
+    n=0
+    for head=0,head<$LAY.nfing*2,head++ do
+      if ($LAY.headcameras & (1<<head))==0 continue
+      if channel==n return head
+      n++
+    enddo
+  endif
+  return -1
+end
+
+// Given Y coordinate in millimeters, selects camera controller and
+// corresponding video channel. Returns head on success, and -1 on any error.
+function int Camerafromy(float y,int *channel,int *side,float *angle)
+  int head
+  float h
+  if $LAY.cameras!=0 then
+    channel[0]=($LAY.cameras & 1)==0?1:0
+    side[0]=channel[0]
+    angle[0]=0.0
+    return $LAY.nfing*2+channel[0]
+  else if $LAY.headcameras!=0 then
+    for head=0,head<$LAY.nfing*2,head++ do
+      if ($LAY.headcameras & (1<<head))==0 continue
+      if ($LAY.excludedrails & (1<<(head/2)))!=0 continue
+      if $LAY.top[head/2]/1000.0<=y continue
+      if $LAY.bottom[head/2]/1000.0>y continue
+      break
+    enddo
+    if head>=$LAY.nfing*2 return -1
+    channel[0]=Channelfromhead(head)
+    side[0]=$LAY.side[head/2]
+    h=y-$LAY.yoffset[head/2]/1000.0
+    angle[0]=(Abs(h)>0.9*headcamradius?0.0:Asin(h/headcamradius))
+    if side[0]!=0 angle[0]=-angle[0]
+    if (head & 1)!=0 angle[0]=-angle[0]
+    return head
+  else
+    return -1                          // No cameras
+  endif
+end
+
+
+////////////////////////////////////////////////////////////////////////////////
+////////////////// SERVICE FUNCTIONS: BRIGHTNESS AND CONTRAST //////////////////
+
+// Disables automatic adjustment of brightness and contrast on all video
+// cameras. Errors are ignored. Works for all kinds of cameras.
+function int Disableautoset()
+  int head,channel
+  for head=0,head<($LAY.nfing+1)*2,head++ do
+    channel=Channelfromhead(head)
+    if channel<0 continue
+    SYS.Autoset(channel,0)
+  enddo
+end
+
+// Reads individual per-camera brightness, contrast, illumination type and
+// focal coordinate from .ini file.
+function int Bcgetini()
+  int head,bri,ctr
+  char key[32]
+  // Get defaults for the first run.
+  illtype=0x03; longexp=0;
+  getini("Video","Illumination type","%i,%i",&illtype,&longexp)
+  bri=0; getini("ScrollAutoSave","Brightness","%i",&bri)
+  ctr=0; getini("ScrollAutoSave","Contrast","%i",&ctr)
+  focus[0]=-1000; getini("Video","Camera focus[0]","%i",focus+0)
+  focus[1]=-1000; getini("Video","Camera focus[1]","%i",focus+1)
+  for head=0,head<32,head++ do
+    brightness[head]=bri
+    contrast[head]=ctr
+    if individualbc then
+      sprintf(key,"Brightness[%i]",head)
+      getini("Video",key,"%i",brightness+head)
+      sprintf(key,"Contrast[%i]",head)
+      getini("Video",key,"%i",contrast+head)
+    endif
+  enddo
+end
+
+// Saves individual per-camera brightness and contrast values to .ini file
+function int Bcsetini()
+  int head
+  char key[32]
+  setini("Video","Illumination type","%i,%i",illtype,longexp)
+  setini("Video","Camera focus[0]","%i",focus[0])
+  setini("Video","Camera focus[1]","%i",focus[1])
+  if individualbc==0 then
+    // No individual settings.
+    setini("ScrollAutoSave","Brightness","%i",brightness[0])
+    setini("ScrollAutoSave","Contrast","%i",contrast[0])
+  else
+    // Individual per-camera settings.
+    for head=0,head<32,head++ do
+      if $LAY.cameras!=0 then
+        if head<$LAY.nfing*2 continue
+        if ($LAY.cameras & (1<<(head-$LAY.nfing*2)))==0 continue
+      else
+        if ($LAY.headcameras & (1<<head))==0 continue
+      endif
+      sprintf(key,"Brightness[%i]",head)
+      setini("Video",key,"%i",brightness[head])
+      sprintf(key,"Contrast[%i]",head)
+      setini("Video",key,"%i",contrast[head])
+    enddo
+  endif
+end
+
+// Connects brightness and contrast controls to the specified head.
+function int Bcsetcam(int channel)
+  int head
+  if individualbc==0 return
+  head=Headfromchannel(channel)
+  if head==bchead then
+    return
+  else if head>=0 && head<32 then
+    if hbrightness!=NULL change hbrightness select=brightness[head]
+    if hcontrast!=NULL change hcontrast select=contrast[head]
+    if hfocus!=NULL && (head==$LAY.nfing*2 || head==$LAY.nfing*2+1) then
+      change hfocus text=format(" %i",focus[head-$LAY.nfing*2])
+    endif
+    bchead=head
+  else
+    bchead=-1
+  endif
+end
+
+// Creates brightness, contrast and illumination or focus controls at the
+// specified location (default location if x and y are -1).
+function int Bccreate(handle hparent,int x,int y,int channel)
+  int mode
+  if x<0 x=5
+  if y<0 y=303
+  if testertype==TT_S3 then
+    mode=2                             // Create focus controls
+  else if (testertype==TT_A7 || testertype==TT_A8) then
+    mode=1                             // Create illumination controls
+  else
+    mode=0
+  endif
+  hbrititle=control TEXT
+    window=hparent
+    position=x,y+4,27,16
+    name="增益"
+    help=" "
+    font=INFOFONT
+  endc
+  hbrightness=control HSCROLL
+    window=hparent
+    position=x+32,y+2,(mode?120:150),21
+    name=(individualbc?"":"亮度")
+    help=format("调整所选相机%s",                                  \
+      individualbc?" 的图像增益":"")
+    limits=-100,100
+  endc
+  hctrtitle=control TEXT
+    window=hparent
+    position=x,y+31,27,16
+    name="亮度"
+    help=" "
+    font=INFOFONT
+  endc
+  hcontrast=control HSCROLL
+    window=hparent
+    position=x+32,y+29,(mode?120:150),21
+    name=(individualbc?"":"对比度")
+    help=format("调整所选相机%s",                       \
+      individualbc?" 的图像曝光时间":"")
+    limits=-100,100
+  endc
+  if mode==1 then
+    // Illumination controls.
+    hilltop=control CHECKBOX
+      window=hparent
+      position=x+160,y,50,18
+      name="顶"
+      help="打开顶部照明，对所有相机都有效"
+      font=INFOFONT
+      mode=((illtype & 0x0C)==0 || (illtype & 0x4)!=0?M_CHECKED:0)
+    endc
+    hillskew=control CHECKBOX
+      window=hparent
+      position=x+160,y+18,55,18
+      name="斜"
+      help="打开侧面照明，对所有相机都有效"
+      font=INFOFONT
+      mode=((illtype & 0x08)!=0?M_CHECKED:0)
+    endc
+    hilllong=control CHECKBOX
+      window=hparent
+      position=x+160,y+36,55,18
+      name="高亮"
+      help="长时间曝光，仅适用于选定的相机"
+      font=INFOFONT
+      mode=(longexp?M_CHECKED:0)
+    endc
+    hfoctitle=NULL
+    hfocusup=NULL
+    hfocus=NULL
+    hfocusdn=NULL
+  else if mode==2 then
+    // Focus controls.
+    hilltop=NULL
+    hillskew=NULL
+    hilllong=NULL
+    hfoctitle=control TEXT
+      window=hparent
+      position=x+160,y+31,45,16
+      name="聚焦"
+      help=" "
+      font=INFOFONT
+    endc
+    hfocusup=control BUTTON
+      window=hparent
+      position=x+205,y+29,21,21
+      name="-"
+      help="按住可向上移动相机"
+      font=MEDIUMFONT
+      mode=M_REPEAT
+    endc
+    hfocus=control TEXT
+      window=hparent
+      position=x+225,y+29,62,21
+      help="当前相机的Z坐标，微米"
+      font=MEDIUMFONT
+      mode=M_BORDER
+      bkcolor=LIGHTYELLOW
+      color=DARKGRAY
+    endc
+    hfocusdn=control BUTTON
+      window=hparent
+      position=x+286,y+29,21,21
+      name="+"
+      help="按住可向下移动相机"
+      font=MEDIUMFONT
+      mode=M_REPEAT
+    endc
+    updatefocus[0]=1
+    updatefocus[1]=1
+  else
+    hilltop=NULL
+    hillskew=NULL
+    hilllong=NULL
+    hfoctitle=NULL
+    hfocusup=NULL
+    hfocus=NULL
+    hfocusdn=NULL
+  endif
+  bchead=-1
+  Bcsetcam(channel)
+end
+
+// Checks whether user has changed brightness, contrast or illumination and
+// updates data. Returns combination of 0x01 (if brightness or contrast was
+// changed) and 0x02 (if illumination type was changed). Additionally, sets
+// S3 focus.
+function int Bcupdate()
+  int head,cam,changed,n
+  char s[80]
+  if individualbc==0 then
+    head=0
+  else if bchead<0 || bchead>=32 then
+    return 0
+  else
+    head=bchead
+  endif
+  changed=0
+  if hbrightness!=NULL && Pressed(hbrightness) then
+    brightness[head]=Status(hbrightness)
+    changed=changed | 0x01
+  endif
+  if hcontrast!=NULL && Pressed(hcontrast) then
+    contrast[head]=Status(hcontrast)
+    changed=changed | 0x01
+  endif
+  if hilltop!=NULL && Pressed(hilltop) then
+    if Status(hilltop)!=0 then
+      illtype=illtype|0x04
+    else
+      illtype=illtype & (~0x04)
+      if (illtype & 0x0C)==0 then
+        illtype=0x0B
+        change hillskew mode=M_CHECKED
+      endif
+    endif
+    changed=changed | 0x02
+  endif
+  if hillskew!=NULL && Pressed(hillskew) then
+    if Status(hillskew)!=0 then
+      illtype=illtype|0x08
+    else
+      illtype=illtype & (~0x08)
+      if (illtype & 0x0C)==0 then
+        illtype=0x07
+        change hilltop mode=M_CHECKED
+      endif
+    endif
+    changed=changed | 0x02
+  endif
+  if hilllong!=NULL && Pressed(hilllong) then
+    longexp=Status(hilllong)
+    changed=changed | 0x01
+  endif
+  if hfocus!=NULL then
+    n=Min(Pressed(hfocusdn),3)
+    n=n-Min(Pressed(hfocusup),3)
+    cam=head-$LAY.nfing*2
+    if n!=0 && (cam==0 || cam==1) then
+      focus[cam]=Max(-8000,Min(focus[cam]+n*20,8000))
+      change hfocus text=format(" %i",focus[cam])
+      updatefocus[cam]=1
+    endif
+  endif
+  if testertype==TT_S3 then
+    if ($LAY.cameras & 0x1)!=0 && updatefocus[0]!=0 then
+      sprintf(s,"OUTPORT32 HEAD(%i) 0x10010008,%i",$LAY.nfing*2+0,focus[0])
+      SERV.Cmdimm(32,s)
+      updatefocus[0]=0
+    endif
+    if ($LAY.cameras & 0x2)!=0 && updatefocus[1]!=0 then
+      sprintf(s,"OUTPORT32 HEAD(%i) 0x10010008,%i",$LAY.nfing*2+1,focus[1])
+      SERV.Cmdimm(32,s)
+      updatefocus[1]=0
+    endif
+  endif
+  return changed
+end
+
+// Deletes brightness and contrast controls. It's not a sin to forget to call
+// this function, but then better not call any Bcxxx() except Bccreate() or
+// Bcdisable().
+function int Bcdelete()
+  if bchead<0 return
+  destroy hbrititle; hbrititle=NULL
+  destroy hbrightness; hbrightness=NULL
+  destroy hctrtitle; hctrtitle=NULL
+  destroy hcontrast; hcontrast=NULL
+  bchead=-1
+  if hilltop!=NULL then
+    destroy hilltop; hilltop=NULL
+    destroy hillskew; hillskew=NULL
+    destroy hilllong; hilllong=NULL
+  endif
+  if hfocus!=NULL then
+    destroy hfoctitle; hfoctitle=NULL
+    destroy hfocusup; hfocusup=NULL
+    destroy hfocus; hfocus=NULL
+    destroy hfocusdn; hfocusdn=NULL
+  endif
+end
+
+// Disables brightness and contrast processing in the case that corresponding
+// controls were not deleted by Bcdelete()
+function int Bcdisable()
+  hbrititle=NULL
+  hbrightness=NULL
+  hctrtitle=NULL
+  hcontrast=NULL
+  bchead=-1
+  hilltop=NULL
+  hillskew=NULL
+  hilllong=NULL
+  hfoctitle=NULL
+  hfocusup=NULL
+  hfocus=NULL
+  hfocusdn=NULL
+end
+
+// Returns current brightness (-100..100) for the specified channel.
+function int Bcgetbri(int channel)
+  int head
+  if individualbc==0 then
+    return brightness[0]
+  endif
+  head=Headfromchannel(channel)
+  if head<0 || head>=32 then
+    return 0
+  else
+    return brightness[head]
+  endif
+end
+
+// Returns current contrast (-100..100) for the specified head.
+function int Bcgetctr(int channel)
+  int head
+  if individualbc==0 then
+    return contrast[0]
+  endif
+  head=Headfromchannel(channel)
+  if head<0 || head>=32 then
+    return 0
+  else
+    return contrast[head]
+  endif
+end
+
+
+////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////// TEST BOARD //////////////////////////////////
+
+// Function converts board coordinates xb,yb into tester coordinates xt,yt.
+// Then it adds random offset limited to (-delta,+delta). In-place conversion
+// is also allowed here.
+function int Convert(float *xt, float *yt,float xb,float yb,float delta)
+  float x,y
+  x=xb*convcfi-yb*convsfi+convdx
+  y=xb*convsfi+yb*convcfi+convdy
+  if delta>0.0 then
+    x=x+Random(delta)+Random(delta)-delta
+    y=y+Random(delta)+Random(delta)-delta
+  endif
+  xt[0]=x
+  yt[0]=y
+end
+
+// Function calculates tester coordinates xt,yt of pad with given name. Returns
+// 0 on success and -1 on error.
+function int Convertpad(char *name,float *xt,float *yt)
+  int i
+  for i=0,i<NPOINT,i++ do
+    if Strcmp(name,xname[i])==0 break
+  enddo
+  if i>=NPOINT return -1
+  xt[0]=xpos[i]*convcfi-ypos[i]*convsfi+convdx
+  yt[0]=xpos[i]*convsfi+ypos[i]*convcfi+convdy
+  return 0
+end
+
+// Given side and Y coordinate, returns rail that can reach this coordinate,
+// or -1 if coordinate is not reachable.
+function int Railfromy(int side,float y)
+  int rail
+  for rail=0,rail<$LAY.nfing,rail++ do
+    if $LAY.side[rail]!=side continue
+    if y>=$LAY.bottom[rail]/1000.0 && y<$LAY.top[rail]/1000.0 break
+  enddo
+  if rail>=$LAY.nfing return -1
+  return rail
+end
+
+
+////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////// TESTER FUNCTIONS ///////////////////////////////
+
+// Assures that tester is loaded and that debug mode does not make test void.
+function int Loadtester()
+  int i,j,t,err,nframes
+  handle hload,hretry
+repeat:
+  clear hright
+  change hinfo limits=0,0
+  change hinfo text="软件复位"
+  draw window=hright font=TIMESFONT wrap=RIGHTX-5 color=BLACK
+  draw at 6,30 text="载入测试机,请稍等... "
+  draw show
+  delay 500
+  SYS.Softimm(0)
+  t=Time(); i=0
+  while $A[0].length==0 do
+    if Pressed(hexit) return -1        // Button "Exit" works as an interrupt
+    j=(Time()-t)/1000
+    if i!=j then
+      change hinfo text=format("等待软件复位 - %i s",j)
+      i=j
+    endif
+    if j>15 break
+    wait
+  enddo
+  clear hright
+  draw window=hright font=TIMESFONT
+  if $A[0].length==0 then
+    change hinfo name="机箱无应答"
+    draw at 6,30 wrap=RIGHTX-5 color=BLACK
+    draw text="No answer from the Flying Probe Tester. There is a variety of "
+    draw text="possible reasons. The most probable are:\n" color=LIGHTRED
+    draw text="- Tester is off\n"
+    draw text="- Flying Debugger or Test Player is running\n"
+    draw text="- Crash in embedded software\n"
+    draw text="- Optocable is pulled out\n"
+    draw color=BLACK text="Please correct the problem and try again."
+    draw show
+    hretry=control BUTTON
+      window=hright
+      position=(RIGHTX-120)/2,USERY,120,24
+      name="重试"
+      help="按下可以重新尝试连接"
+    endc
+    while 1 do
+      if Pressed(hretry) goto repeat
+      if Pressed(hexit) return -1
+      wait
+    enddo
+  else if $A[0].answer==S_ERROR &&                                             \
+    ($A[0].subcmd==E_NOCRATDATA || $A[0].subcmd==E_NOFINGDATA) then
+    change hinfo name="测试器未加载"
+    draw at 6,30 wrap=RIGHTX-5 color=BLACK
+    draw text="The Flying Probe Tester is not loaded. Of course, it "
+    draw color=LIGHTRED text="must " color=BLACK
+    draw text="be loaded before you can start test. Typically, all you "
+    draw text="need is to press 'Load all' in the appearing window. "
+    if $GLOBAL.disabledrails!=0 then
+      draw text="Please check for rails disabled in the Debug mode. "
+    endif
+    if ($GLOBAL.debugmode & 0x20BF)!=0 || ($GLOBAL.videomode & 0x20BF)!=0 ||   \
+      $uint4($GLOBAL+280)!=0 then
+      draw color=LIGHTRED
+      draw text="Please also check that current Debug mode really allows you "
+      draw text="to make measurements!"
+    endif
+    err=SYS.Videosize(0,&i,&j,&nframes);
+    if err!=0 || nframes==0 then
+      draw color=BLACK
+      draw text="\nNote also that frame grabber in your system is not "
+      draw text="accessible. Either it is absent, or not installed, or "
+      draw text="OllyTest was unable to locate support DLLs."
+    else if nframes<4 then
+      draw color=BLACK
+      draw text="\nNote also that amount of memory allocated to frame grabber "
+      draw text="is too low which may cause problems during the test. We "
+      draw text="recommend that you set frame buffer to 2 Mb."
+    endif
+    draw show
+    hload=control BUTTON
+      window=hright
+      position=RIGHTX/2-124,USERY,120,24
+      name="呼叫加载器"
+      help="按下可以加载飞针测试机程序"
+    endc
+    hretry=control BUTTON
+      window=hright
+      position=RIGHTX/2+5,USERY,120,24
+      name="重试"
+      help="按下可以重新尝试连接"
+    endc
+    loadchanged=0
+    while 1 do
+      if Pressed(hload) SYS.Start("LOADER",0,"")
+      if Pressed(hretry) goto repeat
+      if Pressed(hexit) return -1
+      if loadchanged!=0 && $GLOBAL.headloaded==1 break
+      wait
+    enddo
+  else if $A[0].answer!=S_RESET then
+    change hinfo name="软重置错误"
+    draw at 6,30 wrap=RIGHTX-5 color=BLACK
+    draw text="Flying Probe Tester returned some unexpected answer. Normally, "
+    draw text="this never happens. All I may suggest is to press Hard Reset "
+    draw text="and then reboot the tester. "
+    draw show
+    hload=control BUTTON
+      window=hright
+      position=RIGHTX/2-124,USERY,120,24
+      name="呼叫加载器"
+      help="按下可以加载飞针测试机程序"
+    endc
+    hretry=control BUTTON
+      window=hright
+      position=RIGHTX/2+5,USERY,120,24
+      name="重试"
+      help="按下可以重新尝试连接"
+    endc
+    loadchanged=0
+    while 1 do
+      if Pressed(hload) SYS.Start("LOADER",0,"")
+      if Pressed(hretry) goto repeat
+      if Pressed(hexit) return -1
+      if loadchanged!=0 && $GLOBAL.headloaded==1 break
+      wait
+    enddo
+  endif
+  return 0
+end
+
+// Gets actually loaded layout from the tester.
+function int Getlayout()
+  int i,j,t,ident,err
+  char buf[16]
+  handle hload,hretry
+repeat:
+  clear hright
+  change hinfo limits=0,0
+  change hinfo text="获取布局"
+  delay 300
+  buf[0]=S_LAYOUT
+  buf[1]=0x03                          // Read layout with corrected phases
+  ident=SYS.Sendimm(0,2,buf)
+  t=Time(); i=0; err=0
+  while $A[0].length==0 do
+    if Pressed(hexit) return -1        // Button "Exit" works as an interrupt
+    j=(Time()-t)/1000
+    if i!=j then
+      change hinfo text=format("等待布局 - %i s",j)
+      i=j
+    endif
+    if j>15 break
+    wait
+  enddo
+  if $A[0].length==0 then
+    err=2
+  else if $A[0].answer!=S_LAYOUT || $A[0].length!=774 then
+    err=1
+  else
+    // Layout received. Get layout extentions.
+    Memcpy($LAY,$A[0]+6,768)
+    for i=0,i<16,i++                   // Same offsets in tester & inner copy
+      $LAYCORR.leftzerox[i]=$LAY.leftzerox[i]
+      $LAYCORR.leftzeroy[i]=$LAY.leftzeroy[i]
+      $LAYCORR.rightzerox[i]=$LAY.rightzerox[i]
+      $LAYCORR.rightzeroy[i]=$LAY.rightzeroy[i]
+    enddo
+    if $LAY.extlay>=1 then
+      buf[0]=S_LAYOUT
+      buf[1]=15                        // Read main layout extention
+      SYS.Sendimm(0,2,buf)
+    endif
+    for j=1,j<$LAY.extlay && j<5,j++ do
+      buf[0]=S_LAYOUT
+      buf[1]=20                        // Read additional layout extention
+      $int4(buf+2)=j-1                 // Index
+      SYS.Sendimm(j,6,buf)
+    enddo
+    i=-1
+    while 1 do
+      for j=0,j<$LAY.extlay && j<5,j++ do
+        if $A[j].length==0 break
+        if $A[j].answer!=S_LAYOUT || $A[j].length!=(j==0?774:778) then
+          err=1; break                 // Invalid answer
+        endif
+      enddo
+      if err!=0 || j>=$LAY.extlay break
+      if Pressed(hexit) return -1
+      j=(Time()-t)/1000
+      if i!=j then
+        change hinfo text=format("等待布局 - %i s",j)
+        i=j
+      endif
+      if j>15 then
+        err=2; break                   // Timeout!
+      endif
+      wait
+    enddo
+    if err==0 then
+      Memcpy($EXTLAY,$A[0]+6,768)
+      if $LAY.extlay>=2 then
+        Memcpy($EXT0,$A[1]+10,768)
+      else
+        Memset($EXT0,0,768)
+      endif
+      if $LAY.extlay>=3 then
+        Memcpy($EXT1,$A[2]+10,768)
+      else
+        Memset($EXT1,0,768)
+      endif
+      if $LAY.extlay>=4 then
+        Memcpy($EXT2,$A[3]+10,768)
+      else
+        Memset($EXT2,0,768)
+      endif
+      if $LAY.extlay>=5 then
+        Memcpy($EXT3,$A[4]+10,768)
+      else
+        Memset($EXT3,0,768)
+      endif
+    endif
+    SYS.Broadcast(8,"CHG LAY")         // Inform others that layout changed
+  endif
+  if err==0 then
+    buf[0]=S_DUMP                      // Get version of embedded software
+    buf[1]=255                         // Request to crate controller
+    buf[2]=0x14                        // Get software version
+    $uint2(buf+3)=0                    // Number of items
+    $uint2(buf+5)=0                    // Start item
+    ident=SYS.Sendimm(0,7,buf)
+    change hinfo text="获取软件版本"
+    delay 300
+    t=Time(); i=0; err=0
+    while $A[0].length==0 do
+      if Pressed(hexit) return -1      // Button "Exit" works as an interrupt
+      if (Time()-t)>5000 break         // Timeout 5 seconds
+      wait
+    enddo
+    if $A[0].length==0 then
+      err=2
+    else if $A[0].answer==S_DUMP then  // Correct answer, extract subfields
+      j=5
+      for i=j,i<$A[0].length,i++
+        if $A[0].rawdata[i]==0x0A then
+          $A[0].rawdata[i]='\0'; i++
+          break
+        endif
+      enddo
+      Strcpy(crateversion,$A[0]+j)
+      j=i
+      for i=j,i<$A[0].length,i++
+        if $A[0].rawdata[i]==0x0A then
+          $A[0].rawdata[i]='\0'; i++
+          break
+        endif
+      enddo
+      Strcpy(layoutversion,$A[0]+j)
+      j=i
+      for i=j,i<$A[0].length,i++
+        if $A[0].rawdata[i]==0x0A then
+          $A[0].rawdata[i]='\0'; i++
+          break
+        endif
+      enddo
+      Strcpy(headversion,$A[0]+j)
+    else
+      err=3
+    endif
+  endif
+  draw window=hright color=BLACK font=TIMESFONT
+  draw at 6,30 wrap=RIGHTX-5
+  if err==1 || err==3 then
+    if err==1 then
+      change hinfo text="Error getting layout"
+      draw text="The script was unable to get layout correctly. "
+    else
+      change hinfo text="Error getting version"
+      draw text="The script was unable to get version of loaded software. "
+    endif
+    draw text="This error is absolutely unexpected here. Perharps, the best "
+    draw text="way to recover is to reboot the tester. If you select this "
+    draw text="option, then in the appearing window first press 'Hard reset', "
+    draw text="then 'Load all'. After the tester is loaded, try again."
+    draw show
+    hload=control BUTTON
+      window=hright
+      position=RIGHTX/2-124,USERY,120,24
+      name="呼叫加载器"
+      help="按下可以重新加载飞针测试机程序"
+    endc
+    hretry=control BUTTON
+      window=hright
+      position=RIGHTX/2+5,USERY,120,24
+      name="重试"
+      help="按下可以重新尝试获取布局或读取软件版本"
+    endc
+    loadchanged=0
+    while 1 do
+      if Pressed(hload) SYS.Start("LOADER",0,"")
+      if Pressed(hretry) goto repeat
+      if Pressed(hexit) return -1
+      if loadchanged!=0 && $GLOBAL.headloaded==1 break
+      wait
+    enddo
+  else if err==2 then
+    change hinfo text="No answer from crate"
+    draw text="No answer from the Flying Probe Tester. There is a variety of "
+    draw text="possible reasons. The most probable are:\n" color=LIGHTRED
+    draw text="- Tester is off\n"
+    draw text="- Flying Debugger or Test Player is running\n"
+    draw text="- Crash in embedded software\n"
+    draw text="- Optocable is pulled out\n"
+    draw color=BLACK text="Please correct the problem and try again."
+    draw show
+    hretry=control BUTTON
+      window=hright
+      position=(RIGHTX-120)/2,USERY,120,24
+      name="重试"
+      help="按下可以重新尝试连接"
+    endc
+    while 1 do
+      if Pressed(hretry) break
+      if Pressed(hexit) return -1
+      wait
+    enddo
+  endif
+  return err
+end
+
+// Gets list of features (MF_xxx) supported by measurement card. If command
+// fails, list is zeroed assuming only basical functionality.
+function int Getfeatures()
+  int t
+  char buf[32]
+  features=0
+  if $GLOBAL.a5==0 return
+  buf[0]=S_INPORT32
+  buf[1]=0xFF                          // Crate controller
+  $uint4(buf+2)=0x1002001F             // Query features of measurement card
+  SYS.Sendimm(0,6,buf)
+  t=Time()
+  while $A[0].length==0 do
+    if Time()-t>1500 return            // Timeout
+    wait
+  enddo
+  if $A[0].answer!=S_INPORT32 return   // Invalid answer
+  features=$uint4($A[0]+5)
+end
+
+// Gets type of attached automation (half-automate, automate etc.) into the
+// global variables automationtype and isauto. As these parameters are not
+// important for the test, there is no error processing.
+function int Getautomationtype()
+  int t
+  char buf[32]
+  buf[0]=S_DEBUG
+  buf[1]=0x14                          // Query type of the automation
+  SYS.Sendimm(32,2,buf)
+  t=Time()
+  automationtype=AUTO_UNKNOWN
+  isauto=0
+  while $A[32].length==0 do
+    if Time()-t>2000 then
+      SYS.Killimm(32)                  // Timeout, automation type is unknown
+      return
+    endif
+    wait
+  enddo
+  if $A[32].answer!=S_DEBUG || $A[32].length!=9 return
+  automationtype=$uint2($A[32]+5)
+  if automationtype==AUTO_A2 || automationtype==AUTO_A4SEMI ||                 \
+    automationtype==AUTO_A4FULL || automationtype==AUTO_A6SEMI ||              \
+    automationtype==AUTO_A6FULL || automationtype==AUTO_A5LMSEMI ||            \
+    automationtype==AUTO_A5LMFULL || automationtype==AUTO_S2LMMAN ||           \
+    automationtype==AUTO_S2LMSEMI || automationtype==AUTO_S2LMFULL ||          \
+    automationtype==AUTO_S2LMDCF || automationtype==AUTO_A7LMSEMI ||           \
+    automationtype==AUTO_A7LMFULL || automationtype==AUTO_A8LMMAN ||           \
+    automationtype==AUTO_A8LMSEMI || automationtype==AUTO_A8LMFULL             \
+  then
+    isauto=1
+  else
+    isauto=0
+  endif
+end
+
+// Checks layout and sets global variables testertype and testersides. If
+// tester is not recognized or not supported, function displays corresponding
+// message.
+function int Recognizetester()
+  int i,w,h
+  handle hok
+  clear hright
+  draw window=hright color=LIGHTRED font=TIMESFONT
+  draw at 6,60 wrap=RIGHTX-5
+  w=($LAY.rightlimit-$LAY.leftlimit)/1000
+y  h=Min($LAY.top[0]-$LAY.yoffset[0],$LAY.yoffset[0]-$LAY.bottom[0])/500
+  testersides=0
+  xmin=$LAY.leftlimit/1000.0
+  xmax=$LAY.rightlimit/1000.0
+  ymin=9.9e99
+  ymax=-9.9e99
+  for i=0,i<$LAY.nfing,i++
+    if $LAY.side[i]==0 then
+      testersides=testersides|1
+    else
+      testersides=testersides|2
+    endif
+    ymin=Min(ymin,$LAY.bottom[i]/1000.0)
+    ymax=Max(ymax,($LAY.top[i]-1)/1000.0)
+  enddo
+  if $LAY.nfing<=0 || $LAY.nfing>=16 then
+    testertype=TT_WRONG                // Wrong layout
+    draw text=format("Number of rails specified in the layout (%i) ",$LAY.nfing)
+    draw text="is wrong. "
+  else if w<=0 || h<=0 then
+    testertype=TT_WRONG                // Wrong layout
+    draw text="The size of the working area is wrong. "
+  else if $LAY.cameras==0 && $LAY.headcameras==0 then
+    testertype=TT_WRONG                // At least one camera must be present
+    draw text="There are no video cameras on the tester. "
+  else if ($LAY.config & 0x80)!=0 then
+    if h==45 then
+      testertype=TT_WRONG;             // M2 - not supported
+      draw text="M2 tester is not supported by this script. "
+    else
+      testertype=TT_WRONG;             // Contradiction in layout
+      draw text="The tester is declared as M2 in the layout, but the height "
+      draw text=format("of the rail is %i millimeters instead of 45. ",h)
+    endif
+  else if testersides==2 then
+    testertype=TT_WRONG                // Single-side tester
+    draw text="Layout states that this tester is single-sided and that all "
+    draw text="heads are from the bottom. "
+  else if h==155 && ($LAY.config & 3)==2 then
+    if w==600 && $LAY.software==0x84 then
+      testertype=TT_A2;                // A1 or A2 with linear motors
+    else if w==600 && $LAY.software==0x86 then
+      testertype=TT_A2;                // A1 or A2 with belts
+    else if w==600 && $LAY.software==0x8A then
+      testertype=TT_A2H;               // A2 (MCM modification)
+    else if w==600 && $LAY.software==0x8E then
+      testertype=TT_A4;                // A4
+    else if w>=310 && w<=600 && testersides==0x01 &&                           \
+      ($LAY.software==0xA7 || ($LAY.config & LC_TYPEMASK)==LC_S1) then
+      testertype=TT_S1;                // S1 (A7) tester
+    else if w>=310 && w<=600 && testersides==0x03 &&                           \
+      ($LAY.software==0xA7 || $LAY.software==0xA8 ||                           \
+      ($LAY.config & LC_TYPEMASK)==LC_S1) then
+      testertype=TT_S2;                // S2 tester
+    else if $LAY.software==0xA9 || $LAY.software==0xAA ||                      \
+      ($LAY.config & LC_TYPEMASK)==LC_S3 then
+      testertype=TT_S3;                // S3 tester
+    else if $LAY.software==0xB8 || ($LAY.config & LC_TYPEMASK)==LC_A8 then
+      testertype=TT_A8;                // A8 tester
+    else if w==600 && ($LAY.software==0xA5 || $LAY.software==0xA6) then
+      testertype=TT_A6;                // A6 tester
+    else if w==800 && $LAY.software==0x84 then
+      testertype=TT_A2L;               // A1L or A2L with linear motors
+    else if w==800 && $LAY.software==0x86 then
+      testertype=TT_A2L;               // A1L or A2L with belts
+    else
+      testertype=TT_WRONG;             // Unknown tester
+      draw text=format("The width of the test area is %i millimeters ",w)
+      draw text="instead of expected 600 or 800 for A2/A4/A6 tester. "
+    endif;
+  else if h==200 then
+    if w==520 && $LAY.software==0xA5 then
+      testertype=TT_A5;                // A5
+    else if w==450 then
+      testertype=TT_A3;                // A3
+    else if w==520 then
+      testertype=TT_A3L;               // A3L
+    else
+      testertype=TT_WRONG;             // Unknown tester
+      draw text=format("The width of the test area is %i millimeters ",w)
+      draw text="instead of expected 450 or 520 for A3/A5 testers. "
+    endif
+  else if h==225 || h==230 || h==240 then
+    if w==610 && $LAY.software==0xA5 then
+      testertype=TT_A5L;               // A5L
+    else if w>=610 && w<=625 && $LAY.software==0xA5 &&                         \
+      ($LAY.config & LC_LDMASK)==LC_LMAUTO then
+      testertype=TT_A5L;               // A5A (L&M automate)
+    else
+      testertype=TT_WRONG;             // Unknown tester
+      draw text=format("The width of the test area is %i millimeters ",w)
+      draw text="instead of expected 610 for A5L testers. "
+    endif
+  else if h>=250 && h<=260 then
+    if $LAY.software==0xB7 || ($LAY.config & LC_TYPEMASK)==LC_A8 then
+      testertype=TT_A7;                // A7
+    else
+      testertype=TT_WRONG;             // Unknown tester
+      draw text="Unable to recognize the type of the tester. "
+    endif
+  else
+    testertype=TT_WRONG;               // Tester not recognized
+    draw text="Unable to recognize the type of the tester. "
+    if h!=155 && h!=200 then
+      draw color=BLACK text="Strange height of the rail "
+      draw text=format("(%i millimeters instead of expected 155, ",h)
+      draw text="200, 230, 240 or 255) is encountered. "
+    endif
+  endif
+  if $LAY.cameras!=0 then
+    leftlimit=($LAY.leftlimit+$LAY.videodeadx)/1000.0
+    if testertype==TT_A1 || testertype==TT_A2 || testertype==TT_A2L ||         \
+      testertype==TT_A2H                                                       \
+    then
+      rightlimit=($LAY.rightlimit-$LAY.videodeadx)/1000.0
+    else
+      rightlimit=$LAY.rightlimit/1000.0
+    endif
+  else
+    leftlimit=$LAY.leftlimit/1000.0
+    rightlimit=$LAY.rightlimit/1000.0
+  endif
+  if testertype==TT_A1 || testertype==TT_A2 || testertype==TT_A2L ||           \
+    testertype==TT_A2H || testertype==TT_A4 || testertype==TT_A6 ||            \
+    testertype==TT_S1 || testertype==TT_S2 || testertype==TT_S3 ||             \
+    testertype==TT_A8 then
+    if $EXTLAY.headcamradius!=0 then
+      headcamradius=$EXTLAY.headcamradius/1000.0
+    else
+      headcamradius=118.0
+    endif
+  else if testertype==TT_A3 || testertype==TT_A3L || testertype==TT_A5 ||      \
+    testertype==TT_A5L then
+    if $EXTLAY.headcamradius!=0 then
+      headcamradius=$EXTLAY.headcamradius/1000.0
+    else
+      headcamradius=153.0
+    endif
+  else if testertype==TT_A7 then
+    if $EXTLAY.headcamradius!=0 then
+      headcamradius=$EXTLAY.headcamradius/1000.0
+    else
+      headcamradius=183.0
+    endif
+  else
+    draw color=BLACK
+    draw text="Therefore I don't know how to run this test. Please "
+    if testertype!=TT_M2 && $LAY.cameras!=0 then
+      draw text="check the settings in the layout and correct them, or "
+    endif
+    draw text="use different test procedure which supports given machine."
+    draw at 6,30 color=LIGHTRED text="Unrecoverable error detected!"
+    draw show
+    clear hleft
+    change hleft help="无法使用这种测试机"
+    draw window=hleft color=DARKGRAY font=LARGEFONT mode=M_CENTERED
+    draw at 95,70 bitmap=0,0,0,"unknown"
+    draw show
+    change hinfo limits=0,0
+    change hinfo text="Unable to test"
+    hok=control BUTTON
+      window=hright
+      position=(RIGHTX-120)/2,USERY,120,24
+      name="！！..."
+      help="按下可以终止测试"
+    endc
+    while Pressed(hok)==0 && Pressed(hexit)==0 do
+      wait
+    enddo
+    testertype=TT_WRONG
+  endif
+end
+
+// Selects board orientation (orientation=0: vertical, 1: horizontal with pads
+// on the bottom). returns 0 on success and -1 when operator decided to
+// interrupt test.
+function int Selectorientation()
+  int redraw,x,y,buttons,prevbuttons
+  handle hvert,hhorz,hok
+  change hinfo limits=0,0
+  change hinfo text="Select board orientation"
+  clear hright
+  draw window=hright font=TIMESFONT wrap=RIGHTX-5 color=BLACK
+  draw at 6,30 text="Please select orientation of the test board. Press "
+  draw font=MAINFONT text="OK " font=TIMESFONT text="when ready."
+  draw show
+  clear hleft
+  draw window=hleft bkcolor=WHITE clear
+  draw font=MEDIUMFONT mode=M_CENTERED
+  draw at LEFTX/2,40 text="Select orientation:"
+  draw at 68,72 bitmap=216,108,0,"comptest"
+  draw show
+  orientation=0
+  getini("Component test","Orientation","%i",&orientation)
+  hvert=control RADIO
+    window=hleft
+    position=38+28,69+130,110,18
+    text="Vertical"
+    help="选中以选择垂直板方向"
+    bkcolor=WHITE
+    font=INFOFONT
+  endc
+  hhorz=control RADIO
+    window=hleft
+    position=173+22,69+130,110,18
+    text="Horizontal"
+    help="选中以选择水平板方向"
+    bkcolor=WHITE
+    font=INFOFONT
+  endc
+  if orientation==0 then
+    change hvert mode=M_CHECKED
+  else
+    change hhorz mode=M_CHECKED
+  endif
+  hok=control BUTTON
+    window=hright
+    position=(RIGHTX-120)/2,USERY,120,24
+    name="确定"
+    help="按下以确认板方向"
+  endc
+  prevbuttons=0
+  redraw=1
+  while 1 do
+    if redraw then
+      draw window=hleft
+      if orientation==0 then
+        draw color=LIGHTRED
+        draw at 37,68 rect=37+116,68+116
+        draw at 38,69 rect=38+114,69+114
+        draw at 39,70 rect=39+112,70+112
+        draw color=WHITE
+        draw at 172,68 rect=172+116,68+116
+        draw at 174,70 rect=174+112,70+112
+        draw color=GRAY
+        draw at 173,69 rect=173+114,69+114
+      else
+        draw color=WHITE
+        draw at 37,68 rect=37+116,68+116
+        draw at 39,70 rect=39+112,70+112
+        draw color=GRAY
+        draw at 38,69 rect=38+114,69+114
+        draw color=LIGHTRED
+        draw at 172,68 rect=172+116,68+116
+        draw at 173,69 rect=173+114,69+114
+        draw at 174,70 rect=174+112,70+112
+      endif
+      draw show
+      redraw=0
+    endif
+    // Check mouse.
+    if Mousexy(hleft,&x,&y,&buttons)>0 then
+      if (buttons & 1)!=0 && (prevbuttons & 1)==0 && y>=69 && y<=69+114 then
+        if x>=38 && x<38+114 && orientation!=0 then
+          orientation=0
+          change hvert mode=M_CHECKED
+          redraw=1
+        else if x>=173 && x<173+114 && orientation==0 then
+          orientation=1
+          change hhorz mode=M_CHECKED
+          redraw=1
+        endif
+      endif
+    endif
+    prevbuttons=buttons
+    if Pressed(hexit) then
+      return -1
+    else if Pressed(hvert) then
+      if orientation!=0 then
+        orientation=0
+        redraw=1
+      endif
+    else if Pressed(hhorz) then
+      if orientation==0 then
+        orientation=1
+        redraw=1
+      endif
+    else if Pressed(hok) then
+      setini("Component test","Orientation","%i",orientation)
+      return 0
+    endif
+    wait
+  enddo
+end
+
+// Draws board in the left window. If mode is 1, additionally marks location
+// of fiducials used to locate rough board position.
+function int Drawboard(int mode)
+  clear hleft
+  draw window=hleft color=WHITE bkcolor=WHITE clear
+  if orientation==0 then
+    draw at 110,40 clip=110+87,40+180
+    draw bitmap=0,0,0,"comptest"
+    draw clip=NULL
+    if mode==1 then
+      draw color=LIGHTRED font=LARGEFONT mode=M_LEFT
+      draw at 113-10,43-10 rect 113+10,43+10
+      draw at 113-11,43-11 rect 113+11,43+11
+      draw at 113-12,43-12 rect 113+12,43+12
+      draw at 81,63 text="1"
+      draw at 194-10,217-10 rect 194+10,217+10
+      draw at 194-11,217-11 rect 194+11,217+11
+      draw at 194-12,217-12 rect 194+12,217+12
+      draw at 214,237 text="2"
+    endif
+  else
+    draw at 70,60 clip=70+180,60+87
+    draw at 70-181,60-45 bitmap=0,0,0,"comptest"
+    draw clip=NULL
+    if mode==1 then
+      draw color=LIGHTRED font=LARGEFONT mode=M_LEFT
+      draw at 73-10,144-10 rect 73+10,144+10
+      draw at 73-11,144-11 rect 73+11,144+11
+      draw at 73-12,144-12 rect 73+12,144+12
+      draw at 41,164 text="1"
+      draw at 246-10,63-10 rect 246+10,63+10
+      draw at 246-11,63-11 rect 246+11,63+11
+      draw at 246-12,63-12 rect 246+12,63+12
+      draw at 263,83 text="2"
+    endif
+  endif
+  draw show
+end
+
+// Returns 0 on success and -1 if operator decided to interrupt the test.
+function int Installboard(int isa4)
+  int i,t,ident,portdata,prevdata
+  char buf[32]
+  handle hstatus,hlock,hunlock,hok
+  change hinfo limits=0,0
+  change hinfo text="Install board"
+  Drawboard(0)
+  clear hright
+  draw window=hright font=TIMESFONT wrap=RIGHTX-5
+  draw at 6,30 color=BLACK
+  draw text="Install EL502 in the location where you want to make your tests. "
+  draw text="Press " font=MAINFONT text="OK " font=TIMESFONT text="when ready."
+  draw show
+  if isa4 then
+    hstatus=NULL
+  else
+    hstatus=control TEXT
+      window=hright
+      name="未知架板框状态"
+      position=5,180,RIGHTX-10,21
+      font=MEDIUMFONT
+      color=BLACK
+      bkcolor=PINK
+      mode=M_CENTERED|M_BORDER
+    endc
+  endif
+  hlock=control BUTTON
+    window=hright
+    position=5,USERY,RIGHTX/3-5,24
+    name="锁止"
+    help="按下可以锁住架板框"
+  endc
+  hunlock=control BUTTON
+    window=hright
+    position=5+RIGHTX/3,USERY,RIGHTX/3-5,24
+    name="解锁"
+    help="按下可以解锁架板框"
+  endc
+  hok=control BUTTON
+    window=hright
+    position=5+2*(RIGHTX/3),USERY,RIGHTX/3-9,24
+    name="确定"
+    help="当产品正确放置后按下"
+  endc
+  disable hok
+  t=0; portdata=-1; prevdata=portdata
+  while 1 do
+    if portdata!=prevdata then
+      if isa4 then
+        enable hok
+      else
+        i=portdata & 0x35
+        if i==0x20 then                // Shuttle locked in test position
+          enable hok
+          change hstatus text="Shuttle locked"
+        else if (i & 0x10)==0 && testertype!=TT_S1 &&                          \
+          testertype!=TT_S2 then
+          disable hok
+          change hstatus text="Shuttle in"
+        else
+          disable hok
+          change hstatus text="Shuttle out"
+        endif
+      endif
+      prevdata=portdata
+    endif
+    if Pressed(hlock) then
+      buf[0]=S_LOCKDOOR; buf[1]=1      // Lock door
+      SYS.Send(2,buf,0)
+    else if Pressed(hunlock) then
+      buf[0]=S_LOCKDOOR; buf[1]=0      // Unlock door
+      SYS.Send(2,buf,0)
+    else if Pressed(hok) && (portdata & 0x35)==0x20 then
+      return 0
+    else if Pressed(hexit) then
+      return -1
+    endif
+    wait
+    if t==0 then                       // Send next port query
+      buf[0]=S_INPORT
+      $uint2(buf+1)=0x00F0             // Hardware control port
+      ident=SYS.Sendimm(0,3,buf)
+      t=Time()+10000                   // Timeout 10 seconds
+    else if $A[0].length>0 then
+      if $A[0].answer==S_INPORT then
+        portdata=$A[0].inport          // Correct answer
+        t=0
+      endif
+    else if t<Time() then
+      SYS.Killsend(ident)
+      t=0
+    endif
+  enddo
+end
+
+// Asks L&M for the value of the specified parameter. If answer is present,
+// sets value to the received string <parm>=<answer> (i.e. parm and equation
+// sign are included). If answer is absent (#), value remains unchanged.
+// Returns 0 on success, 1 on failure or if value is absent and -1 if user
+// cancelled test.
+function int Getlmparameter(char *parm,char *value)
+  int i,n,haseq,hashash
+  char buf[768]
+  SYS.Killimm(33)
+  buf[0]=S_LMAUTO
+  buf[1]=3                             // Get parameter
+  n=2+sprintf(buf+2,"%s",parm)
+  SYS.Sendimm(33,n,buf)
+  while $A[33].length==0 do
+    if Pressed(hexit) return -1        // Interrupt
+    wait
+  enddo
+  if $A[33].answer!=S_LMAUTO return 1  // Bad answer
+  haseq=0; hashash=0;
+  for i=0,i<$A[33].length-6,i++ do
+    if $char($A[33]+6+i)=='=' haseq=1
+    if $char($A[33]+6+i)=='#' hashash=1
+  enddo
+  if haseq==0 || hashash!=0 return 1
+  for i=0,i<$A[33].length-6,i++ do
+    value[i]=$char($A[33]+6+i)
+  enddo
+  value[i]='\0'
+  return 0
+end
+
+// Gets actual teachin settings for L&M hardware. Settings are saved to the
+// array lmteachin[], prefix MECH.Teachin is replaced by MECH.Para. Returns 0
+// on success, >0 in the case of communication error or -1 if operator decided
+// to interrupt the test.
+function int Getteachinsettings()
+  int i
+  nlmteachin=0
+  if ($LAY.config & LC_LDMASK)!=LC_LMAUTO &&                                   \
+    ($LAY.config & LC_LDMASK)!=LC_EPCOSAUTO &&                                 \
+    ($LAY.config & LC_LDMASK)!=LC_LMS2AUTO return 0
+  i=Getlmparameter("MECH.Teachin.ShuttleX",lmteachin[nlmteachin])
+  if i!=0 return i
+  Memcpy(lmteachin[nlmteachin]+5,"Para",4)
+  Strcpy(lmteachin[nlmteachin]+9,lmteachin[nlmteachin]+12)
+  nlmteachin++
+  i=Getlmparameter("MECH.Teachin.ShuttleY",lmteachin[nlmteachin])
+  if i!=0 return i
+  Memcpy(lmteachin[nlmteachin]+5,"Para",4)
+  Strcpy(lmteachin[nlmteachin]+9,lmteachin[nlmteachin]+12)
+  nlmteachin++
+  if ($LAY.config & LC_LDMASK)==LC_LMS2AUTO then
+    i=Getlmparameter("MECH.Para.InputShuttleX",lmteachin[nlmteachin])
+    if i!=0 return i
+    nlmteachin++
+    i=Getlmparameter("MECH.Para.InputShuttleY",lmteachin[nlmteachin])
+    if i!=0 return i
+    nlmteachin++
+  else
+    i=Getlmparameter("MECH.Para.BoardH",lmteachin[nlmteachin])
+    if i!=0 return i
+    nlmteachin++
+    i=Getlmparameter("MECH.Para.BoardW",lmteachin[nlmteachin])
+    if i!=0 return i
+    nlmteachin++
+  endif
+  i=Getlmparameter("MECH.Para.UseCatcherOnly",lmteachin[nlmteachin])
+  if i!=0 return i
+  nlmteachin++
+  return 0
+end
+
+// Sends text command to L&M automation and waits for answer. Returns 1 on
+// success, 0 on failure, 2 on timeout and -1 if user cancelled test.
+function int Sendlmcommand(char *cmd,char *answer,char *error,int timeout)
+  int m,n,status
+  char buf[768]
+  SYS.Killimm(33)
+  buf[0]=S_LMAUTO
+  buf[1]=4                             // Send command
+  $uint2(buf+2)=timeout                // Timeout, seconds
+  n=4+sprintf(buf+4,"%s\n",cmd)
+  n=n+sprintf(buf+n,"%s",answer)
+  SYS.Sendimm(33,n,buf)
+  while $A[33].length==0 do
+    if Pressed(hexit) return -1        // Interrupt
+    wait
+  enddo
+  if $A[33].answer!=S_LMAUTO return 0  // Bad answer
+  status=$uint2($A[33]+6)
+  if (status & 0x01) return 2          // Timeout
+  if $char($A[33]+8)=='1' then
+    n=8
+    m=0                                // Success
+    while $char($A[33]+n)!='\n' && n<$A[33].length do
+      error[m]=$char($A[33]+n)
+      m++; n++
+    enddo
+    error[m]='\0'
+    return 1
+  else
+    n=8                                // Error
+    while $char($A[33]+n)!='\n' && n<$A[33].length do
+      n++
+    enddo
+    if $char($A[33]+n)=='\n' && n<$A[33].length n++
+    m=0
+    while $char($A[33]+n)!='\n' && n<$A[33].length do
+      error[m]=$char($A[33]+n)
+      m++; n++
+    enddo
+    error[m]='\0'
+    return 0
+  endif
+end
+
+// Installs holder in L&M automatical shuttle. Returns 0 on success, >0 in the
+// case of communication error or -1 if operator decided to interrupt script.
+function int InstallboardLM()
+  int i,t,nfing,firsttime,prevdata,portdata,adjusting,adjusted,setpos,err
+  char s[512],path[260],errtxt[256],buf[256]
+  handle f,hstatus,hload,hunload,hadjust,hok,hyes,hno
+  nfing=$LAY.nfing
+  firsttime=1
+  // Move all heads in home position. This movement is not critical, so I don't
+  // check for possible errors.
+  for i=0,i<nfing,i++
+    sprintf(buf,"M %i(Z) %i(Z) NOP",i*2,i*2+1)
+    SERV.Cmdimm(i,buf)
+  enddo
+  t=Time()
+  while (1) do
+    for i=0,i<nfing,i++
+      if $A[i].length==0 break         // Some answers are still not here
+    enddo
+    if i>=nfing break                  // All answers came
+    if Pressed(hexit) return -1        // Operator interrupted test
+    if Time()-t>10000 break            // No answer within 10 s timeout
+    wait
+  enddo
+  Drawboard(0)
+  clear hright
+  change hinfo limits=0,0
+  change hinfo text="Setting pure manual mode..."
+  // Check whether there is a board in the shuttle. It may happen that previous
+  // test was interrupted. In this case, don't change any settings!
+  SYS.Killimm(32)
+  buf[0]=S_INPORT
+  $uint2(buf+1)=0x00F0                 // Hardware control port
+  SYS.Sendimm(32,3,buf)
+  t=Time()
+  while 1 do
+    if $A[32].length>0 break
+    if Pressed(hexit) return -1
+    if Time()-t>5000 break
+    wait
+  enddo
+  if $A[32].length==7 && $A[32].answer==S_INPORT then
+    portdata=$A[32].inport
+  else
+    portdata=0
+  endif
+  if orientation==0 then
+    Strcpy(path,"c:\\hardware\\shuttle_compv.txt")
+  else
+    Strcpy(path,"c:\\hardware\\shuttle_comph.txt")
+  endif
+  if (portdata & 0x35)!=0x20 then
+    // Set positions of L&M actuators for the board.
+    f=Fopen(path,"rb")
+    if f!=NULL then
+      Fclose(f)
+      change hinfo text="Setting up shuttle..."
+      sprintf(s,"PS.Cmd=FileRead %s",path)
+      i=Sendlmcommand(s,"PS.Ready.FileRead",errtxt,5)
+      if i<0 return -1
+      setpos=(i==1)
+      buf[0]=S_LOCKDOOR; buf[1]=0      // Unlock shuttle, moves actuators
+      SYS.Send(2,buf,0)                // Do not wait for answer, no need
+    else
+      setpos=0                         // Shuttle positions not set
+    endif
+  else
+    setpos=0
+  endif
+  // Set pure manual automation mode.
+  i=Sendlmcommand("MECH.Cmd=SetMode 5","MECH.Ready.SetMode",errtxt,20)
+  if i<0 return -1
+  // Installation controls.
+  change hinfo text="Install board"
+  hstatus=control TEXT
+    window=hright
+    name="未知架板框状态"
+    position=9,190,RIGHTX-17,21
+    font=MEDIUMFONT
+    color=BLACK
+    bkcolor=PINK
+    mode=M_CENTERED|M_BORDER
+  endc
+  hload=control BUTTON
+    window=hright
+    position=RIGHTX/2-124,USERY-35,120,24
+    name="加载"
+    help="按下可以将板装载到架板框"
+  endc
+  hunload=control BUTTON
+    window=hright
+    position=RIGHTX/2+5,USERY-35,120,24
+    name="卸载"
+    help="按下可以将板从架板框上卸下"
+  endc
+  hadjust=control BUTTON
+    window=hright
+    position=RIGHTX/2-124,USERY,120,24
+    name="调试"
+    help="按下可以使用手动控制箱调节架板框"
+  endc
+  disable hadjust
+  hok=control BUTTON
+    window=hright
+    position=RIGHTX/2+5,USERY,120,24
+    name="确定"
+    help="如果板安装正确，请按下。"
+  endc
+  draw window=hright color=BLACK font=TIMESFONT
+  draw at 6,30 wrap=RIGHTX-5
+  draw text="Now install the component test board EL502-1. Press "
+  draw font=MAINFONT text="Adjust " font=TIMESFONT text="to adjust widht and "
+  draw text="height of the shuttle manually. Press " font=MAINFONT text="OK "
+  draw font=TIMESFONT text="when board is correctly placed in the shuttle."
+  draw show
+  // Main loop.
+  err=0
+  prevdata=-1
+  adjusting=0
+  adjusted=0
+  t=0
+  while err==0 do
+    if portdata!=prevdata then
+      i=portdata & 0x35
+      if adjusting then
+        change hstatus text="Adjustment mode"
+        enable hload
+        disable hunload
+        disable hadjust
+        disable hok
+      else if i==0x20 then             // Shuttle locked in test position
+        change hstatus text="Board in the shuttle"
+        disable hload
+        enable hunload
+        disable hadjust
+        if firsttime then
+          disable hok
+        else
+          enable hok
+        endif
+      else
+        change hstatus text="Shuttle out"
+        enable hload
+        enable hunload
+        //enable hadjust
+        disable hadjust
+        disable hok
+      endif
+      prevdata=portdata
+    endif
+    if Pressed(hload) then
+      if adjusting then
+        i=Sendlmcommand("MECH.Para.Teachin=0","",errtxt,10)
+        if i<0 return -1
+        i=Sendlmcommand("MECH.Cmd=TeachInFinished",                            \
+          "MECH.Ready.TeachInFinished",errtxt,60)
+        if i<0 return -1
+        i=Sendlmcommand("MECH.Cmd=SetMode 5","MECH.Ready.SetMode",errtxt,60)
+        if i<0 return -1
+        adjusting=0
+        prevdata=-1
+      endif
+      buf[0]=S_LOCKDOOR; buf[1]=1      // Lock door
+      SYS.Send(2,buf,0)                // Do not wait for answer, no need
+      firsttime=0
+      prevdata=-1
+    else if Pressed(hunload) then
+      if adjusting then
+        i=Sendlmcommand("MECH.Para.Teachin=0","",errtxt,10)
+        if i<0 return -1
+        i=Sendlmcommand("MECH.Cmd=TeachInFinished",                            \
+          "MECH.Ready.TeachInFinished",errtxt,60)
+        if i<0 return -1
+        i=Sendlmcommand("MECH.Cmd=SetMode 5","MECH.Ready.SetMode",errtxt,60)
+        if i<0 return -1
+        adjusting=0
+        prevdata=-1
+      endif
+      buf[0]=S_LOCKDOOR; buf[1]=0      // Unlock door
+      SYS.Send(2,buf,0)                // Do not wait for answer, no need
+      firsttime=0
+      prevdata=-1
+    else if Pressed(hadjust) then
+      i=Sendlmcommand("MECH.Cmd=SetMode 4","MECH.Ready.SetMode",errtxt,60)
+      if i<0 return -1
+      i=Sendlmcommand("MECH.Para.Teachin=1","",errtxt,10)
+      if i<0 return -1
+      adjusting=1
+      adjusted=1
+      prevdata=-1
+    else if Pressed(hok) && ((portdata & 0x35)==0x20) then
+      if adjusted!=0 then
+        // Shuttle settings were probably changed, ask to update file.
+        clear hright
+        change hinfo limits=0,0
+        change hinfo text="Save shuttle settings"
+        draw window=hright color=BLACK font=TIMESFONT
+        draw at 6,30 wrap=RIGHTX-5
+        draw text="Would you like to save the actual shuttle settings to the "
+        draw text="disk, so that the next test will automatically use "
+        draw text="them?\n\n" color=GRAY text="Note: board size and catchers "
+        draw text="remain unchanged; if necessary, edit them directly in the "
+        draw text=format("file %s.",path)
+        hyes=control BUTTON
+          window=hright
+          position=RIGHTX/2-124,USERY,120,24
+          name="是"
+          help="按下将架板框设置保存到文件"
+        endc
+        hno=control BUTTON
+          window=hright
+          position=RIGHTX/2+5,USERY,120,24
+          name="否"
+          help="按下可仅在当前会话中使用新的架板框设置"
+        endc
+        while 1 do
+          if Pressed(hexit) then
+            return -1
+          else if Pressed(hno) then
+            break
+          else if Pressed(hyes) then
+            Getteachinsettings()
+            if nlmteachin>0 then
+              f=Fopen(path,"wt")
+              if f!=NULL then
+                for i=0,i<nlmteachin,i++ do
+                  fprintf(f,"%s\n",lmteachin[i])
+                enddo
+                Fclose(f)
+              endif
+            endif
+            break
+          endif
+          wait
+        enddo
+      endif
+      break
+    else if Pressed(hexit) then
+      return -1
+    endif
+    if t==0 then                       // Send next port query
+      SYS.Killimm(32)
+      buf[0]=S_INPORT
+      $uint2(buf+1)=0x00F0             // Hardware control port
+      SYS.Sendimm(32,3,buf)
+      t=Time()                         // Timeout 5 seconds
+    else if $A[32].length>0 then
+      if $A[32].answer==S_INPORT then
+        portdata=$A[32].inport         // Correct answer
+        t=0
+      else
+        err=2                          // Wrong answer from tester
+      endif
+    else if Time()-t>5000 then
+      t=0
+      err=1                            // No answer from tester
+    endif
+    wait
+  enddo
+  return err
+end
+
+// Asks operator to find the rough location of two fiducials on the board.
+// Returns -1 if operator interrupted test, 0 if both crosses are found and
+// automatical scanning is requested, 1 if crosses are found manually and 2 if
+// operator decided to change board placement.
+function int Locateboard()
+  int i,n,y,head,selected,firstpos,updatexy,okallowed,move,moving,ret
+  int videoon,showvideo,updatevideo,channel,side
+  float dx,dy,r,posx,posy,angle
+  char s[256]
+  handle hmanual,hx,hy,hu,hl,hr,hd
+  handle hpos1,hpos2,hok,hrepos,hview,hlivevideo
+  change hinfo limits=0,0
+  change hinfo text="Find board position"
+  Drawboard(1)
+  clear hright
+  // Information.
+  draw window=hright font=TIMESFONT wrap=RIGHTX-5
+  draw at 6,30 color=BLACK
+  draw text="Now find rough positions of two marked fiducials. Press "
+  draw font=MAINFONT text="Fid 1 " font=TIMESFONT text="or " font=MAINFONT
+  draw text="Fid 2 " font=TIMESFONT text="to select fiducial. "
+  // X-Y coordinates.
+  draw color=DARKGRAY font=INFOFONT
+  draw at 11,130 text="Current X="
+  draw at 139,130 text=", Y="
+  draw at 227,130 text="mm"
+  getini("Component test","Skip autoscan","%i",&i)
+  hmanual=control CUSTOMBOX
+    window=hright
+    position=10,81,RIGHTX-20,22
+    name="不自动扫描对位点"
+    help="检查忽略自动扫描定位的基准点"
+    mode=(i==0?0:M_CHECKED)
+  endc
+  hx=control TEXT
+    window=hright
+    position=82,111,54,22
+    help="相机的实际X坐标"
+    font=MEDIUMFONT
+    mode=M_BORDER|M_CENTERED
+    bkcolor=PINK
+  endc
+  hy=control TEXT
+    window=hright
+    position=168,111,54,22
+    help="相机的实际Y坐标"
+    font=MEDIUMFONT
+    mode=M_BORDER|M_CENTERED
+    bkcolor=PINK
+  endc
+  draw show
+  // Location cross.
+  y=USERY-88
+  hu=control BUTTON
+    window=hright
+    position=60,y,40,40
+    name="上"
+    help="按下可以向上移动相机"
+    font=MEDIUMFONT
+    mode=M_REPEAT
+  endc
+  hl=control BUTTON
+    window=hright
+    position=18,y+43,40,40
+    name="左"
+    help="按下可以向左移动相机"
+    font=MEDIUMFONT
+    mode=M_REPEAT
+  endc
+  hr=control BUTTON
+    window=hright
+    position=102,y+43,40,40
+    name="右"
+    help="按下可以向右移动相机"
+    font=MEDIUMFONT
+    mode=M_REPEAT
+  endc
+  hd=control BUTTON
+    window=hright
+    position=60,y+86,40,40
+    name="下"
+    help="按下可将相机向下移动"
+    font=MEDIUMFONT
+    mode=M_REPEAT
+  endc
+  // Buttons.
+  hpos1=control BUTTON
+    window=hright
+    position=166,173,RIGHTX-180,24
+    name="基准 1"
+    help="按下可以找到第一个基准点的位置"
+    color=BLACK
+    bkcolor=GRAY
+  endc
+  hpos2=control BUTTON
+    window=hright
+    position=166,204,RIGHTX-180,24
+    name="基准 2"
+    help="按下可以找到第二个基准点的位置"
+    color=BLACK
+    bkcolor=GRAY
+  endc
+  hok=control BUTTON
+    window=hright
+    position=166,266,RIGHTX-180,24
+    name="确定"
+    help="当产品的大概位置找到时按下"
+    color=BLACK
+    bkcolor=GRAY
+  endc
+  disable hok
+  okallowed=0
+  hrepos=control BUTTON
+    window=hright
+    position=166,297,RIGHTX-180,24
+    name="重放置"
+    help="当需要更改产品的位置时按下"
+    color=BLACK
+    bkcolor=GRAY
+  endc
+  // Video viewer.
+  hview=control CHILD
+    window=hleft
+    position=-1000,-1000,LEFTX,LEFTY
+    help=" "
+    color=BROWN
+    bkcolor=LIGHTYELLOW
+    size=128
+  endc
+  hlivevideo=control GRAPH
+    window=hview
+    position=5,5,LEFTX-10,288
+    bkcolor=VIDEOFILL
+    help="相机的实时图像"
+  endc
+  Bccreate(hview,-1,-1,channel)
+  // Get expected coordinates from the last run.
+  pos1x=0.0; pos1y=0.0;
+  pos2x=0.0; pos2y=0.0
+  getini("Component test",(orientation==0?"FiducialsV":"FiducialsH"),          \
+    "%g,%g,%g,%g",&pos1x,&pos1y,&pos2x,&pos2y)
+  // Distance betwen the fiducials is 240 mm in long and 80 in short direction.
+  r=Sqrt((pos2x-pos1x)*(pos2x-pos1x)+(pos2y-pos1y)*(pos2y-pos1y))
+  if Abs(r-CROSSDIST)>1.5 then
+    if orientation==0 then
+      pos1x=$LAY.xoffset/1000.0-40.0
+      pos1y=(ymin+ymax)/2.0+120.0
+      pos2x=pos1x+80.0
+      pos2y=pos1y-240.0
+    else
+      pos1x=$LAY.xoffset/1000.0-120.0
+      pos1y=(ymin+ymax)/2.0-40.0
+      pos2x=pos1x+240.0
+      pos2y=pos1y+80.0
+    endif
+  endif
+  videoon=0
+  showvideo=0
+  selected=0
+  firstpos=1
+  updatexy=1
+  move=showvideo
+  moving=0
+  updatevideo=1
+  posx=pos1x; posy=pos1y
+  side=-1
+  Camerafromy(posy,&channel,&side,&angle)
+  // Location loop.
+  while 1 do
+    // Process location cross.
+    if Pressed(hu) then
+      dx=0.0; dy=(Status(hu)+1)*VSTEP
+    else if Pressed(hl) then
+      dx=-(Status(hl)+1)*VSTEP; dy=0.0
+    else if Pressed(hr) then
+      dx=(Status(hr)+1)*VSTEP; dy=0.0
+    else if Pressed(hd) then
+      dx=0.0; dy=-(Status(hd)+1)*VSTEP
+    else
+      dx=0.0; dy=0.0
+    endif
+    if dx!=0.0 || dy!=0.0 then
+      if posx+dx<xmin dx=xmin-posx
+      if posx+dx>xmax dx=xmax-posx
+      if posy+dy<ymin dy=ymin-posy
+      if posy+dy>ymax dy=ymax-posy
+      posx=Max(xmin,Min(posx+dx,xmax))
+      posy=Max(ymin,Min(posy+dy,ymax))
+      if firstpos then
+        pos2x=Max(xmin,Min(pos2x+dx,xmax))
+        pos2y=Max(ymin,Min(pos2y+dy,ymax))
+      endif
+      if selected==0 then
+        pos1x=posx; pos1y=posy
+      else
+        pos2x=posx; pos2y=posy
+      endif
+      showvideo=1; updatexy=1; move=1
+    endif
+    // Update coordinate display.
+    if updatexy then
+      change hx text=format("%5.1f",posx)
+      change hy text=format("%5.1f",posy)
+      updatexy=0
+    endif
+    // Check distance and allow/disable OK button.
+    r=Sqrt((pos2x-pos1x)*(pos2x-pos1x)+(pos2y-pos1y)*(pos2y-pos1y))
+    if Abs(r-CROSSDIST)>1.5 && okallowed!=0 then
+      disable hok
+      okallowed=0
+    else if Abs(r-CROSSDIST)<=1.5 && showvideo==1 && okallowed!=1 then
+      enable hok
+      okallowed=1
+    endif
+    // Process action buttons.
+    if Pressed(hpos1) then
+      posx=pos1x; posy=pos1y
+      selected=0
+      change hpos1 color=LIGHTRED
+      change hpos1 bkcolor=YELLOW
+      change hpos2 color=BLACK
+      change hpos2 bkcolor=GRAY
+      showvideo=1
+      updatexy=1
+      move=1
+    else if Pressed(hpos2) then
+      posx=pos2x; posy=pos2y
+      selected=1
+      change hpos2 color=LIGHTRED
+      change hpos2 bkcolor=YELLOW
+      change hpos1 color=BLACK
+      change hpos1 bkcolor=GRAY
+      firstpos=0
+      showvideo=1
+      updatexy=1
+      move=1
+    else if Pressed(hok) then
+      setini("Component test",(orientation==0?"FiducialsV":"FiducialsH"),      \
+        "%g,%g,%g,%g",pos1x,pos1y,pos2x,pos2y)
+      ret=Status(hmanual);
+      setini("Component test","Skip autoscan","%i",ret)
+      break
+    else if Pressed(hrepos) then
+      ret=2; break
+    else if Pressed(hexit) then
+      ret=-1; break
+    endif
+    // Check whether we need to start camera movement.
+    if move!=0 && moving==0 then
+      head=Camerafromy(posy,&channel,&side,&angle)
+      if head<0 then                     // Error
+        ;
+      else
+        if $LAY.cameras!=0 then          // Dedicated cameras
+          sprintf(s,"M %i(%g,%gA2) NOP",head,posx,posy)
+          SERV.Cmdimm(0,s)
+        else                             // Head cameras
+          n=sprintf(s,"M @%i[%g,%gA2] ",head,posx,posy)
+          for i=0,i<$LAY.nfing*2,i++ do
+            if i==head continue
+            if ($LAY.headcameras & (1<<i))==0 continue
+            n=n+sprintf(s+n,"%i(Z)",i)
+          enddo
+          sprintf(s+n,"NOP")
+          SERV.Cmdimm(0,s)
+          SERV.Cmdimm(32,"OUTPORT32 ALL 0x80000002,0")
+          sprintf(s,"OUTPORT32 HEAD(%i) 0x80000002,3",head)
+          SERV.Cmdimm(32,s)
+        endif
+        moving=1
+        move=0
+        updatevideo=1
+      endif
+    endif
+    // Check whether movement is finished.
+    if moving!=0 && $A[0].length>0 then
+      moving=0
+    endif
+    // Check whether it's time to turn on video.
+    if videoon==0 && showvideo!=0 then
+      change hview position=-1,-1,LEFTX,LEFTY
+      videoon=1
+    endif
+    // Check whether we need to change displayed image.
+    if videoon!=0 then
+      updatevideo=updatevideo|Bcupdate()
+      if updatevideo then
+        head=Camerafromy(posy,&channel,&side,&angle)
+        Bcsetcam(channel)
+        SYS.Videoangle(hlivevideo,channel,side,                                \
+          (testertype==TT_S3?0.2:0.5),                                         \
+          Bcgetbri(channel),Bcgetctr(channel),2,angle)
+        updatevideo=0
+      endif
+    endif
+    wait
+  enddo
+  Bcdelete()
+  return ret
+end
+
+// Searches for the fiducial in the vicinity of the given coordinates. Returns
+// -1 if operator decided to interrupt the test, 2 if procedure was unable to
+// define fiducial, 3 if fiducial was not found, 4 if camera was unable to
+// reach the fiducial, and 0 if fiducial was found correctly and posx and posy
+// are assigned corrected coordinates.
+function int Searchcross(handle hlivevideo,float *posx,float *posy)
+  int i,j,t,head,channel,side,videox,videoy
+  int attempts,nfound,err
+  float x,y,dx,dy,bestx,besty,angle,xsc,ysc,found[4][3],corrmax
+  char s[512]
+  handle hfid[10]
+  x=posx[0]; y=posy[0]
+  attempts=8; err=0
+  SYS.Killimm(32)                      // Recover from previous scanning
+  head=Camerafromy(y,&channel,&side,&angle)
+  if head<0 err=1
+  // Get camera magnification. Scales are in millimeters per 512 pixel.
+  sprintf(s,"Video scale[%i]",side)
+  xsc=6.4; ysc=6.4                     // Default video magnification
+  getini("System",s,"%f,%f",&xsc,&ysc)
+  xsc=Max(0.2,Min(12.0,xsc))
+  ysc=Max(0.2,Min(12.0,ysc))
+  // Define fiducials. We have crosses and dots.
+  for j=0,j<5,j++ do                   // Different size (-40% .. +40%)
+    hfid[j]=SYS.Syntmodel(channel,SYNT_CROSS,                                  \
+    0.8/xsc*512.0,linewidth/xsc*512.0*(1.0+(j-2)*0.20),0,0,0)
+    hfid[j+5]=SYS.Syntmodel(channel,SYNT_CIRCLE,                               \
+    1.0/xsc*512.0*(1.0+(j-2)*0.20),0,0,0,0)
+  enddo
+  while (attempts>0 && err==0) do
+    attempts--
+    SYS.Videoangle(hlivevideo,channel,side,                                    \
+      (testertype==TT_S3?0.2:0.5),                                             \
+      Bcgetbri(channel),Bcgetctr(channel),2,angle)
+    // Move camera into the coordinates. In case of head cameras, all other
+    // heads must be moved away.
+    if $LAY.cameras!=0 then            // Dedicated camera
+      sprintf(s,"M %i(%g,%gA5) NOP",head,x,y)
+    else                               // Head camera, move other heads away
+      for i=0,i<$LAY.nfing*2,i++ do
+        if i==head continue
+        sprintf(s,"M %i(Z) NOP",i)
+        SERV.Cmdimm(33,s)
+      enddo
+      SERV.Cmdimm(33,"OUTPORT32 ALL 0x80000002,0")
+      sprintf(s,"OUTPORT32 HEAD(%i) 0x80000002,3",head)
+      SERV.Cmdimm(33,s)
+      sprintf(s,"M @%i[%g,%g] NOP",head,x,y)
+    endif
+    SERV.Cmdimm(32,s)
+    t=Time()
+    while $A[32].length==0 && err==0 do
+      if Pressed(hexit) err=-1         // Operator interrupted test
+      if Time()-t>10000 err=1          // Timeout
+      wait
+    enddo
+    if err!=0 break
+    if $A[32].answer!=S_NOP then
+      err=1; break
+    endif
+    delay 200                          // Some additional delay for camera
+    SYS.Nextframe(channel)
+    SYS.Videosize(channel,&videox,&videoy,&j)
+    corrmax=0.0
+    for j=0,j<10,j++ do
+      if hfid[j]==NULL continue
+      nfound=SYS.Recognangle(hfid[j],0,0,videox,videoy,found,angle,0)
+      if nfound==0 continue
+      if found[0,2]>corrmax then
+        bestx=found[0,0]
+        besty=found[0,1]
+        corrmax=found[0,2]
+      endif
+    enddo
+    dx=(bestx-videox/2)*xsc/512.0
+    dy=(besty-videoy/2)*ysc/512.0
+    // Offsets dx and dy are given in millimeters along the camera
+    // axes. We must rotate them into the tester coordinates.
+    x=x+(dx*Cos(angle)+dy*Sin(angle))*(side==0?1.0:-1.0)
+    y=y-(dy*Cos(angle)-dx*Sin(angle))
+    if Abs(dx)<0.1 && Abs(dy)<0.1 then
+      posx[0]=x                        // Fiducial found exactly
+      posy[0]=y
+      break
+    endif
+  enddo
+  if attempts<=0 err=3
+  // Clean up and report result.
+  for j=0,j<10,j++ do
+    if hfid[j]!=NULL SYS.Deletemodel(hfid[j])
+  enddo
+  if $LAY.cameras==0 && $LAY.headcameras!=0 then
+    SERV.Cmdimm(33,"OUTPORT32 ALL 0x80000002,0")
+  endif
+  return err
+end
+
+// Given rough fiducial coordinates, scans board optically and calculates
+// necessary coordinate conversion coefficients.
+function int Scanboard(int manualonly)
+  int i,err,x,y
+  float r,xmin,xmax,ymin,ymax
+  char s[512]
+  handle hview,hlivevideo,hreplace,hfinish
+  clear hright
+  change hinfo limits=0,0
+  change hinfo text="Checking coordinates..."
+  r=Sqrt((pos1x-pos2x)*(pos1x-pos2x)+(pos1y-pos2y)*(pos1y-pos2y))
+  delay 500                            // Merchantizing...
+  if Abs(r-CROSSDIST)>1.5 then
+    err=1                              // Wrong distance between crosses
+  endif
+  if manualonly==0 then
+    if err==0 then
+      hview=control CHILD
+        window=hleft
+        position=0,0,LEFTX,LEFTY
+        help=" "
+        color=BROWN
+        bkcolor=LIGHTYELLOW
+        size=128
+      endc
+      hlivevideo=control GRAPH
+        window=hview
+        position=5,5,LEFTX-10,288
+        bkcolor=VIDEOFILL
+        help="相机的实时图像"
+      endc
+      x=(LEFTX-10)/2; y=288/2
+      draw window=hlivevideo color=LIGHTRED
+      draw at x-20,y to x-5,y at x+6,y to x+21,y
+      draw at x,y-20 to x,y-5 at x,y+6 to x,y+21
+      draw show
+      change hinfo text="寻找基准点..."
+      err=Searchcross(hlivevideo,&pos1x,&pos1y)
+      if err<0 return -1                 // Operator interrupted test
+    endif
+    if err==0 then
+      err=Searchcross(hlivevideo,&pos2x,&pos2y)
+      if err<0 return -1                 // Operator interrupted test
+    endif
+    if err==0 then
+      r=Sqrt((pos1x-pos2x)*(pos1x-pos2x)+(pos1y-pos2y)*(pos1y-pos2y))
+      if Abs(r-CROSSDIST)>0.8 err=1
+    endif
+  endif
+  // Move heads and cameras into the home positions.
+  for i=0,i<$LAY.nfing*2,i++ do
+    sprintf(s,"M %i(Z) NOP",i)
+    SERV.Cmdimm(32,s)
+  enddo
+  delay 1000                           // Psychologically necessary delay
+  if hview!=NULL destroy hview
+  if err==0 then
+    r=(crossx[1]-crossx[0])*(crossx[1]-crossx[0])+                             \
+      (crossy[1]-crossy[0])*(crossy[1]-crossy[0])
+    convcfi=((crossx[1]-crossx[0])*(pos2x-pos1x)+                              \
+      (crossy[1]-crossy[0])*(pos2y-pos1y))/r
+    convsfi=((crossx[1]-crossx[0])*(pos2y-pos1y)-                              \
+      (crossy[1]-crossy[0])*(pos2x-pos1x))/r
+    convdx=pos1x-crossx[0]*convcfi+crossy[0]*convsfi
+    convdy=pos1y-crossx[0]*convsfi-crossy[0]*convcfi
+    Convert(&xmin,&ymin,-3.0,-3.0,0.0)
+    Convert(&xmax,&ymax,30.0,238.0,0.0)
+    if xmin>xmax then
+      r=xmin; xmin=xmax; xmax=r
+    endif
+    if ymin>ymax then
+      r=ymin; ymin=ymax; ymax=r
+    endif
+    sprintf(s,"默认板 %g,%g,%g,%g",xmin,ymin,xmax,ymax)
+    SERV.Cmdimm(32,s)                  // Allow whole pad area
+    // For A5/A6/S1 with splinogramms, increase pressure to 70 parrots.
+    if (($LAY.config & 0x100)!=0 &&                                            \
+      (testertype==TT_A5 || testertype==TT_A5L || testertype==TT_A6 ||         \
+      testertype==TT_S1 || testertype==TT_S2 || testertype==TT_S3 ||           \
+      testertype==TT_A7 || testertype==TT_A8)) strokep=70
+    sprintf(s,"STROKE %i,%i,%g",strokev,strokep,strokez)
+    SERV.Cmdimm(32,s)                  // Set default stroke
+    return 0                           // No errors, pads found correctly
+  endif
+  change hinfo text="Scanning error"
+  draw window=hright font=TIMESFONT wrap=RIGHTX-5
+  draw at 6,30 color=LIGHTRED
+  if err==1 then
+    draw text="Bad distance between crosses!"
+    draw at 6,60 color=BLACK
+    draw text="The distance between positioning crosses on the board is "
+    draw text=format("%.0f mm. However, measured distance is ",CROSSDIST)
+    draw text=format("%.1f mm.",r)
+  else if err==2 then
+    draw text="Unable to define fiducial!"
+    draw at 6,60 color=BLACK
+    draw text="Either you have no frame grabber, or some other script uses "
+    draw text="all available fiducial handles, or magnification of the camera "
+    draw text="in file OLLYTEST.INI is wrong. "
+  else if err==3 then
+    draw text="Unable to find cross!"
+    draw at 6,60 color=BLACK
+    draw text="Either you selected wrong place, or picture is too unclear, or "
+    draw text="magnification of the camera in file OLLYTEST.INI is wrong. "
+  else if err==4 then
+    draw text="Unable to move camera!"
+    draw at 6,60 color=BLACK
+    draw text="Video camera cannot reach specified pad. "
+  endif
+  draw text="Please decide what to do next."
+  draw show
+  hreplace=control BUTTON
+    window=hright
+    position=RIGHTX/2-124,USERY,120,24
+    name="重放置"
+    help="按下可以重复扫描或更换板"
+  endc
+  hfinish=control BUTTON
+    window=hright
+    position=RIGHTX/2+5,USERY,120,24
+    name="放弃"
+    help="按下即可退出测试"
+  endc
+  while 1 do
+    if Pressed(hexit) then
+      return -1                        // Operator interrupted test
+    else if Pressed(hreplace) then
+      return 1                         // Change board placement or rescan
+    else if Pressed(hfinish) then
+      return 2                         // Operator stopped test
+    endif
+    wait
+  enddo
+end
+
+// Unloads board from the shuttle. Used in the case of L&M automation. Returns
+// -1 if user interrupted the script and 0 in any other case.
+function int UnloadboardLM()
+  int i,j,t
+  char buf[32],errtxt[256]
+  if ($LAY.config & LC_LDMASK)!=LC_LMAUTO then
+    return 0                           // Does not apply
+  endif
+  Drawboard(0)
+  // Make soft reset before sending commands to automation directly: heads may
+  // still move!
+  clear hright
+  change hinfo limits=0,0
+  change hinfo text="软件复位"
+  SYS.Softimm(32)
+  t=Time(); i=0
+  while $A[32].length==0 do
+    if Pressed(hexit) return -1        // Button "Exit" works as an interrupt
+    j=(Time()-t)/1000
+    if i!=j then
+      change hinfo text=format("等待软件复位 - %i s",j)
+      i=j
+    endif
+    if j>15 return 0                   // Too long soft reset
+    wait
+  enddo
+  change hinfo limits=0,0
+  change hinfo text="Unloading board..."
+  draw window=hright font=TIMESFONT wrap=RIGHTX-5
+  draw at 6,30 color=BLACK
+  draw text="Component test board will be unloaded from the shuttle. To "
+  draw text="avoid damages, please remove it from the band."
+  draw show
+  // For the case that tester is in the adjustment mode.
+  i=Sendlmcommand("MECH.Cmd=SetMode 2","MECH.Ready.SetMode",errtxt,5)
+  if i<0 return -1
+  SYS.Killimm(32)
+  buf[0]=S_LOCKDOOR
+  buf[1]=0                             // Unlock door
+  SYS.Sendimm(32,2,buf)
+  while $A[32].length==0 do
+    if Pressed(hexit) return -1        // Interrupt
+    wait
+  enddo
+  return 0
+end
+
+
+////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////// MEASUREMENTS /////////////////////////////////
+
+#define PADLEN         10              // Max allowed length of pad name
+
+#define MODE_NONE      0               // As yet no selected test mode
+#define MODE_COMP      1               // Component measurement
+#define MODE_FILT      2               // Component measurement, filter
+#define MODE_UREG      3               // Component measurement, U reg/op amp
+#define MODE_UI        4               // U-I measurement
+#define MODE_DIV       5               // Resistive voltage divider
+
+typedef struct t_plot                  // U-I graph descriptor
+  int            ncurr                 // Number of data points
+  float          curr[24]              // Requested currents
+  float          volt[24]              // Measured voltages
+  float          umin,umax             // Voltage limits
+  int            valid                 // Validity flag
+  int            selected              // Selected point, or -1 if none
+  float          scalex                // X scale, pixel per volt
+  float          stepx                 // X step, volts
+  float          scaley                // Y scale, pixel per mA
+  float          stepy                 // Y step, mA
+  int            basex                 // X pixel corresponding to U=0
+  int            basey                 // Y pixel corresponding to I=0
+ends
+
+int              testmode              // Test mode, one of MODE_xxx
+int              hasimage              // Whether image is displayed
+float            fampl[7]              // Measured amplitudes at 1, 2,..,64 kHz
+float            fphase[7]             // Measured phases at 1, 2,..,64 kHz
+int              fcursor               // Selected frequency measurement, 0..6
+
+handle           hcmd                  // Command
+handle           hatext[6]             // Text associated with the answer
+handle           hanswer[6]            // Answer displays
+float            afactor[6]            // Factor for hanswer
+handle           hmeasure              // Start measurement
+handle           hptext                // Text associated with U-I plot
+handle           hplot                 // U-I or frequency response plot
+struct t_plot    plot                  // U-I graph descriptor
+
+// Measurement description understands following records:
+// #T  - title, text follows
+// #C  - component command, command follows
+// #D  - diode (U-I) measurement, currents in text format follow
+// #F  - frequency response or U-U plot
+// #An - answer to component command with explanation
+// #Xn - same as #A, but multiplied by 1000
+// #In - image from a5comp.bmp
+// #H  - help text
+
+char   npn[600] =                    \ // NPN transistor
+  "#T NPN transistor"                                                          \
+  "#C I  (@NPN_B, I=1e-4, UMAX=0.9)|GND (@NPN_E)|U  (@NPN_C, U=5, R=100)|"     \
+  "MI (@NPN_C)|I  (@NPN_B, I=0.005)|MU (@NPN_C, GND)"                          \
+  "#X0 Ic when Ib=100 uA, mA:"                                                 \
+  "#A1 Saturation voltage, volts:"                                             \
+  "#H First, tester sets base current to 100 uA, applies 5 V to the collector "\
+  "and measures collector current. Ratio Ic/Ib is the current amplification "  \
+  "factor. Then it increases base current to 5 mA and measures saturation "    \
+  "voltage on the collector (protected by the 100 Ohm resistor on the output " \
+  "of the voltage source."
+
+char   pnp[600] =                    \ // PNP transistor
+  "#T PNP transistor"                                                          \
+  "#C I  (@PNP_B, I=-1e-4, UMAX=0.9)|GND (@PNP_E)|U  (@PNP_C, U=-5, R=100)|"   \
+  "MI (@PNP_C)|I  (@PNP_B, I=-0.005)|MU (@PNP_C, GND)"                         \
+  "#X0 Ic when Ib=-100 uA, mA:"                                                \
+  "#A1 Saturation voltage, volts:"                                             \
+  "#H First, tester sets base current to -100 uA, applies -5 V to collector "  \
+  "and measures collector current. Ratio Ic/Ib is the current amplification "  \
+  "factor. Then it increases base current to -5 mA and measures saturation "   \
+  "voltage on the collector (protected by the 100 Ohm resistor on the output " \
+  "of the voltage source."
+
+char   z27[450] =                    \ // Zener diode, 2.7 V
+  "#T Zener diode 2.7 V"                                                       \
+  "#D PAD1=Z27_A|PAD2=Z27_C|UMIN=-3.5|UMAX=1.5|I=-10.0|I=-5.0|I=-2.0|I=-0.5|"  \
+  "I=-0.1|I=-0.03|I=0.0|I=0.03|I=0.1|I=0.5|I=2.0|I=5.0|I=10.0"                 \
+  "#H Tester consecutively applies different currents to the Zener diode "     \
+  "and measures voltages (limited to range -3.5 .. +1.5V). In forward "        \
+  "direction Zener is an ordinary diode with approx. 0.7 V at 2 mA. In "       \
+  "backward direction it must open at approx. -2.7 V."
+
+char   z56[450] =                    \ // Zener diode, 5.6 V
+  "#T Zener diode 5.6 V"                                                       \
+  "#D PAD1=Z56_A|PAD2=Z56_C|UMIN=-6.5|UMAX=1.5|I=-10.0|I=-5.0|I=-2.0|I=-0.5|"  \
+  "I=-0.1|I=-0.03|I=0.0|I=0.03|I=0.1|I=0.5|I=2.0|I=5.0|I=10.0"                 \
+  "#H Tester consecutively applies different currents to the Zener diode "     \
+  "and measures voltages (limited to range -6.5 .. +1.5V). In forward "        \
+  "direction Zener is an ordinary diode with approx. 0.7 V at 2 mA. In "       \
+  "backward direction it must open at approx. -5.6 V."
+
+char   z100[450] =                   \ // Zener diode, 10 V
+  "#T Zener diode 10 V"                                                        \
+  "#D PAD1=Z100_A|PAD2=Z100_C|UMIN=-12.5|UMAX=1.5|I=-10.0|I=-5.0|I=-2.0|"      \
+  "I=-0.5|I=-0.1|I=-0.03|I=0.0|I=0.03|I=0.1|I=0.5|I=2.0|I=5.0|I=10.0"          \
+  "#H Tester consecutively applies different currents to the Zener diode "     \
+  "and measures voltages (limited to range -12.5 .. +1.5V). In forward "       \
+  "direction Zener is an ordinary diode with approx. 0.7 V at 2 mA. In "       \
+  "backward direction it must open at approx. -10 V."
+
+char   fuse[600] =                   \ // Fuse (PTC0.05)
+  "#T Fuse PTC0.05"                                                            \
+  "#C I   (@FUSE_1, I=0.05, UMAX=9)|GND (@FUSE_2)|DLY (350)|"                  \
+  "MU  (@FUSE_1, @FUSE_2)|SET (@FUSE_1, I=0.15)|DLY (350)|"                    \
+  "MU  (@FUSE_1, @FUSE_2)|SET (@FUSE_1, I=0.05)|DLY (350)|"                    \
+  "MU  (@FUSE_1, @FUSE_2)"                                                     \
+  "#A0 Voltage when I=50 mA, V:"                                               \
+  "#A1 Voltage when I=250 mA, V:"                                              \
+  "#A2 Voltage when I=50 mA again, V:"                                         \
+  "#H Tester sends 50 mA current through the fuse. It must remain in the "     \
+  "low-ohmical state (low voltage on the fuse). Then current increases to "    \
+  "250 mA. The fuse must get activated and the measured voltage must reach "   \
+  "the 9 V limit. When current drops to 50 mA again, fuse must open."
+
+char   relay[700] =                  \ // Reed relay
+  "#T Reed relay"                                                              \
+  "#C I   (@RLY_I1, I=0, UMAX=7)|GND (@RLY_I2)|U   (@RLY_O1, U=1, R=100)|"     \
+  "GND (@RLY_O2)|MU  (@RLY_O1, GND)|SET (@RLY_I1, 0.02)|DLY (1)|"              \
+  "MU  (@RLY_O1, GND)|SET (@RLY_I1, 0.012)|DLY (1)|MU  (@RLY_O1, GND)|"        \
+  "SET (@RLY_I1, 0.005)|DLY (1)|MU  (@RLY_O1, GND)"                            \
+  "#I0"                                                                        \
+  "#A0 Voltage when relay is off (I=0)"                                        \
+  "#A1 Voltage when relay is on (I=20 mA)"                                     \
+  "#A2 Current reduced (I=12 mA)"                                              \
+  "#A3 Current is too low (I=2 mA)"                                            \
+  "#H First we measure voltage on the output when relay is off (I=0). It "     \
+  "must be close to 1 V. After current in the winding is set to 20 mA, relay " \
+  "must turn on (voltage close to zero). Relay must remain on when current "   \
+  "is reduced to 12 mA but turn off when current drops to 5 mA."
+
+char   lowpass[650] =                \ // Low-pass RC filter
+  "#T Low-pass RC filter"                                                      \
+  "#C GND  (@RC_C)|"                                                           \
+  "UAC  (@RC_R, U=1, F=1000)|MUAC (@RC_OUT, GND)|MUPH (@RC_OUT, GND)|"         \
+  "UAC  (@RC_R, U=1, F=2000)|MUAC (@RC_OUT, GND)|MUPH (@RC_OUT, GND)|"         \
+  "UAC  (@RC_R, U=1, F=4000)|MUAC (@RC_OUT, GND)|MUPH (@RC_OUT, GND)|"         \
+  "UAC  (@RC_R, U=1, F=8000)|MUAC (@RC_OUT, GND)|MUPH (@RC_OUT, GND)|"         \
+  "UAC  (@RC_R, U=1, F=16000)|MUAC (@RC_OUT, GND)|MUPH (@RC_OUT, GND)|"        \
+  "UAC  (@RC_R, U=1, F=32000)|MUAC (@RC_OUT, GND)|MUPH (@RC_OUT, GND)|"        \
+  "UAC  (@RC_R, U=1, F=64000)|MUAC (@RC_OUT, GND)|MUPH (@RC_OUT, GND)"         \
+  "#F"                                                                         \
+  "#I1"                                                                        \
+  "#H Script measures attenuation and phase shift of the simple first-order "  \
+  "low-pass R-C filter at frequencies 1, 2, 4, 8, 16, 32 and 64 kHz."
+
+char   highpass[650] =               \ // High-pass RC filter
+  "#T High-pass RC filter"                                                     \
+  "#C GND  (@RC_R)|"                                                           \
+  "UAC  (@RC_C, U=1, F=1000)|MUAC (@RC_OUT, GND)|MUPH (@RC_OUT, GND)|"         \
+  "UAC  (@RC_C, U=1, F=2000)|MUAC (@RC_OUT, GND)|MUPH (@RC_OUT, GND)|"         \
+  "UAC  (@RC_C, U=1, F=4000)|MUAC (@RC_OUT, GND)|MUPH (@RC_OUT, GND)|"         \
+  "UAC  (@RC_C, U=1, F=8000)|MUAC (@RC_OUT, GND)|MUPH (@RC_OUT, GND)|"         \
+  "UAC  (@RC_C, U=1, F=16000)|MUAC (@RC_OUT, GND)|MUPH (@RC_OUT, GND)|"        \
+  "UAC  (@RC_C, U=1, F=32000)|MUAC (@RC_OUT, GND)|MUPH (@RC_OUT, GND)|"        \
+  "UAC  (@RC_C, U=1, F=64000)|MUAC (@RC_OUT, GND)|MUPH (@RC_OUT, GND)"         \
+  "#F"                                                                         \
+  "#I2"                                                                        \
+  "#H Script measures attenuation and phase shift of the simple first-order "  \
+  "high-pass R-C filter at frequencies 1, 2, 4, 8, 16, 32 and 64 kHz."
+
+char   i7805[700] =                  \ // 7805 voltage regulator
+  "#T 7805 voltage regulator"                                                  \
+  "#C GND (@VREG_GND)|RGND(@VREG_OUT, 1000)|"                                  \
+  "U   (@VREG_IN, U=0)|MU  (@VREG_OUT, GND)|"                                  \
+  "U   (@VREG_IN, U=1)|MU  (@VREG_OUT, GND)|"                                  \
+  "U   (@VREG_IN, U=2)|MU  (@VREG_OUT, GND)|"                                  \
+  "U   (@VREG_IN, U=3)|MU  (@VREG_OUT, GND)|"                                  \
+  "U   (@VREG_IN, U=4)|MU  (@VREG_OUT, GND)|"                                  \
+  "U   (@VREG_IN, U=5)|MU  (@VREG_OUT, GND)|"                                  \
+  "U   (@VREG_IN, U=6)|MU  (@VREG_OUT, GND)|"                                  \
+  "U   (@VREG_IN, U=7)|MU  (@VREG_OUT, GND)|"                                  \
+  "U   (@VREG_IN, U=8)|MU  (@VREG_OUT, GND)|"                                  \
+  "U   (@VREG_IN, U=9)|MU  (@VREG_OUT, GND)"                                   \
+  "#F "                                                                        \
+  "#H Script loads output of the voltage regulator with resistor 1 kOhm and "  \
+  "measures output voltage as a function of the input voltage. Starting from " \
+  "approx. 7.5 V, output voltage must remain stable at 5.0 V."
+
+char   invert[600] =                 \ // NPN transistor
+  "#T MOSFET inverter"                                                         \
+  "#C GND (@INV_GND)|U   (@INV_IN, U=0, IMAX=0.1)|U   (@INV_VCC, U=5, R=100)|" \
+  "MU  (@INV_OUT, GND)|SET (@INV_IN, 5)|MU  (@INV_OUT, GND)|MI  (@INV_VCC)"    \
+  "#A0 Uout when Uin=0V, volt:"                                                \
+  "#A1 Uout when Uin=5V, volt:"                                                \
+  "#X2 Supply current, mA:"                                                    \
+  "#H Script sets input voltage of the MOSFET-based inverter to zero, "        \
+  "applies 5 V supply and measures voltage on the output. It must be equal "   \
+  "to supply. When input voltage is 5 V, output must drop to zero. "           \
+  "Additionally, script measures supply current which must be very close to "  \
+  "zero."
+
+char   triac[800] =                 \ // Triac
+  "#T Triac (bidirectional thyristor)"                                         \
+  "#C GND (@TRI_T1)|I   (@TRI_GATE, I=0)|U   (@TRI_T2, U=10, R=100)|"          \
+  "MI  (@TRI_T2)|SET (@TRI_GATE, I=0.005)|MI  (@TRI_T2)|"                      \
+  "MU  (@TRI_T2, @TRI_T1)|SET (@TRI_GATE, 0)|MI  (@TRI_T2)|"                   \
+  "SET (@TRI_T2, 0.5)|SET (@TRI_T2, 10)|MI  (@TRI_T2)"                         \
+  "#X0 Initial current, mA:"                                                   \
+  "#X1 Current when Ig=5 mA, mA:"                                              \
+  "#A2 Saturation voltage, V:"                                                 \
+  "#X3 Current when Ig=0 mA, mA:"                                              \
+  "#X4 Current after cycling voltage, mA:"                                     \
+  "#H Gate current is initially zero. When 10 V are applied between the "      \
+  "terminals, triac must remain in the off state. 5 mA gate current should "   \
+  "turn it on. Current must increases to approx. 88 mA and voltage between "   \
+  "the terminals must drop to 1.2 V. Triac remains on when gate current is "   \
+  "turned off but must turn off after voltage shortly drops to 0.5 V."
+
+char   div[300] =                   \ // Voltage divider
+  "#T Voltage divider"                                                         \
+  "#C VCC=DIV_4|OUT=DIV_3|GND=DIV_2|IMAX=0.030|UMAX=5.0"                       \
+  "#I3"                                                                        \
+  "#A0 R1, Ohm:"                                                               \
+  "#A1 R2, Ohm:"                                                               \
+  "#A2 Rparallel, Ohm:"                                                        \
+  "H Script uses dedicated command to measure not only the resistors in the "  \
+  "divider, but also the external resistance parallel to the divider."
+
+char   opamp[650] =                 \ // Operational amplifier
+  "#T Operational amplifier (repeater)"                                        \
+  "#C GND (@OP_GND)|U   (@OP_VCC, U=9, IMAX-0.1)|RGND(@OP_OUT, 100000)|"       \
+  "U   (@OP_IN, U=0, R=100)|MU  (@OP_OUT, GND)|"                               \
+  "SET (@OP_IN, 1)|MU  (@OP_OUT, GND)|"                                        \
+  "SET (@OP_IN, 2)|MU  (@OP_OUT, GND)|"                                        \
+  "SET (@OP_IN, 3)|MU  (@OP_OUT, GND)|"                                        \
+  "SET (@OP_IN, 4)|MU  (@OP_OUT, GND)|"                                        \
+  "SET (@OP_IN, 5)|MU  (@OP_OUT, GND)|"                                        \
+  "SET (@OP_IN, 6)|MU  (@OP_OUT, GND)|"                                        \
+  "SET (@OP_IN, 7)|MU  (@OP_OUT, GND)|"                                        \
+  "SET (@OP_IN, 8)|MU  (@OP_OUT, GND)|"                                        \
+  "SET (@OP_IN, 9)|MU  (@OP_OUT, GND)"                                         \
+  "#I4"                                                                        \
+  "#F "                                                                        \
+  "#H Operational amplifier TL081 is known for its bad behaviour when "        \
+  "Uin is close to the negative supply voltage. Typically, Uin must exceed "   \
+  "Ucc- by at least 2.5 V."
+
+// Prepares test with given index.
+function int Settest(int select)
+  int i,j,k,y,cmd,subcmd
+  char s[2048],t[2048]
+  // Clear window.
+  clear htest
+  testmode=MODE_NONE
+  hcmd=NULL
+  for i=0,i<6,i++ do
+    hatext[i]=NULL
+    hanswer[i]=NULL
+  enddo
+  for i=0,i<7,i++ do
+    fampl[i]=0.0
+    fphase[i]=0.0
+  enddo
+  hptext=NULL
+  hplot=NULL
+  hmeasure=NULL
+  hasimage=0
+  // Select test program.
+  draw window=htest bkcolor=LIGHTGRAY clear
+  if select==0 then                    // NPN transistor
+    Strcpy(s,npn)
+    testmode=MODE_COMP
+  else if select==1 then               // PNP transistor
+    Strcpy(s,pnp)
+    testmode=MODE_COMP
+  else if select==2 then               // Zener diode, 2.7 V
+    Strcpy(s,z27)
+    testmode=MODE_UI
+  else if select==3 then               // Zener diode, 5.6 V
+    Strcpy(s,z56)
+    testmode=MODE_UI
+  else if select==4 then               // Zener diode, 10 V
+    Strcpy(s,z100)
+    testmode=MODE_UI
+  else if select==5 then               // Fuse (PTC0.05)
+    Strcpy(s,fuse)
+    testmode=MODE_COMP
+  else if select==6 then               // Reed relay
+    Strcpy(s,relay)
+    testmode=MODE_COMP
+  else if select==7 then               // Low-pass RC filter
+    Strcpy(s,lowpass)
+    testmode=MODE_FILT
+  else if select==8 then               // High-pass RC filter
+    Strcpy(s,highpass)
+    testmode=MODE_FILT
+  else if select==9 then               // Voltage regulator
+    Strcpy(s,i7805)
+    testmode=MODE_UREG
+  else if select==10 then              // MOSFER inverter
+    Strcpy(s,invert)
+    testmode=MODE_COMP
+  else if select==11 then              // Triac
+    Strcpy(s,triac)
+    testmode=MODE_COMP
+  else if select==12 then              // Voltage divider
+    Strcpy(s,div)
+    testmode=MODE_DIV
+  else if select==13 then              // Operational amplifier
+    Strcpy(s,opamp)
+    testmode=MODE_UREG
+  endif
+  // Create obligatory controls.
+  hmeasure=control BUTTON
+    window=htest
+    position=10,268,150,26
+    name="测量"
+    help="按下进行单个测量"
+  endc
+  hinfo=control GRAPH
+    window=htest
+    position=10,301,MAINX-114,85
+    help=" "
+    bkcolor=WHITE
+  endc
+  // Parse description and create controls.
+  i=0
+  while 1 do
+    // Skip till next command.
+    while s[i]!='#' && s[i]!='\0' do i++; enddo
+    if s[i]=='\0' break                // End of description
+    // Get command and subcommand.
+    i++; cmd=s[i]; if cmd=='\0' goto error
+    i++; if s[i]=='\0' break
+    if Isalpha(s[i]) then
+      subcmd=s[i]; i++
+    else if Isdigit(s[i]) then
+      subcmd=s[i]-'0'; i++
+      while Isdigit(s[i]) do
+        subcmd=subcmd*10+s[i]-'0'; i++
+      enddo
+    else
+      subcmd=0
+    endif
+    // Get text.
+    while s[i]==' ' do i++; enddo
+    j=0
+    while s[i]!='#' && s[i]!='\n' && s[i]!='\0' && j<2047 do
+      if s[i]=='|' then
+        t[j]='\r'; j++; t[j]='\n'; j++
+      else
+        t[j]=s[i]; j++
+      endif
+      i++
+    enddo
+    while j>0 && t[j-1]==' ' do j--; enddo
+    t[j]='\0'
+    // Process command.
+    switch cmd
+    case 'T':                          // Title
+      draw window=htest mode=M_CENTERED font=MEDIUMFONT color=BLACK
+      draw at (MAINX-96)/2,28 text=t
+    case 'C':                          // Command for component test
+      draw window=htest mode=M_LEFT font=INFOFONT color=BLACK
+      draw at 10,52 text="COMP command:"
+      hcmd=control EDIT
+        window=htest
+        position=10,55,(testmode==MODE_UREG?220:260),201
+        help="元器件测量"
+        mode=M_VSCROLL|M_HSCROLL|M_BORDER|                                     \
+          (testmode==MODE_FILT || testmode==MODE_UREG?  /* M_NOEDIT*/0   :0)
+        bkcolor=WHITE
+        font=FIXEDSYS
+      endc
+      // I set contents separately, otherwise length is limited to 80 chars.
+      change hcmd text=t
+    case 'A','X':                      // Answer to component test
+      if subcmd<=6 && hanswer[subcmd]==NULL then
+        y=52+subcmd*45
+        hatext[subcmd]=control TEXT
+          window=htest
+          position=290+(hasimage?1000:0),y-14,210,16
+          text=t
+          help=" "
+          font=INFOFONT
+          color=BLACK
+          bkcolor=LIGHTGRAY
+        endc
+        hanswer[subcmd]=control TEXT
+          window=htest
+          position=320+(hasimage?1000:0),y+3,100,22
+          help=format("测量结果  #%i",subcmd+1 )
+          font=MEDIUMFONT
+          mode=M_BORDER
+        endc
+        afactor[subcmd]=(cmd=='X'?1000.0:1.0)
+      endif
+    case 'D':                          // List of currents and U-I graph
+      draw window=htest mode=M_LEFT font=INFOFONT color=BLACK
+      draw at 10,52 text="U-I options and currents:"
+      hcmd=control EDIT
+        window=htest
+        position=10,55,220,201
+        help="电流列表(以毫安为单位)和用于U-I测试的选项"
+        mode=M_VSCROLL|M_HSCROLL|M_BORDER
+        bkcolor=WHITE
+        font=FIXEDSYS
+      endc
+      draw at 240,52 text="U-I plot:"
+      hplot=control GRAPH
+        window=htest
+        position=240,55,256,238
+        help="U-I图"
+        mode=M_BORDER
+        bkcolor=WHITE
+      endc
+      // I set contents separately, otherwise length is limited to 80 chars.
+      change hcmd text=t
+    case 'F':                          // Frequency response or U-U plot
+      draw window=htest mode=M_LEFT font=INFOFONT color=BLACK
+      hptext=control TEXT
+        window=htest
+        position=(testmode==MODE_UREG?240:290)+(hasimage?1000:0),37,210,16
+        text=(testmode==MODE_UREG?"Voltage plot:":"Frequency response plot:")
+        help=" "
+        font=INFOFONT
+        color=BLACK
+        bkcolor=LIGHTGRAY
+      endc
+      hplot=control GRAPH
+        window=htest
+        position=(testmode==MODE_UREG?240:290)+(hasimage?1000:0),56,           \
+          (testmode==MODE_UREG?256:206),236
+        help=(testmode==MODE_UREG?"电压图":"频率响应图")
+        mode=M_BORDER
+        bkcolor=WHITE
+      endc
+    case 'H':                          // Help text
+      draw window=hinfo bkcolor=WHITE clear color=BLACK
+      draw mode=M_LEFT font=TIMESFONT
+      draw at 5,18 wrap=MAINX-125 text=t
+    case 'I':                          // Image
+      hasimage=1
+      for k=0,k<6,k++ do
+        if hanswer[k]==NULL continue
+        change hatext[k] position=1290,0,210,16
+        change hanswer[k] position=1320,0,100,22
+      enddo
+      if hptext!=NULL change hptext position=1290,37,210,16
+      if hplot!=NULL change hplot position=1290,56,206,236
+      draw window=htest at 290,54 clip=490,254
+      draw at 290-200*subcmd,54 bitmap=0,0,0,"a5comp"
+      draw clip=NULL
+    endsw
+  enddo
+  draw window=htest show
+  return 0
+error:
+  clear htest
+  testmode=MODE_NONE
+  draw window=htest font=MAINFONT color=LIGHTRED mode=M_LEFT
+  draw at 50,50 text="Internal error" show
+  return -1
+end
+
+// Removes displayed schematics and returns standard controls back.
+function int Removeimage()
+  int k,y
+  if hasimage==0 return
+  draw window=htest color=LIGHTGRAY bkcolor=LIGHTGRAY
+  draw at 290,54 fillrect 490,254 show
+  for k=0,k<6,k++ do
+    if hanswer[k]==NULL continue
+    y=52+k*45
+    change hatext[k] position=289,y-15,210,16
+    change hanswer[k] position=319,y+2,100,22
+  enddo
+  if testmode==MODE_UREG then
+    if hptext!=NULL change hptext position=240,37,210,16
+    if hplot!=NULL change hplot position=240,56,256,236
+  else
+    if hptext!=NULL change hptext position=290,37,210,16
+    if hplot!=NULL change hplot position=290,56,206,236
+  endif
+  hasimage=0
+end
+
+// Service function, draws U-I plot in the plot window.
+function int Plotui()
+  int i,x,y
+  if plot.valid==0 then
+    draw window=hplot bkcolor=LIGHTGRAY clear show
+    return
+  endif
+  draw window=hplot bkcolor=WHITE clear
+  // Draw voltage limits.
+  x=plot.basex+plot.umin*plot.scalex
+  draw color=PINK at x,0 to x,234
+  x=plot.basex+plot.umax*plot.scalex
+  draw at x,0 to x,234
+  // Draw X axis.
+  draw color=DARKGRAY at 0,plot.basey to 254,plot.basey
+  draw font=SMALLFONT mode=M_RIGHT at 250,plot.basey+28
+  if testmode==MODE_UREG then
+    draw text="Uin,V"
+  else
+    draw text="U,Volt"
+  endif
+  draw mode=M_CENTERED
+  for i=1,i<12,i++ do
+    x=plot.basex-i*plot.stepx*plot.scalex
+    draw at x,plot.basey to x,plot.basey-5
+    draw at x,plot.basey-5 text=format("%g",-i*plot.stepx)
+    x=plot.basex+i*plot.stepx*plot.scalex
+    draw at x,plot.basey to x,plot.basey+5
+    draw at x,plot.basey+17 text=format("%g",i*plot.stepx)
+  enddo
+  // Draw Y axis.
+  draw at plot.basex,0 to plot.basex,234
+  draw mode=M_LEFT at plot.basex+5,18
+  if testmode==MODE_UREG then
+    draw text="Uout,V"
+  else
+    draw text="I,mA"
+  endif
+  for i=1,i<12,i++ do
+    y=plot.basey+i*plot.stepy*plot.scaley
+    draw at plot.basex,y to plot.basex+5,y
+    draw mode=M_LEFT at plot.basex+6,y+6 text=format("%g",-i*plot.stepy)
+    y=plot.basey-i*plot.stepy*plot.scaley
+    draw at plot.basex,y to plot.basex-5,y
+    draw mode=M_RIGHT at plot.basex-6,y+6 text=format("%g",i*plot.stepy)
+  enddo
+  // Draw values of selected point.
+  if plot.selected>=0 && plot.selected<plot.ncurr then
+    draw color=BLACK mode=M_LEFT font=TERMINALFONT
+    if testmode==MODE_UREG then
+      draw at 36,40 text=format("Uin =%7.3f V",plot.volt[plot.selected])
+      draw at 36,52 text=format("Uout=%7.3f V",plot.curr[plot.selected])
+    else
+      draw at 175,215 text=format("U=%7.3f V",plot.volt[plot.selected])
+      if Abs(plot.curr[plot.selected])>99.0 then
+        draw at 175,230 text=format("I=%7.1f mA",plot.curr[plot.selected])
+      else if Abs(plot.curr[plot.selected])>9.9 then
+        draw at 175,230 text=format("I=%7.2f mA",plot.curr[plot.selected])
+      else
+        draw at 175,230 text=format("I=%7.3f mA",plot.curr[plot.selected])
+      endif
+    endif
+  endif
+  // Draw data points.
+  draw color=BLACK bkcolor=BLACK
+  for i=0,i<plot.ncurr,i++ do
+    x=plot.basex+plot.volt[i]*plot.scalex
+    y=plot.basey-plot.curr[i]*plot.scaley
+    if i>0 draw to x,y
+    draw at x,y fillellipse 7,7
+  enddo
+  // Draw selected point, if any, again.
+  if plot.selected>=0 && plot.selected<plot.ncurr then
+    draw color=LIGHTRED bkcolor=LIGHTRED
+    x=plot.basex+plot.volt[plot.selected]*plot.scalex
+    y=plot.basey-plot.curr[plot.selected]*plot.scaley
+    draw at x,y fillellipse 7,7
+  endif
+  draw show
+end
+
+// Service function, draws frequency response plot in the plot window.
+function int Plotfresp()
+  int i,f,x,y
+  draw window=hplot bkcolor=WHITE clear
+  // Draw axii.
+  draw color=DARKGRAY font=SMALLFONT mode=M_CENTERED
+  draw at 16,100 to 180,100 to 180,15
+  draw at 16,217 to 180,217 to 180,132
+  f=1.0
+  for i=0,i<7,i++ do
+    x=23+25*i
+    draw at x,100 to x,105
+    draw at x,119 text=format("%i",f)
+    draw at x,217 to x,222
+    draw at x,236 text=format("%i",f)
+    f=f*2
+  enddo
+  draw mode=M_RIGHT at 202,119 text="kHz"
+  draw mode=M_LEFT
+  // Y pass scale: 30 pixel = 10 db.
+  draw at 5,15 text="Amplitude, dB:"
+  draw at 180,20 to 185,20 at 188,27 text="0"
+  draw at 180,50 to 185,50 at 188,57 text="-10"
+  draw at 180,80 to 185,80 at 188,87 text="-20"
+  draw mode=M_RIGHT at 202,236 text="kHz"
+  draw mode=M_LEFT
+  // Y phase scale: 40 pixel = 90 degrees.
+  draw at 5,132 text="Phase, degrees:"
+  draw at 180,217 to 185,217 at 188,224 text="-90°"
+  draw at 180,177 to 185,177 at 188,184 text="0°"
+  draw at 180,137 to 185,137 at 188,144 text="90°"
+  // Draw cursor.
+  if fcursor>=0 && fcursor<=6 then
+    x=23+25*fcursor
+    draw color=PINK
+    draw at x,99 to x,15
+    draw at x,216 to x,132
+    draw color=LIGHTRED mode=M_LEFT
+    draw at 10,95 text=format("%.3g",fampl[fcursor])
+    draw at 10,212 text=format("%.3g",fphase[fcursor])
+  endif
+  // Draw amplitude.
+  for i=0,i<7,i++ do
+    draw color=BLACK bkcolor=BLACK
+    x=23+25*i
+    if fampl[i]<0.001 then
+      y=100
+    else
+      y=Min(100,20-60.0*Log10(fampl[i]))
+    endif
+    if i>0 draw to x,y
+    if i==fcursor draw color=LIGHTRED bkcolor=LIGHTRED
+    draw at x,y fillellipse 7,7
+  enddo
+  // Draw phase.
+  for i=0,i<7,i++ do
+    draw color=BLACK bkcolor=BLACK
+    x=23+25*i
+    y=177-fphase[i]/90.0*40.0
+    if i>0 draw to x,y
+    if i==fcursor draw color=LIGHTRED bkcolor=LIGHTRED
+    draw at x,y fillellipse 7,7
+  enddo
+  draw show
+end
+
+// Service function, given list of pads, determines heads and contact
+// coordinates. Returns 0 on success and -1 on error.
+function int Distributeheads(char *pad,int npad,                               \
+  int *head,float *x,float *y,char *errmsg)
+  int i,k,m,temp,rail[16],list[4],nlist
+  // Get pad coordinates, assumint top side.
+  for k=0,k<npad,k++ do
+    if Convertpad(pad+PADLEN*k,x+k,y+k)!=0 then
+      sprintf(errmsg,"Unknown pad name '%s'",pad+PADLEN*k)
+      return -1
+    endif
+    rail[k]=Railfromy((testersides & 1?0:1),y[k])
+    if rail[k]<0 then
+      sprintf(errmsg,"Unreachable pad '%s' (x=%.3f, y=%.3f mm)",               \
+        pad+PADLEN*k,x[k],y[k])
+      return -1
+    endif
+  enddo
+  // Distribute heads. This script does not (yet) support shuttle movements.
+  for i=0,i<$LAY.nfing,i++ do
+    // Get list of indices of pads on the rail i (and opposite, if any).
+    nlist=0
+    for k=0,k<npad,k++ do
+      if rail[k]!=i continue
+      if nlist>=4 then
+        sprintf(errmsg,                                                        \
+          "Unable to distribute pads. More than 2 pads per rail")
+        return -1
+      endif
+      list[nlist]=k; nlist++
+    enddo
+    if nlist==0 continue
+    // Sort indices by X coordinate of the corresponding pads. Bubble sort!
+    for k=0,k<nlist-1,k++ do
+      for m=k+1,m<nlist,m++ do
+        if x[list[k]]>x[list[m]] then
+          temp=list[k]; list[k]=list[m]; list[m]=temp
+        endif
+      enddo
+    enddo
+    // Now distribute heads.
+    head[list[0]]=i*2
+    if nlist>=2 then
+      head[list[nlist-1]]=i*2+1
+      if nlist>=3 then
+        if testersides!=0x3 then
+          sprintf(errmsg,                                                      \
+            "Unable to distribute pads. More than 2 pads per rail")
+          return -1
+        endif
+        head[list[1]]=i*2+$LAY.nfing
+        if nlist==4 then
+          head[list[2]]=i*2+$LAY.nfing+1
+        endif
+      endif
+    endif
+  enddo
+  // Add random offsets to pad coordinates, prolongates life expectancy of
+  // the board.
+  for k=0,k<npad,k++ do
+    if (head[k] & 1)==0 then
+      x[k]=x[k]-0.5-Random(0.5)
+    else
+      x[k]=x[k]+0.5+Random(0.5)
+    endif
+    if y[k]<$LAY.yoffset[head[k]/2]/1000.0 then
+      y[k]=y[k]+0.5+Random(0.5)
+    else
+      y[k]=y[k]-0.5-Random(0.5)
+    endif
+  enddo
+  return 0
+end
+
+// Makes component measurement.
+function int Makecompmeasurement()
+  int i,j,k,m,n,t,npad,head[16]
+  float x[16],y[16]
+  char s[2048],name[PADLEN],pad[16][PADLEN],cmd[2048],buf[1024],errmsg[512]
+  draw window=hinfo bkcolor=LIGHTGRAY clear show
+  // Get command and extract pads.
+  n=Text(hcmd,s)
+  i=0
+  npad=0
+  while i<n do
+    if s[i]!='@' then
+      i++; continue
+    endif
+    i++; if i>=n break
+    j=0
+    while (Isalnum(s[i]) || s[i]=='_') && i<n && j<9 do
+      name[j]=Toupper(s[i]); j++; i++
+    enddo
+    name[j]='\0'
+    for k=0,k<npad,k++ do
+      if Strcmp(pad[k],name)==0 break
+    enddo
+    if k>=npad then
+      if npad>=16 then
+        sprintf(errmsg,"Command specifies more than 16 different pads")
+        goto error
+      endif
+      Strcpy(pad[npad],name)
+      npad++
+    endif
+  enddo
+  // Distribute heads.
+  if Distributeheads(pad,npad,head,x,y,errmsg)<0                               \
+    goto error
+  // Create command.
+  m=sprintf(cmd,"M")
+  for k=0,k<npad,k++ do
+    m=m+sprintf(cmd+m," %i(%.3f,%.3fA10V%iP%iH%g)",                            \
+    head[k],x[k],y[k],strokev,strokep,strokez)
+  enddo
+  for i=0,i<$LAY.nfing*2,i++ do
+    for k=0,k<npad,k++ do
+      if head[k]==i break
+    enddo
+    if k<npad continue
+    m=m+sprintf(cmd+m," %i(Z)",i)
+  enddo
+  m=m+sprintf(cmd+m," COMP(")
+  i=0
+  while i<n do
+    if s[i]=='\n' || s[i]=='\r' || s[i]==' ' then
+      i++
+      if cmd[m-1]==' ' continue
+      cmd[m]=' '; m++
+      continue
+    endif
+    if s[i]!='@' then
+      cmd[m]=s[i]; m++; i++
+      continue
+    endif
+    i++; if i>=n break
+    j=0
+    while (Isalnum(s[i]) || s[i]=='_') && i<n && j<PADLEN-1 do
+      name[j]=Toupper(s[i]); j++; i++
+    enddo
+    name[j]='\0'
+    for k=0,k<npad,k++ do
+      if Strcmp(pad[k],name)==0 break
+    enddo
+    if k>=npad then
+      sprintf(errmsg,"Internal error")
+      goto error
+    endif
+    m=m+sprintf(cmd+m,"%i",head[k])
+  enddo
+  if cmd[m-1]==' ' m--
+  m=m+sprintf(cmd+m,")")
+  // Send command to tester and wait for answer.
+  SYS.Killimm(0)
+  j=SERV.Parsecmdext(cmd,buf,errmsg)
+  if j<0 goto error
+  SYS.Sendimm(0,j,buf)
+  t=Time()
+  draw window=hinfo bkcolor=WHITE clear
+  draw font=MAINFONT color=BLACK
+  draw at 10,22 text="Please wait..." show
+  while $A[0].length==0 do
+    if Pressed(hexit) return -1        // Button "Exit" works as an interrupt
+    if Time()-t>5000 then
+      sprintf(errmsg,"Timeout while executing command")
+      goto error
+    endif
+    wait
+  enddo
+  if $A[0].answer!=S_MOVE then
+    SERV.Decodeanswer($A[0],errmsg,cmd,0x7FFFFFFF)
+    goto error
+  endif
+  k=$int2($A[0]+8)
+  if (k & 0xFF)!=0 then
+    if ((k>>8) & 0x3F)!=0 then
+      m=sprintf(errmsg,"Error in subcommand %i. ",(k>>8) & 0x3F)
+    else
+      m=0
+    endif
+    switch (k & 0xFF)
+    case 1:
+      m=m+sprintf(errmsg+m,"Hardware is not initialized")
+    case 2:
+      m=m+sprintf(errmsg+m,"Invalid size of subcommands")
+    case 3:
+      m=m+sprintf(errmsg+m,"Unsupported microcommand")
+    case 4:
+      m=m+sprintf(errmsg+m,"Non-existing or excluded head")
+    case 5:
+      m=m+sprintf(errmsg+m,"Type of source changes during measurements")
+    case 6:
+      m=m+sprintf(errmsg+m,"CC_SET (subcommand 0x0F) to undefined source")
+    case 7:
+      m=m+sprintf(errmsg+m,"Shortcut between two sources")
+    case 8:
+      m=m+sprintf(errmsg+m,"Resistor is shortcut")
+    case 9:
+      m=m+sprintf(errmsg+m,"Resistance is out of range")
+    case 10:
+      m=m+sprintf(errmsg+m,"No matching resistor to ground")
+    case 11:
+      m=m+sprintf(errmsg+m,"I measurement without source")
+    case 12:
+      m=m+sprintf(errmsg+m,"Unable to translate command to hardware")
+    case 13:
+      m=m+sprintf(errmsg+m,"Internal error")
+    case 14:
+      m=m+sprintf(errmsg+m,"As yet unsupported function")
+    case 255:
+      m=m+sprintf(errmsg+m,"Answer is emulated")
+    default:
+      m=m+sprintf(errmsg+m,"Unknown error")
+    endsw
+    goto error
+  endif
+  // Display answer.
+  SERV.Decodeanswer($A[0],s,cmd,0x7FFFFFFF)
+  draw window=hinfo bkcolor=WHITE clear
+  draw font=MAINFONT
+  draw at 10,22 color=BLACK text=s
+  draw at 10,38 color=DARKGRAY font=SMALLFONT text=cmd
+  draw show
+  // Display measurement data.
+  if testmode==MODE_FILT then
+    for i=0,i<7,i++ do
+      if $A[0].length<14+8*i break
+      fampl[i]=$float4($A[0]+10+8*i)
+      fphase[i]=$float4($A[0]+14+8*i)
+    enddo
+    fcursor=3
+    Plotfresp()
+  else if testmode==MODE_UREG then
+    for i=0,i<10,i++ do
+      if $A[0].length<14+4*i break
+      plot.volt[i]=i
+      plot.curr[i]=$float4($A[0]+10+4*i)
+    enddo
+    plot.ncurr=i
+    plot.umin=-100.0
+    plot.umax=100.0
+    plot.valid=1
+    plot.selected=-1
+    plot.scalex=20.0
+    plot.stepx=1.0
+    plot.scaley=20.0
+    plot.stepy=1.0
+    plot.basex=30
+    plot.basey=205
+    Plotui()
+  else
+    for i=0,i<6,i++ do
+      if hanswer[i]==NULL continue
+      if $A[0].length<14+4*i break
+      change hanswer[i] text=format(" %.7g",$float4($A[0]+10+4*i)*afactor[i])
+    enddo
+  endif
+  return 0
+error:
+  for i=0,i<6,i++ do
+    if hanswer[i]==NULL continue
+    change hanswer[i] text=""
+  enddo
+  draw window=hinfo bkcolor=WHITE clear
+  draw font=MAINFONT color=LIGHTRED
+  draw at 10,22 text="ERROR DETECTED"
+  draw at 10,45 text=errmsg
+  draw show
+  return -1
+end
+
+// Makes U-I measurement.
+function int Makeuimeasurement()
+  int i,j,k,m,n,t,ncurr,linestart,head[2]
+  float umin,umax,imin,imax,curr[24],x[2],y[2],temp
+  char s[2048],key[PADLEN],pad[2][PADLEN],cmd[2048],buf[1024],errmsg[512]
+  float steps[13]=                   \ // Steps for U and I axii
+    { 100.0, 50.0, 20.0, 10.0, 5.0, 2.0, 1.0, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01 }
+  draw window=hinfo bkcolor=LIGHTGRAY clear show
+  // Get command and extract data.
+  n=Text(hcmd,s)
+  s[n]='\0'
+  i=0
+  linestart=0
+  pad[0][0]='\0'
+  pad[1][0]='\0'
+  umin=-5.0
+  umax=5.0
+  ncurr=0
+  while i<n do
+    if s[i]==' ' then
+      i++; continue
+    else if s[i]=='\r' || s[i]=='\n' then
+      i++; linestart=i; continue
+    endif
+    if !Isalpha(s[i]) then
+      sprintf(errmsg,"Expecting key")
+      goto error
+    endif
+    // Get keyword.
+    j=0
+    while (Isalnum(s[i]) || s[i]=='_') && i<n && j<PADLEN-1 do
+      key[j]=s[i]; i++; j++
+    enddo
+    key[j]='\0'
+    // Skip spaces and assignment (optional).
+    while s[i]==' ' || s[i]=='=' do i++; enddo
+    if Stricmp(key,"PAD1")==0 then
+      j=0
+      while (Isalnum(s[i]) || s[i]=='_') && i<n && j<PADLEN-1 do
+        pad[0][j]=s[i]; i++; j++
+      enddo
+      pad[0][j]='\0'
+    else if Stricmp(key,"PAD2")==0 then
+      j=0
+      while (Isalnum(s[i]) || s[i]=='_') && i<n && j<PADLEN-1 do
+        pad[1][j]=s[i]; i++; j++
+      enddo
+      pad[1][j]='\0'
+    else if Stricmp(key,"UMIN")==0 then
+      j=Scanfloat(s+i,&umin)
+      if j<0 then
+        sprintf(errmsg,"Key value is not a valid floating number")
+        goto error
+      endif
+      i=i+j
+    else if Stricmp(key,"UMAX")==0 then
+      j=Scanfloat(s+i,&umax)
+      if j<0 then
+        sprintf(errmsg,"Key value is not a valid floating number")
+        goto error
+      endif
+      i=i+j
+    else if Stricmp(key,"I")==0 then
+      if ncurr>=24 then
+        sprintf(errmsg,"Limit of 24 currents exceeded")
+        goto error
+      endif
+      j=Scanfloat(s+i,curr+ncurr)
+      if j<0 then
+        sprintf(errmsg,"Key value is not a valid floating number")
+        goto error
+      endif
+      i=i+j
+      if curr[ncurr]<=(-300.0) || curr[ncurr]>=300.0 then
+        sprintf(errmsg,"Current outside of -300..300 mA limits")
+        goto error
+      endif
+      ncurr++
+    else
+      sprintf(errmsg,"Unknown key '%s'",key)
+      goto error
+    endif
+  enddo
+  linestart=-1
+  // Verify data for consistency and distribute heads.
+  if pad[0][0]=='\0' then
+    sprintf(errmsg,"Undefined PAD1")
+  else if pad[1][0]=='\0' then
+    sprintf(errmsg,"Undefined PAD2")
+  else if Stricmp(pad[0],pad[1])==0 then
+    sprintf(errmsg,"PAD1 and PAD2 are identical")
+  else if Distributeheads(pad,2,head,x,y,errmsg)<0 then
+    ;
+  else if umin<(-12.5) || umin>0.0 then
+    sprintf(errmsg,"UMIN is out of -12.5 .. 0 V range")
+  else if umax<0.0 || umax>12.5 then
+    sprintf(errmsg,"UMAX is out of 0 .. 12.5 V range")
+  else if ncurr==0 then
+    sprintf(errmsg,"List of test currents is empty")
+  else
+    errmsg[0]='\0'
+  endif
+  if errmsg[0]!='\0' goto error
+  // Create command.
+  m=sprintf(cmd,"M")
+  for k=0,k<2,k++ do
+    m=m+sprintf(cmd+m," %i(%.3f,%.3fA10V%iP%iH%g)",                            \
+    head[k],x[k],y[k],strokev,strokep,strokez)
+  enddo
+  for i=0,i<$LAY.nfing*2,i++ do
+    if i==head[0] || i==head[1] continue
+    m=m+sprintf(cmd+m," %i(Z)",i)
+  enddo
+  m=m+sprintf(cmd+m," UIEX(%i,%i,UMIN=%g,UMAX=%g,I=(",                         \
+    head[0],head[1],umin,umax)
+  for i=0,i<ncurr,i++ do
+    if i>0 then
+      cmd[m]=','; m++
+    endif
+    m=m+sprintf(cmd+m,"%g",curr[i])
+  enddo
+  m=m+sprintf(cmd+m,"))")
+  // Send command to tester and wait for answer.
+  SYS.Killimm(0)
+  j=SERV.Parsecmdext(cmd,buf,errmsg)
+  if j<0 goto error
+  SYS.Sendimm(0,j,buf)
+  t=Time()
+  draw window=hinfo bkcolor=WHITE clear
+  draw font=MAINFONT color=BLACK
+  draw at 10,22 text="Please wait..." show
+  while $A[0].length==0 do
+    if Pressed(hexit) return -1        // Button "Exit" works as an interrupt
+    if Time()-t>5000 then
+      sprintf(errmsg,"Timeout while executing command")
+      goto error
+    endif
+    wait
+  enddo
+  if $A[0].answer!=S_MOVE then
+    SERV.Decodeanswer($A[0],errmsg,cmd,0x7FFFFFFF)
+    goto error
+  endif
+  // Display answer.
+  SERV.Decodeanswer($A[0],s,cmd,0x7FFFFFFF)
+  cmd[500]='\0'
+  draw window=hinfo bkcolor=WHITE clear
+  draw font=MAINFONT
+  draw at 10,22 color=BLACK text=s
+  draw at 10,40 color=DARKGRAY text=cmd
+  draw show
+  // Save data to plot descriptor. Plot window is 254*236 pixels large.
+  imin=0.0; imax=0.0
+  for i=0,i<ncurr,i++ do
+    plot.curr[i]=$float4($A[0]+14+i*10)*1000.0
+    plot.volt[i]=$float4($A[0]+10+i*10)
+    imin=Min(imin,plot.curr[i])
+    imax=Max(imax,plot.curr[i])
+  enddo
+  // Sort data points by voltage. Bubble sort!
+  for i=0,i<ncurr-1,i++ do
+    for j=i,j<ncurr,j++ do
+      if plot.volt[i]>plot.volt[j] then
+        temp=plot.volt[i]; plot.volt[i]=plot.volt[j]; plot.volt[j]=temp
+        temp=plot.curr[i]; plot.curr[i]=plot.curr[j]; plot.curr[j]=temp
+      endif
+    enddo
+  enddo
+  plot.ncurr=ncurr
+  plot.umin=umin
+  plot.umax=umax
+  plot.valid=1
+  plot.selected=0
+  plot.basex=254/2
+  plot.scalex=plot.basex/(Max(Abs(umax),Abs(umin))+0.5)
+  plot.stepx=45.0/plot.scalex
+  for i=0,i<13,i++ do
+    if plot.stepx>steps[i] then
+      plot.stepx=steps[i]; break
+    endif
+  enddo
+  plot.basey=236/2
+  plot.scaley=plot.basey/(Max(Abs(imax),Abs(imin))+0.5)
+  plot.stepy=45.0/plot.scaley
+  for i=0,i<13,i++ do
+    if plot.stepy>steps[i] then
+      plot.stepy=steps[i]; break
+    endif
+  enddo
+  Plotui()
+  return 0
+error:
+  plot.valid=0
+  Plotui()
+  draw window=hinfo bkcolor=WHITE clear
+  draw font=MAINFONT color=LIGHTRED
+  draw at 10,22 text="ERROR DETECTED"
+  draw at 10,45 text=errmsg
+  if linestart>=0 && linestart<n then
+    j=0
+    for i=linestart,i<n && s[i]!='\r' && s[i]!='\n',i++ do
+      cmd[j]=s[i]; j++
+    enddo
+    cmd[j]='\0'
+    draw at 10,65 text=format("Line: '%s'",cmd)
+  endif
+  draw show
+  return -1
+end
+
+// Makes voltage divider measurement.
+function int Makedivmeasurement()
+  int i,j,k,m,n,t,linestart,head[3],status
+  float imax,umax,x[3],y[3]
+  char s[2048],key[PADLEN],pad[3][PADLEN],cmd[2048],buf[1024],errmsg[512]
+  draw window=hinfo bkcolor=LIGHTGRAY clear show
+  // Get command and extract data.
+  n=Text(hcmd,s)
+  s[n]='\0'
+  i=0
+  linestart=0
+  pad[0][0]='\0'
+  pad[1][0]='\0'
+  pad[2][0]='\0'
+  imax=0.0
+  umax=0.0
+  while i<n do
+    if s[i]==' ' then
+      i++; continue
+    else if s[i]=='\r' || s[i]=='\n' then
+      i++; linestart=i; continue
+    endif
+    if !Isalpha(s[i]) then
+      sprintf(errmsg,"Expecting key")
+      goto error
+    endif
+    // Get keyword.
+    j=0
+    while (Isalnum(s[i]) || s[i]=='_') && i<n && j<PADLEN-1 do
+      key[j]=s[i]; i++; j++
+    enddo
+    key[j]='\0'
+    // Skip spaces and assignment (optional).
+    while s[i]==' ' || s[i]=='=' do i++; enddo
+    if Stricmp(key,"GND")==0 then
+      j=0
+      while (Isalnum(s[i]) || s[i]=='_') && i<n && j<PADLEN-1 do
+        pad[0][j]=s[i]; i++; j++
+      enddo
+      pad[0][j]='\0'
+    else if Stricmp(key,"OUT")==0 then
+      j=0
+      while (Isalnum(s[i]) || s[i]=='_') && i<n && j<PADLEN-1 do
+        pad[1][j]=s[i]; i++; j++
+      enddo
+      pad[1][j]='\0'
+    else if Stricmp(key,"VCC")==0 then
+      j=0
+      while (Isalnum(s[i]) || s[i]=='_') && i<n && j<PADLEN-1 do
+        pad[2][j]=s[i]; i++; j++
+      enddo
+      pad[2][j]='\0'
+    else if Stricmp(key,"IMAX")==0 then
+      j=Scanfloat(s+i,&imax)
+      if j<0 then
+        sprintf(errmsg,"Key value is not a valid floating number")
+        goto error
+      endif
+      i=i+j
+    else if Stricmp(key,"UMAX")==0 then
+      j=Scanfloat(s+i,&umax)
+      if j<0 then
+        sprintf(errmsg,"Key value is not a valid floating number")
+        goto error
+      endif
+      i=i+j
+    else
+      sprintf(errmsg,"Unknown key '%s'",key)
+      goto error
+    endif
+  enddo
+  linestart=-1
+  // Verify data for consistency and distribute heads.
+  if pad[0][0]=='\0' then
+    sprintf(errmsg,"Undefined pad GND")
+  else if pad[1][0]=='\0' then
+    sprintf(errmsg,"Undefined pad OUT")
+  else if pad[2][0]=='\0' then
+    sprintf(errmsg,"Undefined pad VCC")
+  else if Stricmp(pad[0],pad[1])==0 then
+    sprintf(errmsg,"GND and OUT are identical")
+  else if Stricmp(pad[1],pad[2])==0 then
+    sprintf(errmsg,"OUT and VCC are identical")
+  else if Stricmp(pad[0],pad[2])==0 then
+    sprintf(errmsg,"GND and VCC are identical")
+  else if Distributeheads(pad,3,head,x,y,errmsg)<0 then
+    ;
+  else if umax<0.0 || umax>9.5 then
+    sprintf(errmsg,"UMAX is out of 0.0 .. 9.5 V range")
+  else if imax<0.0 || imax>0.09 then
+    sprintf(errmsg,"UMAX is out of 0.0 .. 0.09 A range")
+  else
+    errmsg[0]='\0'
+  endif
+  if errmsg[0]!='\0' goto error
+  // Create command.
+  m=sprintf(cmd,"M")
+  for k=0,k<3,k++ do
+    m=m+sprintf(cmd+m," %i(%.3f,%.3fA10V%iP%iH%g)",                            \
+    head[k],x[k],y[k],strokev,strokep,strokez)
+  enddo
+  for i=0,i<$LAY.nfing*2,i++ do
+    if i==head[0] || i==head[1] || i==head[2] continue
+    m=m+sprintf(cmd+m," %i(Z)",i)
+  enddo
+  m=m+sprintf(cmd+m," DIV(%i,%i,%i,ABS,PAR,UMAX=%g,IMAX=%g)",                  \
+    head[1],head[0],head[2],umax,imax*1000.0)
+  // Send command to tester and wait for answer.
+  SYS.Killimm(0)
+  j=SERV.Parsecmdext(cmd,buf,errmsg)
+  if j<0 goto error
+  SYS.Sendimm(0,j,buf)
+  t=Time()
+  draw window=hinfo bkcolor=WHITE clear
+  draw font=MAINFONT color=BLACK
+  draw at 10,22 text="Please wait..." show
+  while $A[0].length==0 do
+    if Pressed(hexit) return -1        // Button "Exit" works as an interrupt
+    if Time()-t>5000 then
+      sprintf(errmsg,"Timeout while executing command")
+      goto error
+    endif
+    wait
+  enddo
+  if $A[0].answer!=S_MOVE then
+    SERV.Decodeanswer($A[0],errmsg,cmd,0x7FFFFFFF)
+    goto error
+  endif
+  // Display answer.
+  SERV.Decodeanswer($A[0],s,cmd,0x7FFFFFFF)
+  cmd[511]='\0'
+  draw window=hinfo bkcolor=WHITE clear
+  draw font=MAINFONT
+  draw at 10,22 color=BLACK text=s
+  draw at 10,40 color=DARKGRAY text=cmd
+  draw show
+  // Display resistances.
+  status=$uint2($A[0]+6)
+  if (status & 0x0040)==0 then
+    if hanswer[0]!=NULL change hanswer[0] text=" ---"
+    if hanswer[1]!=NULL change hanswer[1] text=" ---"
+  else
+    if hanswer[0]!=NULL then
+      change hanswer[0] text=format(" %.2f",$float4($A[0]+12))
+    endif
+    if hanswer[1]!=NULL then
+      change hanswer[1] text=format(" %.2f",$float4($A[0]+16))
+    endif
+  endif
+  if (status & 0x0020)==0 then
+    if hanswer[2]!=NULL change hanswer[2] text=" ---"
+  else
+    if hanswer[2]!=NULL then
+      change hanswer[2] text=format(" %.2f",$float4($A[0]+20))
+    endif
+  endif
+  return 0
+error:
+  for i=0,i<6,i++ do
+    if hanswer[i]==NULL continue
+    change hanswer[i] text=""
+  enddo
+  draw window=hinfo bkcolor=WHITE clear
+  draw font=MAINFONT color=LIGHTRED
+  draw at 10,22 text="ERROR DETECTED"
+  draw at 10,45 text=errmsg
+  if linestart>=0 && linestart<n then
+    j=0
+    for i=linestart,i<n && s[i]!='\r' && s[i]!='\n',i++ do
+      cmd[j]=s[i]; j++
+    enddo
+    cmd[j]='\0'
+    draw at 10,65 text=format("Line: '%s'",cmd)
+  endif
+  draw show
+  return -1
+end
+
+// Main routine.
+function int main()
+  int i,j,x,y,xm,ym,buttons,oldselect,select
+  handle hsel[32]
+  hmain=control WINDOW
+    window=NULL
+    position=10,10,MAINX,MAINY
+    name=format("低阻测量验证 v%s",VERSION)
+    help=" "
+    size=128
+  endc
+  // Attention, in this script hleft is a GRAPH window!
+  hleft=control GRAPH
+    window=hmain
+    position=5,5,LEFTX,LEFTY
+    help=" "
+    color=DARKGRAY
+  endc
+  hserv=control CHILD
+    window=hmain
+    position=SPLIT,5,RIGHTX,SERVY
+    help=" "
+    color=DARKGRAY
+  endc
+  hright=control CHILD
+    window=hmain
+    position=SPLIT,10+SERVY,RIGHTX,RIGHTY
+    help=" "
+    color=DARKGRAY
+    size=1024
+  endc
+  hinfo=control PROGRESS
+    window=hserv
+    position=-1,-1,RIGHTX+2,SERVY+2
+    text="欢迎使用!"
+    help="电阻测量验证的当前状态"
+    mode=M_PERCENT
+    font=MEDIUMFONT
+    limits=0,0
+  endc
+  hexit=control BUTTON
+    window=hmain
+    position=MAINX-84,MAINY-SERVY,80,SERVY-3
+    name="关闭"
+    help="双击终止测试并关闭此窗口"
+    mode=M_DBLCLICK
+  endc
+  draw window=hmain bitmap=0,0,1,"bkground" show
+  loadchanged=0
+  // If this script is called directly from the Test Player, default parameters
+  // may be yet uninitialized.
+  if $GLOBAL.defstroke==0 then
+    $GLOBAL.defstroke=40
+    $GLOBAL.defpressure=30
+    $GLOBAL.defheight=5000
+    $GLOBAL.defaccuracy=250
+  endif
+  change hleft help="版权 (C) 2019 HengCe"
+  draw window=hleft
+  draw bkcolor=WHITE clear
+  draw at 70,40 bitmap=0,0,0,"logo"
+  draw color=DARKGRAY font=MEDIUMFONT mode=M_CENTERED
+  draw at LEFTX/2,285 text="Demonstration"
+  draw at LEFTX/2,305 text="of component measurements"
+  draw at LEFTX/2,325 text=format("Version %s",VERSION)
+  draw show
+  delay 1000
+reload:
+  if Loadtester()!=0 goto quit         // Make sure that tester is loaded
+  i=Getlayout()                        // Get actually loaded layout
+  if i<0 goto quit                     // Operator interrupted the test
+  if i>0 goto reload                   // Try to reload tester
+  Getfeatures()                        // Get features of measurement card
+  Getautomationtype()                  // Get type of automation
+  Recognizetester()                    // Determine type of the tester
+  for i=0,i<NPOINT,i++ do              // Extract pad coordinates and values
+    sscanf(xname[i]+10,"%f %f %f",xpos+i,ypos+i,value+i)
+    for j=0,j<10,j++ do
+      if xname[i][j]==' ' xname[i][j]='\0'
+    enddo
+  enddo
+reinstall:
+  i=Selectorientation()                // Select orientation of the board
+  if i<0 goto quit                     // Operator interrupted the test
+  if (testertype==TT_A5L || testertype==TT_A7 || testertype==TT_A8) &&         \
+    (($LAY.config & LC_LDMASK)==LC_LMAUTO ||                                   \
+    ($LAY.config & LC_LDMASK)==LC_LMS2AUTO) then
+    i=InstallboardLM()                 // Install board in auto L&M shuttle
+  else if ((testertype==TT_A4 || testertype==TT_A6 || testertype==TT_S1) &&    \
+    ($LAY.config & 0x0001C040)==0x00008040) then
+    i=Installboard(1)                  // Install board on A4/A6 auto
+  else
+    i=Installboard(0)                  // Install board on other tester
+  endif
+  if i>0 goto reload                   // Bad or no answer, try to reload tester
+  if i<0 goto quit                     // Operator interrupted the test
+  i=Locateboard()                      // Get rough board position
+  if i<0 goto quit                     // Operator interrupted the test
+  if i==2 goto reinstall               // Replace board
+  i=Scanboard(i)                       // Find exact board position (auto/man)
+  if i==1 goto reinstall               // Crosses not found, retry
+  if i==2 goto quit                    // Operator stopped the test
+  if i<0 goto quit                     // Operator interrupted the test
+  // OK, position of the board is known. Now we can make the tests.
+  destroy hleft; hleft=NULL
+  destroy hright; hright=NULL
+  destroy hinfo; hinfo=NULL
+  destroy hserv; hserv=NULL
+  htest=control GRAPH
+    window=hmain
+    position=91,5,MAINX-96,MAINY-10
+    help=" "
+    bkcolor=LIGHTGRAY
+  endc
+  change hexit mode=0
+  change hexit help="终止测试并关闭此窗口"
+  change hexit position=4,MAINY-28,82,24
+  change hexit bkcolor=LIGHTGRAY
+  y=4
+  hsel[0]=control BUTTON               // Transistor NPN
+    window=hmain
+    position=4,y,82,21
+    text="NPN"
+    help="按下可以测试NPN晶体管"
+    bkcolor=LIGHTGRAY
+  endc
+  y=y+22
+  hsel[1]=control BUTTON               // Transistor PNP
+    window=hmain
+    position=4,y,82,21
+    text="PNP"
+    help="按下可以测试PNP晶体管"
+    bkcolor=LIGHTGRAY
+  endc
+  y=y+22
+  hsel[2]=control BUTTON               // Zener 2.7 V
+    window=hmain
+    position=4,y,82,21
+    text="Zener 2.7V"
+    help="按下可以测试2.7 V反向电压的齐纳二极管"
+    bkcolor=LIGHTGRAY
+  endc
+  y=y+22
+  hsel[3]=control BUTTON               // Zener 5.6 V
+    window=hmain
+    position=4,y,82,21
+    text="Zener 5.6V"
+    help="按下可以测试5.6 V反向电压的齐纳二极管"
+    bkcolor=LIGHTGRAY
+  endc
+  y=y+22
+  hsel[4]=control BUTTON               // Zener 10 V
+    window=hmain
+    position=4,y,82,21
+    text="Zener 10V"
+    help="按下可以测试10V反向电压的齐纳二极管"
+    bkcolor=LIGHTGRAY
+  endc
+  y=y+22
+  hsel[5]=control BUTTON               // Fuse
+    window=hmain
+    position=4,y,82,21
+    text="Fuse"
+    help="按下可以测试保险丝(PTC0.05)"
+    bkcolor=LIGHTGRAY
+  endc
+  y=y+22
+  hsel[6]=control BUTTON               // Reed relay
+    window=hmain
+    position=4,y,82,21
+    text="Relay"
+    help="按下测试簧片继电器"
+    bkcolor=LIGHTGRAY
+  endc
+  y=y+22
+  hsel[7]=control BUTTON               // Low-pass RC filter
+    window=hmain
+    position=4,y,82,21
+    text="Low-pass"
+    help="按下可以测试低通RC滤波器"
+    bkcolor=LIGHTGRAY
+  endc
+  y=y+22
+  hsel[8]=control BUTTON               // High-pass RC filter
+    window=hmain
+    position=4,y,82,21
+    text="High-pass"
+    help=" 按下测试高通RC滤波器"
+    bkcolor=LIGHTGRAY
+  endc
+  y=y+22
+  hsel[9]=control BUTTON               // Voltage regulator
+    window=hmain
+    position=4,y,82,21
+    text="7805"
+    help="按下测试5V集成稳压器"
+    bkcolor=LIGHTGRAY
+  endc
+  y=y+22
+  hsel[10]=control BUTTON              // MOSFER inverter
+    window=hmain
+    position=4,y,82,21
+    text="Inverter"
+    help="按下测试MOSFET逆变器"
+    bkcolor=LIGHTGRAY
+  endc
+  y=y+22
+  hsel[11]=control BUTTON              // Triac
+    window=hmain
+    position=4,y,82,21
+    text="Triac"
+    help="按下以测试双向可控硅(双向晶闸管)"
+    bkcolor=LIGHTGRAY
+  endc
+  y=y+22
+  hsel[12]=control BUTTON              // Voltage divider
+    window=hmain
+    position=4,y,82,21
+    text="Divider"
+    help="按下测试分压器"
+    bkcolor=LIGHTGRAY
+  endc
+  y=y+22
+  hsel[13]=control BUTTON              // Operational amplifier
+    window=hmain
+    position=4,y,82,21
+    text="Op amp"
+    help="按此测试运算放大器"
+    bkcolor=LIGHTGRAY
+  endc
+  y=y+22
+  oldselect=-1
+  select=0
+  testmode=MODE_NONE
+  // Main loop.
+  while 1 do
+    if Pressed(hexit) then
+      goto quit
+    else if Pressed(hmeasure) then
+      Removeimage()
+      if testmode==MODE_COMP || testmode==MODE_FILT || testmode==MODE_UREG then
+        Makecompmeasurement()          // Make component measurement
+      else if testmode==MODE_UI then
+        Makeuimeasurement()            // Make U-I measurement
+      else if testmode==MODE_DIV then
+        Makedivmeasurement()           // Make voltage divider measurement
+      endif
+    endif
+    for i=0,i<32,i++ do
+      if hsel[i]==NULL then
+        continue
+      else if Pressed(hsel[i]) then
+        select=i
+      endif
+    enddo
+    if select!=oldselect then
+      if oldselect>=0 then
+        change hsel[oldselect] color=BLACK
+        change hsel[oldselect] bkcolor=LIGHTGRAY
+      endif
+      change hsel[select] color=LIGHTRED
+      change hsel[select] bkcolor=YELLOW
+      oldselect=select
+      Settest(select)
+    endif
+    // If U-I or filter response graph is displayed, trace mouse movements.
+    if (testmode==MODE_UI || testmode==MODE_UREG) && hplot!=NULL then
+      if Mousexy(hplot,&xm,&ym,&buttons)>0 then
+        for i=0,i<plot.ncurr,i++ do
+          x=plot.basex+plot.volt[i]*plot.scalex
+          y=plot.basey-plot.curr[i]*plot.scaley
+          if Abs(x-xm)<5 && Abs(y-ym)<5 then
+            if plot.selected!=i then
+              plot.selected=i
+              Plotui()
+            endif
+            break
+          endif
+        enddo
+      endif
+    else if testmode==MODE_FILT && hplot!=NULL then
+      if Mousexy(hplot,&xm,&ym,&buttons)>0 then
+        i=Floor((xm-23.0+5.0)/25.0)
+        i=Max(0,Min(i,6))
+        if Abs(xm-23-25*i)<=5 && i!=fcursor then
+          fcursor=i
+          Plotfresp()
+        endif
+      endif
+    endif
+    wait
+  enddo
+quit:
+  if testertype==TT_A5 || testertype==TT_A5L || testertype==TT_A6 ||           \
+    testertype==TT_S1 || testertype==TT_S1 then
+    SERV.Cmdimm(32,"OUTPORT32 CRATE 0x80000003,0")
+  endif
+  if (testertype==TT_A5L || testertype==TT_A7) &&                              \
+    ($LAY.config & LC_LDMASK)==LC_LMAUTO then
+    UnloadboardLM()                    // Unload board if L&M shuttle
+  endif
+  if (testertype!=TT_A5L && testertype!=TT_A7) ||                              \
+    ($LAY.config & LC_LDMASK)!=LC_LMAUTO then
+    SYS.Softreset(0)
+  endif
+end
+

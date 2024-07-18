@@ -1,0 +1,665 @@
+#include "ls.icl"
+#include "or.icl"
+#cmdbuff 2
+
+#define VERSION        "0.96"
+#define DESCRIPTION    "OllyTest for Test Player v0.96"
+
+#define MDX            73
+#define MDY            24
+
+// Layout configuration bits in $LAY.config.
+#define LC_SMASK2      0x20000000      // Extention of LC_SMASK
+#define LC_AUTOPROBE   0x10000000      // Autodetect probes (Kelvin or standard)
+#define LC_TYPEMASK    0x0B000000      // General type of machine
+#define   LC_STD       0x00000000      // LC_TYPEMASK: standard A5/A6 tester
+#define   LC_NEWA1     0x01000000      // LC_TYPEMASK: new A1 (slow A5) tester
+#define   LC_S1        0x02000000      // LC_TYPEMASK: S1/S2
+#define   LC_A8        0x03000000      // LC_TYPEMASK: A7/A8
+#define LC_VACUUMBOX   0x04000000      // Disable movements on bottom side
+#define LC_MOREMASK    0x00C00000      // Mask for more space bits
+#define   LC_MOREBOT   0x00800000      // Give more space on bottom
+#define   LC_MORETOP   0x00400000      // Give more space on the top
+#define LC_DEADLOCKS   0x00200000      // Autoresolve deadlocks
+#define LC_ILLUM       0x00100000      // Auto switch video illumination on/off
+#define LC_HARDZ       0x00040000      // Hard Z contacting (A2/A4/A5 only)
+#define LC_QUAKE       0x00020000      // Earthquake protection on (M2 only)
+#define LC_SMASK1      0x0001C000      // Mask for type of loading system
+#define LC_RELAYS      0x00002000      // Slow (LATEST-compatible) relays
+#define LC_OHTYPE      0x00001C00      // Mask to extract on-head type
+#define   LC_NOFIELD   0x00001000      // On-heads without field amplifier
+#define   LC_PHADJ     0x00000C00      // On-heads with adjustable field phase
+#define   LC_ACTIVE    0x00000400      // Active on-heads (with Dallas/R1-R4)
+#define   LC_PASSIVE   0x00000000      // Passive on-heads (manual C adjust)
+#define LC_TRAFFICS    0x00000200      // Hitachi-style traffic lights
+#define LC_ZSENSORS    0x00000100      // A series: Z pressure sensors active
+#define LC_LOWBAUD     0x00000100      // M2: low AFMCU I/O baud rate
+#define LC_ISM2        0x00000080      // M2 tester
+#define LC_A2LOADER    0x00000040      // A2-style loader, enables LC_SMASK
+#define LC_ENCODERS    0x00000020      // Tester with encoders
+#define LC_COVER       0x00000010      // I have forgotten what it means
+#define LC_HIGHZ       0x00000008      // Z always moves with full hub (B1)
+#define LC_LDELAY      0x00000004      // Wait after light off (obsolete)
+#define LC_AMASK       0x00000003      // Mask for type of antennae
+#define   LC_EXTANT    0x00000000      // LC_AMASK: external (A1) antennae
+#define   LC_INTANT    0x00000001      // LC_AMASK: internal antennae (void)
+#define   LC_FINGANT   0x00000002      // LC_AMASK: finger antennae
+// Alternative (old) interpretation of LC_OHTYPE bits.
+#define LC_PHASEADJ    0x00000800      // On-heads with adjustable field phase
+#define LC_ACTIVEONHD  0x00000400      // Active on-heads (with Dallas/R1-R4)
+// Tester types in LC_SMASK=(LC_SMASK2|LC_SMASK1).
+#define LC_LMMAN       0x0001C000      // L&M manual tester
+#define LC_LMS2        0x00018000      // L&M for S2a
+#define LC_EPCOS       0x00014000      // L&M for EPCOS tester
+#define LC_LM          0x00010000      // L&M for A5a
+#define LC_A5WIDE      0x0000C000      // A5 wide shuttle
+#define LC_AUTOMATE    0x00008000      // Automatical shuttle
+#define LC_A2XSHUT     0x00004000      // A2X shuttle
+#define LC_A2SHUT      0x00000000      // A2 standard shuttle
+// Useful shortcuts and substitutions.
+#define LC_SMASK       (LC_SMASK2|LC_SMASK1)
+#define LC_LDMASK      (LC_SMASK2|LC_SMASK1|LC_A2LOADER)
+#define LC_LMAUTO      (LC_LM|LC_A2LOADER)
+#define LC_LMS2AUTO    (LC_LMS2|LC_A2LOADER)
+#define LC_EPCOSAUTO   (LC_EPCOS|LC_A2LOADER)
+
+external int SERV.Options(int);
+
+// Informs about resident modules and active tasks.
+function int Sysdata()
+  int i,j,k,t,size,inst,type
+  int active,prio,runtime,cputime,update,sel
+  char s[128],name[64]
+  handle win,mod,ins,run,kil,upd,exi,txt
+  win=control WINDOW
+    window=NULL
+    position=170,140,425,305
+    name="系统数据"
+    help=" "
+    mode=M_MODAL
+    bkcolor=YELLOW
+  endc
+  txt=control TEXT
+    window=win
+    position=5,3,330,15
+    name=" #  Module        Size Inst"
+    font=FIXEDFONT
+    bkcolor=YELLOW
+  endc
+  mod=control LISTBOX
+    window=win
+    position=5,20,330,130
+    help="常驻SCRIPT2模块列表(编译的源文件)"
+    font=FIXEDFONT
+    mode=M_VSCROLL
+  endc
+  txt=control TEXT
+    window=win
+    position=5,153,330,15
+    name=" #  Instance   Act Prio Runtime CPUtime"
+    font=FIXEDFONT
+    bkcolor=YELLOW
+  endc
+  ins=control LISTBOX
+    window=win
+    position=5,170,330,130
+    help="正在运行的程序列表(常驻模块的实例)"
+    font=FIXEDFONT
+    mode=M_VSCROLL
+  endc
+  run=control WINBUTTON
+    window=win
+    position=345,19,75,26
+    text="Run"
+    help="按下启动所选模块"
+  endc
+  kil=control WINBUTTON
+    window=win
+    position=345,169,75,26
+    text="Kill"
+    help=按下终止选定实例"
+  endc
+  upd=control WINBUTTON
+    window=win
+    position=345,245,75,26
+    text="Update"
+    help="按可更新列表"
+  endc
+  exi=control WINBUTTON
+    window=win
+    position=345,275,75,26
+    text="确定"
+    help="按下关闭系统数据窗口"
+  endc
+  update=1
+  while 1 do
+    if update then
+      sel=Status(mod)
+      change mod redraw=0
+      clear mod
+      for i=0,1,i=i+1
+        j=SYS.Moduledata(i,name,&size,&inst,&type)
+        if j==0 continue
+        if j<0 break
+        sprintf(s,"%2i  %-10s %7i  %2i",i,name,size,inst)
+        add mod text=s
+      enddo
+      change mod select=sel
+      change mod redraw=1
+      sel=Status(ins)
+      change ins redraw=0
+      clear ins
+      for i=0,1,i=i+1
+        j=SYS.Rundata(i,name,&active,&prio,&runtime,&cputime)
+        if j==0 continue
+        if j<0 break
+        k=sprintf(s,"%2i  %-10s %2i  %3i",i,name,active,prio)
+        t=runtime/1000
+        if t<3600 then
+          k=k+sprintf(s+k," %3im%2is",t/60,t%60)
+        else
+          t=t/60
+          k=k+sprintf(s+k," %3ih%2im",t/60,t%60)
+        endif
+        t=cputime/1000
+        if t<3600 then
+          k=k+sprintf(s+k," %3im%2is",t/60,t%60)
+        else
+          t=t/60
+          k=k+sprintf(s+k," %3ih%2im",t/60,t%60)
+        endif
+        add ins text=s
+      enddo
+      change ins select=sel
+      change ins redraw=1
+      update=0
+    endif
+    if Pressed(run) then
+      Text(mod,s)
+      i=-1
+      sscanf(s,"%i",&i)
+      j=SYS.Moduledata(i,name,&size,&inst,&type)
+      if j==1 then
+        SYS.Start(name,1,"")
+        update=1
+      endif
+    else if Pressed(kil) then
+      Text(ins,s)
+      i=-1
+      sscanf(s,"%i",&i)
+      i=SYS.Kill(i)
+      wait                             // Necessary to give system the
+      update=1                         // opportunity to kill before updating.
+    else if Pressed(upd) then
+      update=1
+    else if Pressed(exi) then
+      break
+    endif
+    wait
+  enddo
+  destroy win
+end
+
+// Turns on (mode=1) or off (mode=0) shuttle vacuum.
+function int Vacuum(int mode)
+  int n
+  char buf[256]
+  if (($LAY.config & LC_LDMASK)==LC_LMAUTO ||                                  \
+    ($LAY.config & LC_LDMASK)==LC_EPCOSAUTO) &&                                \
+    ($GLOBAL.debugmode & 0x0040)==0                                            \
+  then
+    // L&M-based SPS.
+    buf[0]=S_LMAUTO
+    buf[1]=4                           // Send command
+    $uint2(buf+2)=0                    // Timeout, seconds
+    if mode==0 then
+      n=5+Strcpy(buf+4,"MECH.Cmd=Vacuum 0")
+    else
+      n=5+Strcpy(buf+4,"MECH.Cmd=Vacuum 1")
+    endif
+    SYS.Sendimm(0,n,buf)
+  else
+    // Jetter-based SPS.
+    buf[0]=S_DEBUG
+    buf[1]=0x2A                        // Execute SPS command
+    $long(buf+2)=62                    // Shuttle vacuum
+    buf[6]=1                           // Number of arguments
+    $long(buf+7)=mode & 1              // Vacuum ON/OFF
+    SYS.Sendimm(0,11,buf)
+  endif
+end
+
+function int main()
+  char s[80],buf[16]
+  int optmode
+  handle hmain,hopts,hlout,hvers,hruns,hsyst,hload,hsoft,hshut
+  handle hvaon,hvaof,hmove,hptio,hlock,hopen,hrand,hvini,hexri
+  handle hrini,hmsdi,hlati,hcini,hprot,ha5pr,ha5ms,ha5mt,ha5tr
+  handle ha5bt,ha5st,htest,hioex,hneed,hspst,hspdt,hmest,hcadj
+  handle hbust,hplay,hphas,hrast,hlowr,hquit
+  hmain=control WINDOW
+    window=NULL
+    position=6,6,529,MDY*6+4
+    name="诊断功能"
+    help=" "
+    bkcolor=LIGHTCYAN
+    mode=M_BORDER
+  endc
+  // First column: general functions.
+  hopts=control BUTTON
+    window=hmain
+    position=3,3,MDX-2,MDY-2
+    name="选项"
+    help="按下以设置显示模式，屏蔽手臂，外部设备等."
+  endc
+  hlout=control BUTTON
+    window=hmain
+    position=3,3+MDY,MDX-2,MDY-2
+    name="布局"
+    help="按下以编辑测试机布局"
+  endc
+  hvers=control BUTTON
+    window=hmain
+    position=3,3+2*MDY,MDX-2,MDY-2
+    name="版本"
+    help="按下以询问所加载的版本"
+  endc
+  hruns=control BUTTON
+    window=hmain
+    position=3,3+3*MDY,MDX-2,MDY-2
+    name="运行"
+    help="按下选择要运行的脚本"
+    color=CYAN
+  endc
+  hsyst=control BUTTON
+    window=hmain
+    position=3,3+4*MDY,MDX-2,MDY-2
+    name="系统"
+    help="按下可查看脚本数据并终止脚本"
+    color=CYAN
+  endc
+  hquit=control BUTTON
+    window=hmain
+    position=3,3+5*MDY,MDX-2,MDY-2
+    name="关闭"
+    help="按下以关闭诊断窗口"
+    color=CYAN
+  endc
+  // Second column: load/shutdown.
+  hload=control BUTTON
+    window=hmain
+    position=3+MDX,3,MDX-2,MDY-2
+    name="加载器"
+    help="按下以引导测试机启动"
+  endc
+  hsoft=control BUTTON
+    window=hmain
+    position=3+MDX,3+MDY,MDX-2,MDY-2
+    name="软复位完成"
+    help="按下以进行软件复位"
+  endc
+  hshut=control BUTTON
+    window=hmain
+    position=3+MDX,3+2*MDY,MDX-2,MDY-2
+    name="关闭"
+    help="按下以关闭测试机"
+  endc
+  if $GLOBAL.a5!=0 then
+    hvaon=control BUTTON
+      window=hmain
+      position=3+MDX,3+3*MDY,MDX-2,MDY-2
+      name="开真空"
+      help="按下以打开架板框上的真空"
+    endc
+    hvaof=control BUTTON
+      window=hmain
+      position=3+MDX,3+4*MDY,MDX-2,MDY-2
+      name="关真空"
+      help="按下以关闭架板框上的真空"
+    endc
+  endif
+  // Third column: standard commands.
+  hmove=control BUTTON
+    window=hmain
+    position=3+2*MDX,3,MDX-2,MDY-2
+    name="移动"
+    help="按下以打开移动窗口:两点之间的简单测试"
+  endc
+  hptio=control BUTTON
+    window=hmain
+    position=3+2*MDX,3+MDY,MDX-2,MDY-2
+    name="I/O端口"
+    help="按下以打开I/O端口窗口"
+  endc
+  hlock=control BUTTON
+    window=hmain
+    position=3+2*MDX,3+2*MDY,MDX-2,MDY-2
+    name="锁止"
+    help="按下以锁紧架板框或放置单个PCB"
+  endc
+  hopen=control BUTTON
+    window=hmain
+    position=3+2*MDX,3+3*MDY,MDX-2,MDY-2
+    name="解锁"
+    help="按下以打开架板框或去除所有PCB"
+  endc
+  hrand=control BUTTON
+    window=hmain
+    position=3+2*MDX,3+4*MDY,MDX-2,MDY-2
+    name="随机"
+    help="打开随机测试"
+  endc
+  // Fourth column: initializations.
+  hvini=control BUTTON
+    window=hmain
+    position=3+3*MDX,3,MDX-2,MDY-2
+    name="高压自检"
+    help="按下打开高压初始化窗口"
+  endc
+  hexri=control BUTTON
+    window=hmain
+    position=3+3*MDX,3+MDY,MDX-2,MDY-2
+    name="低阻自检"
+    help="按下打开精确电阻初始化窗口"
+  endc
+  if $GLOBAL.a5!=0 then
+    hrini=control BUTTON
+      window=hmain
+      position=3+3*MDX,3+2*MDY,MDX-2,MDY-2
+      name="阻值自检"
+      help="按下打开电阻初始化窗口"
+    endc
+    hmsdi=control BUTTON
+      window=hmain
+      position=3+3*MDX,3+3*MDY,MDX-2,MDY-2
+      name="MSD自检"
+      help="按下打开微短探测初始化窗口"
+    endc
+    hlati=control BUTTON
+      window=hmain
+      position=3+3*MDX,3+4*MDY,MDX-2,MDY-2
+      name="LA自检"
+      help="按下打开潜在开路检测初始化窗口"
+    endc
+    hcini=control BUTTON
+      window=hmain
+      position=3+3*MDX,3+5*MDY,MDX-2,MDY-2
+      name="F-C自检"
+      help="按下打开电场和电容参数窗口"
+    endc
+  endif
+  // Fifth column: protocols, strongly tester-specific.
+  if $GLOBAL.a5==0 then
+    hprot=control BUTTON
+      window=hmain
+      position=10+4*MDX,3,MDX-2,MDY-2
+      name="协议"
+      help="打开运动协议窗口"
+      bkcolor=WHITEBLUE
+    endc
+  else
+    ha5pr=control BUTTON
+      window=hmain
+      position=10+4*MDX,3,MDX-2,MDY-2
+      name="运动"
+      help="按下打开H5移动示波器窗口"
+      bkcolor=WHITEGREEN
+    endc
+    ha5ms=control BUTTON
+      window=hmain
+      position=10+4*MDX,3+MDY,MDX-2,MDY-2
+      name="测量卡"
+      help="按下打开H5测量示波器窗口"
+      bkcolor=WHITEGREEN
+    endc
+    ha5mt=control BUTTON
+      window=hmain
+      position=10+4*MDX,3+2*MDY,MDX-2,MDY-2
+      name="控制图"
+      help="按下打开H5测量卡测试窗口"
+      bkcolor=WHITEGREEN
+    endc
+    ha5tr=control BUTTON
+      window=hmain
+      position=10+4*MDX,3+3*MDY,MDX-2,MDY-2
+      name="树状图"
+      help="按下可打开H51394总线树图窗口"
+      bkcolor=WHITEGREEN
+    endc
+    ha5bt=control BUTTON
+      window=hmain
+      position=10+4*MDX,3+4*MDY,MDX-2,MDY-2
+      name="总线"
+      help="按下可打开H5总线通讯窗口"
+      bkcolor=WHITEGREEN
+    endc
+    ha5st=control BUTTON
+      window=hmain
+      position=10+4*MDX,3+5*MDY,MDX-2,MDY-2
+      name="状态"
+      help="按下可打开H5信息窗口"
+      bkcolor=WHITEGREEN
+    endc
+  endif
+  // Sixth column: tests.
+  htest=control BUTTON
+    window=hmain
+    position=17+5*MDX,3,MDX-2,MDY-2
+    name="卡片自检"
+    help="按下启动电子自检"
+    bkcolor=WHITEMAGENTA
+  endc
+  if $GLOBAL.a5==0 then
+    hioex=control BUTTON
+      window=hmain
+      position=17+5*MDX,3+MDY,MDX-2,MDY-2
+      name="I/O ext"
+      help="按此开始对 I/O 扩展器进行自检"
+      bkcolor=WHITEMAGENTA
+    endc
+  else
+    hneed=control BUTTON
+      window=hmain
+      position=17+5*MDX,3+MDY,MDX-2,MDY-2
+      name="针尖"
+      help="按此启动针头查看器"
+      bkcolor=WHITEMAGENTA
+    endc
+  endif
+  hspst=control BUTTON
+    window=hmain
+    position=17+5*MDX,3+2*MDY,MDX-2,MDY-2
+    name="单片机"
+    help="按下即可开始自动架板框和载入器测试"
+    bkcolor=WHITEMAGENTA
+  endc
+  hspdt=control BUTTON
+    window=hmain
+    position=17+5*MDX,3+3*MDY,MDX-2,MDY-2
+    name="速度"
+    help="按下启动飞针速度测试"
+    bkcolor=WHITEMAGENTA
+  endc
+  hmest=control BUTTON
+    window=hmain
+    position=17+5*MDX,3+4*MDY,MDX-2,MDY-2
+    name="年度校验"
+    help="按下开始使用年度校验板进行电子测试"
+    bkcolor=WHITEMAGENTA
+  endc
+  hcadj=control BUTTON
+    window=hmain
+    position=17+5*MDX,3+5*MDY,MDX-2,MDY-2
+    name="电容校验"
+    help="按下使用电容校验板开始电容调整
+    bkcolor=WHITEMAGENTA
+  endc
+  // Seventh column: tests (continued).
+  if $GLOBAL.a5==0 then
+    hbust=control BUTTON
+      window=hmain
+      position=17+6*MDX,3,MDX-2,MDY-2
+      name="总线测试"
+      help="按下启动总线示波器"
+      bkcolor=WHITEMAGENTA
+    endc
+    hplay=NULL
+  else
+    hbust=NULL
+    hplay=control BUTTON
+      window=hmain
+      position=17+6*MDX,3,MDX-2,MDY-2
+      name="播放测试"
+      help="按下即可开始测试翻译程序"
+      bkcolor=WHITEMAGENTA
+    endc
+  endif
+  hphas=control BUTTON
+    window=hmain
+    position=17+6*MDX,3+MDY,MDX-2,MDY-2
+    name="阶段"
+    help="按下测试编码器相位"
+    bkcolor=WHITEMAGENTA
+  endc
+  hrast=control BUTTON
+    window=hmain
+    position=17+6*MDX,3+2*MDY,MDX-2,MDY-2
+    name="栅格"
+    help="按下检查PCB上的标记"
+    bkcolor=WHITEMAGENTA
+  endc
+  hlowr=control BUTTON
+    window=hmain
+    position=17+6*MDX,3+3*MDY,MDX-2,MDY-2
+    name="四线（Low R）"
+    help="按下使用校验板启动低阻测试"
+    bkcolor=WHITEMAGENTA
+  endc
+  optmode=1
+  SYS.Compile("debug.scr",1)
+  if $LAY.nfing<=0 then                // Call loader if layout is unavailable
+    SYS.Compile("loader.scr",1)
+    SYS.Start("loader",8,"CHECKONLY")
+  endif
+  while 1 do
+    if Pressed(hopts) then
+      optmode=SERV.Options(optmode)
+    else if Pressed(hlout) then
+      SYS.Compile("layout.scr",1)
+      SYS.Start("layout",0,"")
+    else if Pressed(hvers) then
+      SYS.Start("debug",8,"VERSION")
+    else if Pressed(hruns) then
+      SYS.Compile("runscr.scr",1)
+      SYS.Start("runscr",0,"")
+    else if Pressed(hsyst) then
+      Sysdata()
+    else if Pressed(hload) then
+      SYS.Compile("loader.scr",1)
+      SYS.Start("loader",0,"")
+    else if Pressed(hsoft) then
+      SYS.Softreset(0)
+    else if Pressed(hshut) then
+      buf[0]=S_LOADRUN
+      buf[1]=0x00;                     // Hard reset
+      buf[2]=0x55                      // Shutdown option
+      $uint3(buf+3)=0
+      SYS.Sendimm(0,6,buf)
+    else if Pressed(hvaon) then
+      Vacuum(1)                        // Vacuum ON
+    else if Pressed(hvaof) then
+      Vacuum(0)                        // Vacuum OFF
+    else if Pressed(hmove) then
+      SYS.Start("debug",5,"MOVE")
+    else if Pressed(hptio) then
+      SYS.Start("debug",7,"PORTIO")
+    else if Pressed(hlock) then
+      s[0]=S_LOCKDOOR;
+      s[1]=1;                          // Lock door
+      SYS.Send(2,s,0)                  // Discard the answer
+    else if Pressed(hopen) then
+      s[0]=S_LOCKDOOR;
+      s[1]=0;                          // Unlock door
+      SYS.Send(2,s,0)                  // Discard the answer
+    else if Pressed(hrand) then
+      SYS.Start("debug",7,"RANDOM")
+    else if Pressed(hvini) then
+      SYS.Start("debug",7,"HVINIT")
+    else if Pressed(hexri) then
+      SYS.Start("debug",8,"EXRINIT")
+    else if Pressed(hrini) then
+      SYS.Start("debug",6,"RINIT")
+    else if Pressed(hmsdi) then
+      SYS.Start("debug",8,"MSDINIT")
+    else if Pressed(hlati) then
+      SYS.Start("debug",7,"LAINIT")
+    else if Pressed(hcini) then
+      SYS.Start("debug",7,"FCINIT")
+    else if hprot!=NULL && Pressed(hprot) then
+      SYS.Compile("xyzprot.scr",1)     // A2 movement protocolling
+      SYS.Start("XYZPROT",0,"")
+    else if ha5pr!=NULL && Pressed(ha5pr) then
+      SYS.Compile("a5prot.scr",1)      // A5 movement oscilloscope
+      SYS.Start("A5PROT",0,"")
+    else if ha5ms!=NULL && Pressed(ha5ms) then
+      SYS.Compile("a5mosc.scr",1)      // A5 measurement oscilloscope
+      SYS.Start("A5MOSC",0,"")
+    else if ha5mt!=NULL && Pressed(ha5mt) then
+      SYS.Compile("a5meas.scr",1)      // A5 measurement card test
+      SYS.Start("A5MEAS",0,"")
+    else if ha5tr!=NULL && Pressed(ha5tr) then
+      SYS.Compile("a5tree.scr",1)      // A5 bus tree
+      SYS.Start("A5TREE",0,"")
+    else if ha5bt!=NULL && Pressed(ha5bt) then
+      SYS.Compile("a5bus.scr",1)       // A5 bus traffic protocol
+      SYS.Start("A5BUS",0,"")
+    else if ha5st!=NULL && Pressed(ha5st) then
+      SYS.Compile("a5state.scr",1)     // A5 state
+      SYS.Start("A5STATE",0,"")
+    else if Pressed(htest) then
+      if $GLOBAL.a5==0 then
+        SYS.Compile("selftest.scr",1)
+        SYS.Start("SELFTEST",0,"")
+      else
+        SYS.Compile("a5self.scr",1)
+        SYS.Start("A5SELF",0,"")
+      endif
+    else if Pressed(hioex) then
+      SYS.Compile("ioextest.scr",1)
+      SYS.Start("IOEXTEST",0,"")
+    else if Pressed(hneed) then
+      SYS.Compile("needles.scr",1)
+      SYS.Start("NEEDLES",0,"")
+    else if Pressed(hspst) then
+      SYS.Compile("sps.scr",1)
+      SYS.Start("SPS",0,"")
+    else if Pressed(hspdt) then
+      SYS.Compile("speedtst.scr",1)
+      SYS.Start("SPEEDTST",0,"")
+    else if Pressed(hmest) then
+      SYS.Compile("meastest.scr",1)
+      SYS.Start("MEASTEST",0,"")
+    else if Pressed(hcadj) then
+      SYS.Compile("ctest.scr",1)
+      SYS.Start("CTEST",0,"")
+    else if Pressed(hbust) then
+      SYS.Start("debug",0,"BUSTEST")
+    else if Pressed(hplay) then
+      SYS.Compile("a5mplay.scr",1)
+      SYS.Start("A5MPLAY",0,"")
+    else if Pressed(hphas) then
+      SYS.Compile("a5phases.scr",1)
+      SYS.Start("A5PHASES",0,"")
+    else if Pressed(hrast) then
+      SYS.Compile("raster.scr",1)
+      SYS.Start("RASTER",0,"")
+    else if Pressed(hlowr) then
+      SYS.Compile("lowrtest.scr",1)
+      SYS.Start("LOWRTEST",0,"")
+    else if Pressed(hquit) then
+      break
+    endif
+    wait
+  enddo
+end
+

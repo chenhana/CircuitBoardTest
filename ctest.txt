@@ -1,0 +1,29 @@
+
+           C A P A C I T Y   A D J U S T M E N T   L O G   F I L E
+
+ Version of script file:  19.02
+               Start on:  Wed 08-Mar-2023 17:09
+            Tester type:  A7/8 with head cameras (single-sided)
+       Crate controller:  Crate controller v05.06.14 29.10.21 DEVELOPMENT
+                          AutoMon,DateTime,LMBug,CycleMiss
+                 Layout:  GKHC7M23B0009
+        Head controller:  Head controller v05.00.31 28.10.21
+        Sides to adjust:  Top
+        Rails to adjust:  0 to 1
+Debug mode bits (heads):  0x0000
+ Debug mode bits (cams):  0x0000
+         Disabled rails:  0x00000000
+  Disabled measurements:  0xFFFFFF00
+               Z stroke:  50 mm/s
+             Z pressure:  50 gram
+               Z height:  5.0 mm
+        Adjustment mode:  All options
+     Tester temperature:  22.0 C
+
+-----------------------------------------------------------------------------
+
+
+Verifying adjustment limits of on-head boards...
+  Unable to measure on-head limits
+
+              Finish on:  Wed 08-Mar-2023 17:09

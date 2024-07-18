@@ -1,0 +1,214 @@
+#include "ls.icl"
+#define MX1 380
+#define MY1 280
+
+#bitmap "redbrick"="redbrick.bmp"
+
+handle hmain,hchild,hlist,htext,hbitmap,hdummy,hquit
+
+function int Addtotext()
+  int i,j,k,n,point
+  char s[4096]
+  point=0; n=0
+  for i=0,i<100,i++ do
+    k=Min(13,Random(15)*(Random(10)+3)/15+1)
+    for j=0,j<k,j++ do
+      s[n]='a'+Random('z'-'a');
+      if point==0 s[n]=Toupper(s[n])
+      point++; n++
+    enddo
+    if point>Random(20)+1 || i==99 then
+      s[n]=(Random(100)<30?'?':'.'); n++; point=0
+    endif
+    s[n]=' '; n++
+  enddo
+  s[n]='\0'
+  add htext text=s
+end
+
+function int Drawinchild()
+  int i,j
+  draw window=hchild color=WHITEGREEN bkcolor=WHITEGREEN
+  draw at 0,0 fillrect 500,500
+  for i=0,i<50,i++ do
+    j=Random(8)
+    draw color=j bkcolor=j+8
+    draw at 15+Random(470),15+Random(470) fillellipse 30,30
+  enddo
+  draw color=BLACK font=TIMESFONT
+  draw at 10,20 text="I have popup menu! Click right\nmouse button on me!"
+  draw show
+end
+
+function int main()
+  int i,listmode
+  hmain=control WINDOW
+    window=NULL
+    position=0,0,MX1,MY1
+    minsize=MX1,MY1
+    name="简单调整"
+    help="具有模式位M_SIZE的窗口可调整大小"
+    menu="&Click{"                                                             \
+         "1100Item &1|1200Item &2|1300Item &3||&First submenu{"                \
+         "1310&Blabla|1320B&lablabla|&Second submenu{"                         \
+         "1331&Blabla|1332B&lablabla|1333Bl&ablablabla|1334Blablablablabla"    \
+         "}}}|2000&To|3000T&est|4000&Menu|5000&And|6000&Quit"
+    mode=M_SIZE|M_NOMINIMIZE
+    size=512
+  endc
+  draw window=hmain font=INFOFONT color=LIGHTRED
+  draw at 3,3 mode=M_AUTORIGHT to MX1-4,3
+  draw mode=M_AUTORIGHT|M_AUTOBOTTOM to MX1-4,MY1-4
+  draw mode=M_AUTOBOTTOM to 3,MY1-4
+  draw mode=0 to 3,3
+  draw mode=0 at 10,53 color=LIGHTBLUE text="Standard text"
+  draw mode=M_CENTERED|M_AUTOCENTER at MX1/2,53 text="Autocentered text"
+  draw mode=M_RIGHT|M_AUTORIGHT at MX1-10,53 text="Autoright text"
+  draw mode=M_AUTOBOTTOM at 10,MY1-40 text="Autodown"
+  draw mode=M_CENTERED|M_AUTOCENTER|M_AUTOBOTTOM at MX1/2,MY1-40
+  draw text="Autodowncentered"
+  draw mode=M_RIGHT|M_AUTORIGHT|M_AUTOBOTTOM at MX1-10,MY1-40
+  draw text="Autodownright"
+  draw color=GREEN bkcolor=LIGHTGREEN
+  draw mode=M_AUTOBOTTOM at 20,MY1-21 fillellipse 20,20
+  draw mode=M_AUTOBOTTOM|M_AUTORIGHT at MX1-20,MY1-21 fillellipse 20,20
+  draw show
+  hdummy=control TEXT
+    window=hmain
+    position=10,10,MX1-20,22
+    text="Automatically resizable window"
+    help="带M_AUTOWIDTH的文本随父项更改宽度"
+    font=MEDIUMFONT
+    color=BLUE
+    bkcolor=LIGHTGREEN
+    mode=M_BORDER|M_CENTERED|M_AUTOWIDTH
+  endc
+  hbitmap=control BITMAP
+    window=hmain
+    position=10,57,60,60
+    name="红砖"
+    help="带M_AUTOHEIGHT的位图随父项更改高度"
+    menu="1Bitmap has popup"
+    mode=M_AUTOHEIGHT
+  endc
+  hdummy=control BUTTON
+    window=hmain
+    position=MX1-80,57,70,27
+    text="Dummy"
+    help="带M_AUTORIGHT和M_AUTOHALFH的按钮"
+    mode=M_AUTORIGHT|M_AUTOHALFH
+  endc
+  hdummy=control BUTTON
+    window=hmain
+    position=MX1-80,90,70,27
+    text="Dummy"
+    help="M_AUTORIGHT, M_AUTOHALFH and M_AUTOBOTTOM"
+    mode=M_AUTORIGHT|M_AUTOHALFH|M_AUTOBOTTOM
+  endc
+  listmode=M_BORDER|M_AUTOBOTTOM|M_AUTOHALFW
+  hlist=control LIST
+    window=hmain
+    position=10,MY1-158,75,97
+    help="上次激活菜单项列表，M_UAutobottom和M_UAutoHalfW"
+    menu="1&Clear|2&Toggle timestamp"
+    font=INFOFONT
+    bkcolor=YELLOW
+    mode=listmode
+  endc
+  add hlist text="I have popup menu, too!"
+  htext=control TEXT
+    window=hmain
+    position=90,MY1-158,MX1-100,97
+    text="Nice to meet you. I also have popup menu. "
+    help="带M_AUTORIGHT, M_AUTOHALFW and M_AUTOBOTTOM的文本"
+    menu="100New text|Change color{99Black|9Blue|10Green|12Red|13Magenta}"
+    font=INFOFONT
+    bkcolor=PINK
+    mode=M_BORDER|M_AUTORIGHT|M_AUTOHALFW|M_AUTOBOTTOM
+  endc
+  Addtotext()
+  hdummy=control BUTTON
+    window=hmain
+    position=MX1/2-155,MY1-35,70,27
+    text="继续"
+    help="M_AUTOBOTTOM和M_AUTOCENTER-与中心保持一致"
+    mode=M_AUTOBOTTOM|M_AUTOCENTER
+  endc
+  hdummy=control BUTTON
+    window=hmain
+    position=MX1/2-75,MY1-35,70,27
+    text="Go on"
+    help="M_AUTOBOTTOM和M_AUTOCENTER-与中心保持一致"
+    mode=M_AUTOBOTTOM|M_AUTOCENTER
+  endc
+  hdummy=control BUTTON
+    window=hmain
+    position=MX1/2+5,MY1-35,70,27
+    text="Proceed"
+    help="M_AUTOBOTTOM和M_AUTOCENTER-与中心保持一致"
+    mode=M_AUTOBOTTOM|M_AUTOCENTER
+  endc
+  hquit=control BUTTON
+    window=hmain
+    position=MX1/2+85,MY1-35,70,27
+    text="Quit"
+    help="关闭调整大小演示"
+    mode=M_AUTOBOTTOM|M_AUTOCENTER
+  endc
+  hchild=control CHILD                 // Update it last
+    window=hmain
+    position=76,58,MX1-162,58
+    help="CHILD 带有 M_AUTOWIDTH 和 M_AUTOHEIGHT"
+    mode=M_AUTOWIDTH|M_AUTOHEIGHT|M_VSCROLL|M_HSCROLL
+    menu="1Redraw|Do{2This|3That|4Something|5Another|6Yet another}"
+    limits=500,500
+    size=2048
+  endc
+  Drawinchild()
+  while Pressed(hquit)==0 do
+    i=Menu(hmain)
+    if (i) then
+      change hlist color=RED
+      add hlist text=format("Main %i",i)
+      if i==6000 break                 // Quit selected from menu
+    endif
+    i=Menu(hbitmap)
+    if (i) then
+      change hlist color=LIGHTRED
+      add hlist text=format("Bitmap %i",i)
+    endif
+    i=Menu(hchild)
+    if (i) then
+      change hlist color=GREEN
+      add hlist text=format("Child %i",i)
+      if i==1 then
+        clear hchild
+        Drawinchild()
+      endif
+    endif
+    i=Menu(htext)
+    if (i) then
+      change hlist color=MAGENTA
+      add hlist text=format("Text %i",i)
+      if i==99 i=0
+      if i==100 then
+        clear htext; Addtotext();
+      else
+        change htext color=i
+      endif
+    endif
+    i=Menu(hlist)
+    if (i) then
+      if i==1 then
+        clear hlist
+      else if i==2 then
+        listmode=listmode^M_TSTAMP
+        change hlist mode=listmode
+      endif
+      change hlist color=BLACK
+      add hlist text=format("List %i",i)
+    endif
+    wait
+  enddo
+end
+

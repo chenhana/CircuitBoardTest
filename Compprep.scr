@@ -1,0 +1,5601 @@
+#include "ls.icl"
+#include "or.icl"
+#include "pa.icl"                  // Rich Text Format extentions
+
+#define VERSION        "1.16"
+#define DESCRIPTION    "Component test generator"
+
+// 1.01: Parallelized measurements.
+// 1.02: U-I (inputs) test, board offset while scanning.
+// 1.03: Duplication, component name in log.
+// 1.04: C voltage offset.
+// 1.05: Rcommon (resistance to common pin).
+// 1.06: Manual scanning.
+// 1.07: Stroke parameters.
+// 1.08: Complete redesing, support for 3-pad measurements.
+// 1.09: Named pads.
+// 1.10: Shuttle movements.
+// 1.11: Unified components, differential inductance.
+// 1.12: HV, only named pads, doifferent task format.
+// 1.13: Four-wire measurements, reading of LES files.
+// 1.14: Shuttle Y optimization (controlled by USEYOPT).
+// 1.15: Delay after contacting PCB, test loops.
+// 1.16: Option to exclude panels.
+                                                  
+#define USEYOPT        2               // Use Y optimization (1: 250, 2: 500 um)
+
+#cmdbuff 34                            // 2*16+2 answer buffers
+#define NSEND          32              // Number of pending commands
+#define SCRATCH        32              // Buffer where responses unimportant
+#define CAMMOVE        33              // Buffer for camera movements
+
+#define MAINDX         800             // Width of main window (client area)
+#define MAINDY         800             // Heigth of main window (client area)
+#define BUTTONDX       100             // Width of the button
+#define BUTTONDY       24              // Height of the button
+#define MESSAGEDY      24              // Height of message stripe
+#define VIDEODX        400             // Width of live video viewer
+#define VIDEODY        300             // Heigth of live video viewer
+#define CONTROLDY      50              // Height of video controls
+#define RSPACE         250             // Right space in preview
+
+// Layout configuration bits in $LAY.config.
+#define LC_SMASK2      0x20000000      // Extention of LC_SMASK
+#define LC_AUTOPROBE   0x10000000      // Autodetect probes (Kelvin or standard)
+#define LC_TYPEMASK    0x0B000000      // General type of machine
+#define   LC_STD       0x00000000      // LC_TYPEMASK: standard A5/A6 tester
+#define   LC_NEWA1     0x01000000      // LC_TYPEMASK: new A1 (slow A5) tester
+#define   LC_S1        0x02000000      // LC_TYPEMASK: S1/S2
+#define   LC_A8        0x03000000      // LC_TYPEMASK: A7/A8
+#define   LC_S3        0x08000000      // LC_TYPEMASK: S3
+#define LC_VACUUMBOX   0x04000000      // Disable movements on bottom side
+#define LC_MOREMASK    0x00C00000      // Mask for more space bits
+#define   LC_MOREBOT   0x00800000      // Give more space on bottom
+#define   LC_MORETOP   0x00400000      // Give more space on the top
+#define LC_DEADLOCKS   0x00200000      // Autoresolve deadlocks
+#define LC_ILLUM       0x00100000      // Auto switch video illumination on/off
+#define LC_HARDZ       0x00040000      // Hard Z contacting (A2/A4/A5 only)
+#define LC_QUAKE       0x00020000      // Earthquake protection on (M2 only)
+#define LC_SMASK1      0x0001C000      // Mask for type of loading system
+#define LC_RELAYS      0x00002000      // Slow (LATEST-compatible) relays
+#define LC_OHTYPE      0x00001C00      // Mask to extract on-head type
+#define   LC_NOFIELD   0x00001000      // On-heads without field amplifier
+#define   LC_PHADJ     0x00000C00      // On-heads with adjustable field phase
+#define   LC_ACTIVE    0x00000400      // Active on-heads (with Dallas/R1-R4)
+#define   LC_PASSIVE   0x00000000      // Passive on-heads (manual C adjust)
+#define LC_TRAFFICS    0x00000200      // Hitachi-style traffic lights
+#define LC_ZSENSORS    0x00000100      // A series: Z pressure sensors active
+#define LC_LOWBAUD     0x00000100      // M2: low AFMCU I/O baud rate
+#define LC_ISM2        0x00000080      // M2 tester
+#define LC_A2LOADER    0x00000040      // A2-style loader, enables LC_SMASK
+#define LC_ENCODERS    0x00000020      // Tester with encoders
+#define LC_COVER       0x00000010      // I have forgotten what it means
+#define LC_HIGHZ       0x00000008      // Z always moves with full hub (B1)
+#define LC_LDELAY      0x00000004      // Wait after light off (obsolete)
+#define LC_AMASK       0x00000003      // Mask for type of antennae
+#define   LC_EXTANT    0x00000000      // LC_AMASK: external (A1) antennae
+#define   LC_INTANT    0x00000001      // LC_AMASK: internal antennae (void)
+#define   LC_FINGANT   0x00000002      // LC_AMASK: finger antennae
+
+// Active wizards.
+#define WIZ_EMPTY      0x00000000      // Empty wizard window
+#define WIZ_SEARCH     0x00000001      // Video search wizard
+#define WIZ_PAD        0x00000002      // Pad selection wizard
+#define WIZ_STEPS      0x00000010      // Number of steps
+#define WIZ_XSTEP      0x00000020      // Step in X direction
+#define WIZ_YSTEP      0x00000040      // Step in Y direction
+#define WIZ_FID        0x00000080      // Select fiducials
+#define WIZ_OPT        0x00000100      // Manage options
+#define WIZ_DEFPAD     0x00000200      // Define named pads
+#define WIZ_COMP       0x00000400      // Manage components
+#define WIZ_OPTIONS    0x00000800      // Set options
+#define WIZ_REF        0x00001000      // Select reference
+#define WIZ_STROKE     0x00002000      // Set stroke
+#define WIZ_OFFSET     0x00004000      // Set offset
+#define WIZ_PRETEST    0x00008000      // Enter sample ID
+#define WIZ_MANUAL     0x00010000      // Manual scanning
+#define WIZ_TEST       0x00020000      // Run test
+
+// Preview modi.
+#define P_STEPX        0x00000001      // Request step in X
+#define P_STEPY        0x00000002      // Request step in Y
+#define P_PANEL1       0x00000004      // Mark panel 1
+#define P_RSPACE       0x00000008      // Leave empty space to the right
+#define P_ERRORS       0x00000010      // Show found errors
+#define P_SELECT       0x00000020      // Show excluded panels and selection
+
+// Component types.
+#define CT_NONE        0               // No component
+#define CT_E           1               // Exact resistance
+#define CT_R           2               // Fast resistance
+#define CT_RCOM        3               // Resistance to common pin
+#define CT_C           4               // Capacity
+#define CT_LREF        5               // Inductance reference
+#define CT_LMEAS       6               // Inductance measurement
+#define CT_L           7               // Simple inductance
+#define CT_UI          8               // U-I measurement
+#define CT_D           9               // Diode measurement
+#define CT_V           10              // Varistor
+#define CT_HV          11              // High voltage
+#define CT_FW          12              // Four-wire resistance
+
+#define NTYPE          13              // Total number of component types
+
+char typename[NTYPE][8] = {          \ // Component names as in .tsk file
+  "NONE",  "E",     "R",     "RCOM", \ // Keep in sync with CT_xxx!
+  "C",     "LREF",  "LMEAS", "L",    \
+  "UI",    "D",     "V",     "HV",   \
+  "FWIRE"  }
+
+// Results of component test
+#define ERR_NOTEST     (-1)            // Component is not tested
+#define ERR_OK         0               // Component is good
+#define ERR_NOCONT     1               // No contact in some pad
+#define ERR_ANSWER     2               // Bad answer from tester
+#define ERR_RANGE      3               // Value out of accepted range
+#define ERR_BAD        4               // Bad measurement
+#define ERR_NOCAL      5               // Not calibrated
+#define ERR_OPEN       6               // Open
+#define ERR_SHORT      7               // Shortcut
+#define ERR_POL        8               // Wrong polarity
+#define ERR_UNSYM      9               // Unsymmetrical varistor
+#define ERR_BREAK      10              // HV breakdown
+#define ERR_INTERN     11              // Internal error (invalid component)
+
+// Component options.
+#define COPT_NOSHORT   0x00000001      // Don't check for short
+#define COPT_POLARITY  0x00000002      // Change diode polarity
+#define COPT_LONG      0x00000004      // Make long precise measurement
+#define COPT_UMASK     0x000000F0      // Mask to extract test voltage
+#define   COPT_UDEF    0x00000000      // Default test voltage
+#define COPT_IMASK     0x00001F00      // Mask to extract test current
+#define   COPT_IDEF    0x00000000      // Default test current
+#define COPT_FMASK     0x0000E000      // Mask to extract test frequency
+#define   COPT_FDEF    0x00000000      // Default test frequency
+#define COPT_DMASK     0x000F0000      // Mask to extract delay after contact
+#define   COPT_DDEF    0x00000000      // Default delay adter contact
+
+#define NPAD           4               // Max number of pads in measurement
+#define NCONT          4               // Max. no. of pads including reference
+#define MAXSTEPX       100             // Max number of steps in X direction
+#define MAXSTEPY       100             // Max number of steps in Y direction
+#define NTASK          10000           // MAXSTEPX*MAXSTEPY
+#define MAXERR         10              // Max number of errors per panel
+#define ERRLEN         64              // Max length of error message
+#define NNAMED         10000           // Max number of named pads
+#define NCOMP          500             // Max number of components per panel
+#define NCOMP1         501             // NCOMP+1
+#define NLIST          18              // Number of displayed components
+
+typedef struct t_search                // Search pad descriptor
+  float          x                     // Pad X coordinate, mm
+  float          y                     // Pad Y coordinate, mm
+  int            side                  // Pad side
+  int            fidtype               // Fiducial type, SYNT_xxx
+  int            fidcolor              // WHITEONBLACK or BLACKONWHITE
+  float          a                     // Fiducial size a, pixels
+  float          b                     // Fiducial size b, pixels
+  int            scanman               // Scan manually
+ends
+
+typedef struct t_named                 // Named pad
+  float          x                     // Pad X coordinate, mm
+  float          y                     // Pad Y coordinate, mm
+  int            side                  // Pad side
+  char           name[32]              // Pad name
+ends
+
+typedef struct t_comp                  // Component
+  int            type                  // Type of component, CT_xxx
+  char           name[32]              // Name of component (optional)
+  char           pad0[32]              // Pad names; empty string: no pad
+  char           pad1[32]
+  char           pad2[32]
+  char           pad3[32]
+  float          vmin                  // Minimal value (Ohm/pf/uH/volts)
+  float          vmax                  // Maximal value
+  int            options               // Options, set of COPT_xxx
+ends
+
+typedef struct t_test                  // Description of panel
+  int            x0                    // Panel coordinates in pixels
+  int            y0
+  int            x1
+  int            y1
+  int            excluded              // 1: excluded from electrical test
+  int            nmeas                 // Number of performed measurements
+  int            nerr                  // Number of errors
+  int            loop[MAXERR]          // Loop when error is occured
+  int            index[MAXERR]         // Indices of bad components in cmd
+ends
+
+// Controls in the main window (including window).
+handle           hmain                 // Main window
+handle           hmessage              // Message stripe
+handle           hvideo                // Live video viewer
+handle           hbrightness           // Brightness control
+handle           hcontrast             // Contrast control
+handle           hzoom                 // Zoom control
+handle           hfocusup              // Focus up
+handle           hfocus                // Z camera position
+handle           hfocusdn              // Focus down
+handle           hcamerax              // X camera coordinate
+handle           hcameray              // Y camera coordinate
+handle           hwizard               // Dialog window
+handle           hpreview              // PCB layout preview
+handle           hpreerr               // List of errors in preview
+handle           hlist                 // List of components
+handle           hlistup               // Scroll list up
+handle           hlistdn               // Scroll list down
+
+// Buttons.
+handle           hnew                  // Button "New"
+handle           hload                 // Button "Load"
+handle           hsave                 // Button "Save"
+handle           hsteps                // Button "Steps"
+handle           hstepsizex            // Button "X size"
+handle           hstepsizey            // Button "Y size"
+handle           hdefpads              // Button "Define pads"
+handle           hfiducials            // Button "Fiducials"
+handle           hcomp                 // Button "Components"
+handle           hopt                  // Button "Options"
+handle           href                  // Button "Reference"
+handle           hstroke               // Button "Stroke"
+handle           hoffset               // Button "Offset"
+handle           htest                 // Button "Test"
+handle           hunlock               // Button "Unlock"
+handle           hexit                 // Button "Close"
+
+// Wizard controls.
+handle           hname                 // Job name
+handle           hstepsx               // Number of steps in X
+handle           hstepsy               // Number of steps in Y
+handle           hallowshy             // Allow shuttle movements (S3 only)
+handle           hselpad[3]            // Search for pad buttons
+handle           husethird             // Use third pad
+handle           hu                    // Move camera up
+handle           hl                    // Move camera left
+handle           hr                    // Move camera right
+handle           hd                    // Move camera down
+handle           hnamed                // List of named pads
+handle           hgonamed              // Go to selected named pad
+handle           hpadname              // Pad name
+handle           haddpad               // Add named pad
+handle           hfollowpad            // Follow named pad
+handle           hdelpad               // Delete named pad
+handle           hreadles              // Read LES file
+handle           hsearchside           // Search side
+handle           hsearchstep           // Search step
+handle           hscanman              // Manual scanning
+handle           hfidtype              // Type and color of fiducial
+handle           hfidsizea             // Fiducial size a
+handle           hfidsizeb             // Fiducial size b
+handle           hgopad[NPAD]          // Go to component pad
+handle           hcomppad[NPAD]        // Component pads
+handle           hcomptype             // Component type
+handle           hcompname             // Component name
+handle           hcompid               // Component index
+handle           hvalmin               // Minimal allowed value
+handle           hvalmax               // Maximal allowed value
+handle           hunits                // Units for values
+handle           hcompopt              // Component option
+handle           hutest                // Test voltage
+handle           hititle               // Text preceding hitest
+handle           hitest                // Test current or frequency
+handle           hdelay                // Delay after contact
+handle           hprev                 // Previous component
+handle           hdupl                 // Duplicate to next component
+handle           hdel                  // Delete selected component
+handle           hhvvolt               // Voltage in HV test
+handle           hhvtime               // Duration of HV test
+handle           hhvfix                // Don't exceed HV duration
+handle           hnoref                // Don't use the reference
+handle           hfixedref             // Don't move the reference
+handle           hzero                 // Zero offset
+handle           hupdate               // Update task after scanning
+handle           hprotocol             // Test protocol
+handle           hv                    // Test velocity
+handle           hp                    // Test pressure
+handle           hh                    // Test height
+handle           hsampleid             // Sample ID
+handle           hrepeat               // Number of test repeats
+handle           hincall               // Include all panels
+handle           hok                   // Finish wizard
+int              wizardstep            // Set of WIZ_xxx
+int              loop                  // Actual test loop
+int              nloop                 // Number of test loops
+
+// Protocol file.
+handle           htxt                  // Protocol file
+
+// Video camera and live video.
+float            camerax               // X camera coordinate
+float            cameray               // Y camera coordinate
+int              cameraside            // Camera side (0: top, 1: bottom)
+int              movepending           // Camera movement is not yet finished
+int              postponemove          // Camera movement is postponed
+int              livecross             // Show cross in live video
+int              livescale             // Show scale in live video
+int              livefidtype           // Type of fiducial to show or -1
+float            livefida              // Fiducial size a, pixels
+float            livefidb              // Fiducial size b, bixels
+int              focus[2]              // Focus coordinate
+int              changefocus           // Request to change focus on side
+
+// Pad search.
+struct t_search  search[NPAD]          // Pads to search
+int              searchpad             // Actually searched pad (0, 1, 2 or 3)
+int              stepindex             // Index of search step (0: 0.001 mm)
+int              okenabled             // OK button enabled
+int              updenabled            // Update button enabled
+int              redrawbtn             // 1: redraw pad selection buttons
+
+// Named pads.
+struct t_named   named[NNAMED]         // List of named pads
+int              nnamed                // Number of defined named pads
+int              gonamed               // Named pad requested
+char             oldpad[32]            // Temporary variable
+
+// PCB description.
+int              modified              // PCB modified
+char             pcbname[256]          // Job name
+int              nstepx                // Number of steps in X, 1..MAXSTEPX
+int              nstepy                // Number of steps in Y, 1..MAXSTEPY
+int              allowshy              // Allow shuttle movements (S3 only)
+struct t_search  scanstepx[NPAD]       // Pads used to scan for X step
+struct t_search  scanstepy[NPAD]       // Pads used to scan for Y step
+float            stepx                 // X step, mm
+float            stepy                 // Y step, mm
+struct t_search  fiducial[NPAD]        // Fiducials used for optical alignment
+int              ncomp                 // Actual number of components
+struct t_comp    comp[NCOMP]           // List of components
+int              noref                 // Don't use the reference
+int              fixedref              // Fixed reference
+struct t_search  reference             // Reference point
+
+char             jobpath[260]          // Directory for job data
+char             lespath[260]          // Directory for board data
+
+// Options.
+int              hvvolt                // HV voltage, volts
+int              hvtime                // HV duration, ms
+int              hvfix                 // Fix HV duration
+int              hvinit                // Time of last HV initialization or 0
+
+// Stroke.
+int              acc                   // Accuracy, micrometers
+float            v                     // Stroke, mm/s
+float            h                     // Height, mm
+int              p                     // Pressure, int. units
+
+// Allowed test voltages, V.
+float utest[16] = {                                                            \
+  0.0,  0.1, 0.15,  0.2,  0.3,  0.4,  0.5,  0.7,                               \
+  1.0,  1.5,  2.0,  3.0,  4.0,  5.0,  7.0, 10.0 }
+// Allowed test currents, mA.
+float itest[32] = {                                                            \
+  0.00,  0.01, 0.015,  0.02,  0.03,  0.04,  0.05,  0.07,                       \
+  0.10,  0.15,  0.20,  0.30,  0.40,  0.50,  0.70,  1.00,                       \
+  1.50,  2.00,  3.00,  4.00,  5.00,  7.00,  10.0,  15.0,                       \
+  20.0,  30.0,  50.0,  70.0,  100.,  150.,  200.,  270.  }
+// Allowed test frequencies, Hz.
+float ftest[8] =  {                                                            \
+  0.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0, 32000.0, 64000.0 }
+// Allowed delays after contact, ms.
+int dtime[16] = {                                                              \
+  0, 1, 2, 3, 5, 7, 10, 15, 20, 30, 40, 50, 70, 100, 150, 200 }
+
+// Measurement options.
+int              options1              // First set of meas options, OPT1_xxx
+int              options2              // Second set of meas options, OPT2_xxx
+float            optuoffs              // Offset of capacity voltage
+
+// List of components.
+int              firstcomp             // First visible component
+int              selcomp               // Selected component
+int              prevlistbtn           // Previous state of mouse buttons
+
+// Corrections for the scanned board.
+float            offsetx               // Initial pad offset in X
+float            offsety               // Initial pad offset in Y
+float            convsfi               // Sine correction and scale
+float            convcfi               // Cosine correction and scale
+float            convdx                // X board shift
+float            convdy                // Y board shift
+
+// Panel exclusion.
+int              exclx0,excly0         // Exclusion rectangle start
+int              exclx1,excly1         // Exclusion rectangle end
+int              exclon                // Draw exclusion rectangle
+
+// Summarized test results.
+char             sampleid[256]         // Sample ID
+int              starttime             // Time when test was started
+int              showtime              // Time of last preview update
+struct t_test    test[MAXSTEPY][MAXSTEPX]
+int              trackerrors           // Whether to track errors in preview
+int              trackx                // X index of tracked panel
+int              tracky                // Y index of tracked panel
+
+external int SERV.Convertfastc(char *answer,float *zc,float *zr);
+
+
+////////////////////////////////////////////////////////////////////////////////
+////////////////////////////// SERVICE FUNCTIONS ///////////////////////////////
+
+// Displays text and asks to answer Yes or No. Returns 1 if yes and 0 if no.
+function int Yesno(char *title,format text)
+  handle hwnd,hicon,hyes,hno
+  hwnd=control WINDOW
+    window=hmain
+    position=0,0,300,135
+    name=title
+    mode=M_MODAL
+    bkcolor=GRAY
+    size=1024
+  endc
+  hyes=control BUTTON
+    window=hwnd
+    position=85,100,80,24
+    name="是"
+    help="按下回答 'Yes'"
+  endc
+  hno=control BUTTON
+    window=hwnd
+    position=173+5,100,80,24
+    name="否"
+    help="按下回答 'No'"
+  endc
+  hicon=control ICON
+    window=hwnd
+    position=10,30,36,36
+    name="提问"
+    bkcolor=GRAY
+  endc
+  draw window=hwnd font=MAINFONT at 56,25 wrap=280
+  draw text=text show
+  while 1 do
+    if Pressed(hyes) then
+      destroy hwnd
+      return 1
+    else if Pressed(hno) then
+      destroy hwnd
+      return 0
+    endif
+    wait
+  enddo
+end
+
+// Displays message.
+function int Message(format text)
+  change hmessage color=BLACK
+  change hmessage text=text
+end
+
+// Displays error message.
+function int Error(format text)
+  change hmessage color=LIGHTRED
+  change hmessage text=text
+end
+
+// Service function, determines viewer magnification.
+function float Getzoom(handle hw)
+  int i
+  float zoom
+  i=Status(hw)
+  if i==0 then
+    zoom=0.125
+  else if i==1 then
+    zoom=0.2
+  else if i==2 then
+    zoom=0.3
+  else if i==3 then
+    zoom=0.5
+  else if i==4 then
+    zoom=1.0
+  else
+    zoom=2.0
+  endif
+  return zoom
+end
+
+// Draws overlay in live video window: cross (if not 0), scale (if not 0) and
+// fiducial (if size and type are defined). Fiducial size is in pixels.
+function int Overlay(int cross,int scale,int type,float a,float b)
+  float zoom
+  // Save parameters.
+  livecross=cross
+  livescale=scale
+  livefidtype=type
+  livefida=a
+  livefidb=b
+  // Clear window.
+  draw window=hvideo bkcolor=VIDEOFILL clear color=LIGHTRED
+  // Draw cross.
+  if cross then
+    draw at (VIDEODX-2)/2-20,(VIDEODY-2)/2 to (VIDEODX-2)/2-5,(VIDEODY-2)/2
+    draw at (VIDEODX-2)/2+20,(VIDEODY-2)/2 to (VIDEODX-2)/2+5,(VIDEODY-2)/2
+    draw at (VIDEODX-2)/2,(VIDEODY-2)/2-20 to (VIDEODX-2)/2,(VIDEODY-2)/2-5
+    draw at (VIDEODX-2)/2,(VIDEODY-2)/2+20 to (VIDEODX-2)/2,(VIDEODY-2)/2+5
+  endif
+  // Draw fiducial.
+  if (type==SYNT_CIRCLE || type==SYNT_RECT || type==SYNT_CROSS) &&             \
+    a>0 && b>=0                                                                \
+  then
+    zoom=Getzoom(hzoom)
+    if type==SYNT_CIRCLE then
+      draw at (VIDEODX-2)/2,(VIDEODY-2)/2 ellipse a*zoom,a*zoom
+      if b>0.0 draw at (VIDEODX-2)/2,(VIDEODY-2)/2 ellipse b*zoom,b*zoom
+    else if type==SYNT_RECT then
+      draw at (VIDEODX-2-a*zoom)/2,(VIDEODY-2-b*zoom)/2
+      draw rect (VIDEODX-1+a*zoom)/2,(VIDEODY-1+b*zoom)/2
+    else if type==SYNT_CROSS then
+      draw at (VIDEODX-2-a*zoom)/2,(VIDEODY-2-b*zoom)/2
+      draw rect (VIDEODX-1+a*zoom)/2,(VIDEODY-1+b*zoom)/2
+      draw at (VIDEODX-2-b*zoom)/2,(VIDEODY-2-a*zoom)/2
+      draw rect (VIDEODX-1+b*zoom)/2,(VIDEODY-1+a*zoom)/2
+    endif
+  endif
+  draw show
+end
+
+// Sets camera coordinates and starts live video display. Neither moves camera,
+// nor controls the illumunation, use Movecamera() instead!
+function int Cameraxy(float x,float y,int side)
+  int i,j,headcams,channel
+  float headcamradius,delta,angle,zoom
+  // Save actual position.
+  camerax=x
+  cameray=y
+  cameraside=side
+  changefocus=1
+  // Update coordinate display.
+  change hcamerax text=format(" %.3f",x)
+  change hcameray text=format(" %.3f",y)
+  // Get camera parameters.
+  if $LAY.cameras!=0 then
+    headcams=0
+  else
+    headcams=$LAY.headcameras
+  endif
+  if $EXTLAY.headcamradius!=0 then
+    headcamradius=$EXTLAY.headcamradius/1000.0
+  else if $LAY.top[0]-$LAY.bottom[0]>160000 then
+    headcamradius=153.0
+  else
+    headcamradius=118.0
+  endif
+  zoom=Getzoom(hzoom)
+  // Calculate camera angle.
+  if headcams==0 then                  // Dedicated camera
+    SYS.Video(hvideo,side,0,zoom,Status(hbrightness),Status(hcontrast))
+  else                                 // Head camera
+    j=0
+    for i=0,i<$LAY.nfing*2,i++ do
+      if (headcams & (1<<i))==0 continue
+      j++
+      if $LAY.side[i/2]!=side continue
+      if $LAY.bottom[i/2]/1000.0>y continue
+      if $LAY.top[i/2]/1000.0<=y continue
+      break
+    enddo
+    if i>=$LAY.nfing*2 return          // No head camera!
+    channel=j-1
+    delta=y-$LAY.yoffset[i/2]/1000.0
+    if Abs(delta)>headcamradius*0.9 then
+      angle=0.0
+    else
+      angle=Asin(delta/headcamradius)
+      if (i & 1)!=0 angle=-angle
+      if side!=0 angle=-angle
+    endif
+    SYS.Videoangle(hvideo,channel,0,zoom,                                      \
+    Status(hbrightness),Status(hcontrast),2,angle)
+  endif
+  // Update overlay.
+  Overlay(livecross,livescale,livefidtype,livefida,livefidb)
+end
+
+// Stops live video display.
+function int Stopvideo()
+  SYS.Videoangle(hvideo,0,0,1.0,Status(hbrightness),Status(hcontrast),0,0.0)
+end
+
+// Given Y coordinate in millimeters, selects rail that this coordinate belongs
+// to. Returns rail on success and -1 on error.
+function int Railfromy(float y,int side)
+  int rail
+  for rail=0,rail<$LAY.nfing,rail++ do
+    if $LAY.side[rail]!=side continue
+//    if ($LAY.excludedrails & (1<<rail))!=0 continue
+    if $LAY.top[rail]/1000.0<=y continue
+    if $LAY.bottom[rail]/1000.0<=y return rail
+  enddo
+  return -1
+end
+
+// Given Y coordinate in millimeters, selects camera controller and
+// corresponding video channel. Returns head on success, and -1 on any error.
+function int Camerafromy(float y,int side,int *channel,float *angle)
+  int j,head
+  float h,headcamradius
+  if $LAY.cameras!=0 then
+    if ($LAY.cameras & (1<<side))==0 return -1
+    channel[0]=side
+    angle[0]=0.0
+    return $LAY.nfing*2+side
+  else if $LAY.headcameras!=0 then
+    j=0
+    for head=0,head<$LAY.nfing*2,head++ do
+      if ($LAY.headcameras & (1<<head))==0 continue
+      j++
+      if ($LAY.excludedrails & (1<<(head/2)))!=0 continue
+      if $LAY.side[head/2]!=side continue
+      if $LAY.top[head/2]/1000.0<=y continue
+      if $LAY.bottom[head/2]/1000.0>y continue
+      break
+    enddo
+    if head>=$LAY.nfing*2 return -1
+    if $EXTLAY.headcamradius!=0 then
+      headcamradius=$EXTLAY.headcamradius/1000.0
+    else if $LAY.top[0]-$LAY.bottom[0]>160000 then
+      headcamradius=153.0
+    else
+      headcamradius=118.0
+    endif
+    h=y-$LAY.yoffset[head/2]/1000.0
+    angle[0]=(Abs(h)>0.9*headcamradius?0.0:Asin(h/headcamradius))
+    if side!=0 angle[0]=-angle[0]
+    if (head & 1)!=0 angle[0]=-angle[0]
+    channel[0]=j-1
+    return head
+  else
+    return -1                          // No cameras
+  endif
+end
+
+// Moves camera to the specified point. If previous movement is not yet
+// finished, this call will be postponed. Returns 0 on success and -1 on any
+// error.
+function int Movecamera(float x,float y,int side)
+  int i,head,headcams,channel
+  float angle
+  char s[256]
+  // Update coordinate display. This also preserves the coordinates.
+  Cameraxy(x,y,side)
+  // If previous movement is not yet finished, postpone movement.
+  if movepending!=0 && $A[CAMMOVE].length==0 then
+    postponemove=1
+    return 0
+  endif
+  postponemove=0
+  // Get camera.
+  if $LAY.cameras!=0 then
+    headcams=0
+  else
+    headcams=$LAY.headcameras
+  endif
+  head=Camerafromy(y,side,&channel,&angle)
+  if head<0 return -1
+  if head>=$LAY.nfing*2 then
+    // Dedicated camera, tester assures lights and anticollision.
+    sprintf(s,"M %i(%.3f,%.3f) NOP",head,x,y)
+    SERV.Cmdimm(CAMMOVE,s)
+  else
+    // On-head camera, move all other heads into the home position so that
+    // they do not obstacle the movements and pad visibility.
+    for i=0,i<$LAY.nfing*2,i++ do
+      if i==head then
+        sprintf(s,"OUTPORT32 HEAD(%i) 0x80000002,3",head)
+        SERV.Cmdimm(SCRATCH,s)
+        sprintf(s,"M @%i[%.3f,%.3f] NOP",head,x,y)
+        SERV.Cmdimm(CAMMOVE,s)
+      else
+        if (headcams & (1<<i))!=0 then
+          sprintf(s,"OUTPORT32 HEAD(%i) 0x80000002,0",i)
+          SERV.Cmdimm(SCRATCH,s)
+        endif
+        sprintf(s,"M %i(Z) NOP",i)
+        SERV.Cmdimm(SCRATCH,s)
+      endif
+    enddo
+  endif
+  return 0
+end
+
+// Scans name from the string s (at most 31+1 characters long). Returns
+// number of scanned bytes.
+function int Scanname(char *s,char *name)
+  int i,n
+  i=0; n=0
+  while s[i]==' ' do i++; enddo
+  if Isalpha(s[i]) then
+    while Isalnum(s[i]) && n<31 do
+      name[n]=s[i]; n++; i++
+    enddo
+  endif
+  name[n]='\0'
+  while s[i]==' ' do i++; enddo
+  return i
+end
+
+// Service function, searches for the named pad in the close vicinity of the
+// specified coordinates. Returns index on success and -1 if there are no named
+// pads in the vicinity.
+function int Getnearestnamedpad(float x,float y,int side)
+  int i
+  for i=0,i<nnamed,i++ do
+    if named[i].side!=side continue
+    if Abs(named[i].x-x)>0.030 continue
+    if Abs(named[i].y-y)>0.030 continue
+    return i
+  enddo
+  return -1                            // No named pad
+end
+
+// Service function, searches for the named pad with given case-insensitive
+// name. Returns index on success and -1 if there are no such named pad.
+function int Getnamedpadbyname(char *name)
+  int i
+  for i=0,i<nnamed,i++ do
+    if Stricmp(named[i].name,name)==0 return i
+  enddo
+  return -1                            // No named pad
+end
+
+// Given error code (one of the constants ERR_xxx), returns its textual
+// description. Returns length of text.
+function int Geterrorbycode(int index,char *s)
+  int n
+  switch index
+  case ERR_NOTEST:
+    n=sprintf(s,"NOT TESTED")
+  case ERR_OK:
+    n=sprintf(s,"OK")
+  case ERR_NOCONT:
+    n=sprintf(s,"NO CONTACT")
+  case ERR_ANSWER:
+    n=sprintf(s,"BAD ANSWER")
+  case ERR_RANGE:
+    n=sprintf(s,"RANGE")
+  case ERR_BAD:
+    n=sprintf(s,"BAD MEAS")
+  case ERR_NOCAL:
+    n=sprintf(s,"NOT CALIBRATED")
+  case ERR_OPEN:
+    n=sprintf(s,"OPEN")
+  case ERR_SHORT:
+    n=sprintf(s,"SHORTCUT")
+  case ERR_POL:
+    n=sprintf(s,"POLARITY")
+  case ERR_UNSYM:
+    n=sprintf(s,"UNSYMMETRIC")
+  case ERR_BREAK:
+    n=sprintf(s,"BREAKDOWN")
+  case ERR_INTERN:
+    n=sprintf(s,"INTERNAL ERROR")
+  default:
+    n=sprintf(s,"ERROR")
+  endsw
+  return n
+end
+
+
+////////////////////////////////////////////////////////////////////////////////
+///////////////////////////// GENERATOR FUNCTIONS //////////////////////////////
+
+// Converts text to the value of the given type. Returns 0 on success and -1
+// if value is absent, type unknown or on any other error.
+function int Texttovalue(char *s,int type,int range,float *value)
+  float f
+  f=0.0
+  if sscanf(s,"%g",&f)!=1 return -1
+  switch type
+  case CT_NONE:
+    return -1
+  case CT_E,CT_R,CT_RCOM,CT_C,CT_LREF,CT_LMEAS,CT_L,CT_HV,CT_FW:
+    if range==0 then
+      f=f/1000.0
+    else if range==2 then
+      f=f*1000.0
+    else if range==3 then
+      f=f*1.0e6
+    else if range==4 then
+      f=f*1.0e9
+    else if range==5 then
+      f=f*1.0e12
+    endif
+  case CT_UI,CT_D,CT_V:
+    ;
+  default:
+    return -1
+  endsw
+  value[0]=f
+  return 0
+end
+
+// Converts value of the given type to text.
+function int Convertunits(int type,float value,int removetrailing,char *s)
+  int k,n
+  float f
+  f=Abs(value)
+  switch type
+  case CT_E,CT_R,CT_RCOM,CT_HV,CT_FW:  // Resistor
+    if f<1.0 then
+      n=sprintf(s,"%7.4g mOhm",value*1000.0)
+    else if f<1000.0 then
+      n=sprintf(s,"%7.4g  Ohm",value)
+    else if f<1.0e6 then
+      n=sprintf(s,"%7.4g kOhm",value/1000.0)
+    else if f<1.0e9 then
+      n=sprintf(s,"%7.4g MOhm",value/1.0e6)
+    else
+      n=sprintf(s,"%7.4g GOhm",value/1.0e9)
+    endif
+  case CT_C:                           // Capacitor
+    if f>0.0 && f<1.0 then
+      n=sprintf(s,"%7.4g fF",value*1000.0)
+    else if f<1000.0 then
+      n=sprintf(s,"%7.4g pF",value)
+    else if f<1.0e6 then
+      n=sprintf(s,"%7.4g nF",value/1000.0)
+    else
+      n=sprintf(s,"%7.4g uF",value/1.0e6)
+    endif
+  case CT_LREF,CT_LMEAS,CT_L:          // Coil
+    if f>0.0 && f<1.0 then
+      n=sprintf(s,"%7.4g nH",value*1000.0)
+    else if f<1000.0 then
+      n=sprintf(s,"%7.4g uH",value)
+    else if f<1.0e6 then
+      n=sprintf(s,"%7.4g mH",value/1000.0)
+    else
+      n=sprintf(s,"%7.4g  H",value/1.0e6)
+    endif
+  case CT_UI,CT_D,CT_V:                // U-I, diode, varistor
+    n=sprintf(s,"%7.4g  V",value)
+  case CT_NONE:
+    n=sprintf(s,"")
+  default:
+    n=sprintf(s,"???")
+  endsw
+  if removetrailing then
+    for k=0,k<n && s[k]==' ',k++ do; enddo
+    if k>0 then
+      Memcpy(s,s+k,n-k+1)
+      n=n-k
+    endif
+  endif
+  return n
+end
+
+// Converts two values of the given type to text.
+function int Convertunits2(int type,float value1,float value2,char *s)
+  int k,n
+  float f1,f2
+  f1=Abs(value1)
+  f2=Abs(value2)
+  switch type
+  case CT_E,CT_R,CT_RCOM,CT_HV,CT_FW:  // Resistor
+    if f1<1.0 && f2<1.0 then
+      n=sprintf(s,"%.4g : %.4g mOhm",value1*1000.0,value2*1000.0)
+    else if f1<1000.0 && f2<1000.0 then
+      n=sprintf(s,"%.4g : %.4g Ohm",value1,value2)
+    else if f1<1.0e6 && f2<1.0e6 then
+      n=sprintf(s,"%.4g : %.4g kOhm",value1/1000.0,value2/1000.0)
+    else if f1<1.0e9 && f2<1.0e9 then
+      n=sprintf(s,"%.4g : %.4g MOhm",value1/1.0e6,value2/1.0e6)
+    else
+      n=sprintf(s,"%.4g : %.4g GOhm",value1/1.0e9,value2/1.0e9)
+    endif
+  case CT_C:                           // Capacitor
+    if f1<0.0 && f2<1.0 then
+      n=sprintf(s,"%7.4g : %7.4g fF",value1*1000.0,value2*1000.0)
+    else if f1<1000.0 && f2<1000.0 then
+      n=sprintf(s,"%7.4g : %7.4g pF",value1,value2)
+    else if f1<1.0e6 && f2<1.0e6 then
+      n=sprintf(s,"%7.4g : %7.4g nF",value1/1000.0,value2/1000.0)
+    else
+      n=sprintf(s,"%7.4g : %7.4g uF",value1/1.0e6,value2/1.0e6)
+    endif
+  case CT_LREF,CT_LMEAS,CT_L:          // Coil
+    if f1<1.0 && f2<1.0 then
+      n=sprintf(s,"%7.4g : %7.4g nH",value1*1000.0,value2*1000.0)
+    else if f1<1000.0 && f2<1000.0 then
+      n=sprintf(s,"%7.4g : %7.4g uH",value1,value2)
+    else if f1<1.0e6 && f2<1.0e6 then
+      n=sprintf(s,"%7.4g : %7.4g mH",value1/1000.0,value2/1000.0)
+    else
+      n=sprintf(s,"%7.4g : %7.4g H",value1/1.0e6,value2/1.0e6)
+    endif
+  case CT_UI,CT_D,CT_V:                // U-I, diode, varistor
+    n=sprintf(s,"%7.4g : %7.4g V",value1,value2)
+  case CT_NONE:
+    n=sprintf(s,"")
+  default:
+    n=sprintf(s,"???")
+  endsw
+  for k=0,k<n && s[k]==' ',k++ do; enddo
+  if k>0 then
+    Memcpy(s,s+k,n-k+1)
+    n=n-k
+  endif
+  return n
+end
+
+function int Verifyjob()
+  // Show warning if something is not yet defined.
+  draw at 10,MAINDY-MESSAGEDY-VIDEODY-CONTROLDY-32 color=LIGHTRED font=MAINFONT
+  if pcbname[0]=='\0' then
+    Error("Job name is as yet undefined, use Steps")
+  else if nstepx==0 || nstepy==0 then
+    Error("Number of panels is as yet undefined, use Steps")
+  else if nstepx>1 && (scanstepx[0].x==0.0 || scanstepx[0].y==0.0) then
+    Error("First X distance reper is undefined, use X size")
+  else if nstepx>1 && (scanstepx[1].x==0.0 || scanstepx[1].y==0.0) then
+    Error("Second X distance reper is undefined, use X size")
+  else if nstepx>1 && (scanstepx[0].x==scanstepx[1].x &&                       \
+    scanstepx[0].y==scanstepx[1].y) then
+    Error("X distance repers are identical, use X size")
+  else if nstepy>1 && (scanstepy[0].x==0.0 || scanstepy[0].y==0.0) then
+    Error("First Y distance reper is undefined, use Y size")
+  else if nstepy>1 && (scanstepy[1].x==0.0 || scanstepy[1].y==0.0) then
+    Error("Second Y distance reper is undefined, use Y size")
+  else if nstepy>1 && (scanstepy[0].x==scanstepy[1].x &&                       \
+    scanstepy[0].y==scanstepy[1].y) then
+    Error("Y distance repers are identical, use Y size")
+  else if ncomp==0 then
+    Error("As yet no defined components")
+  else if fiducial[0].x==0.0 || fiducial[0].y==0.0 then
+    Error("First fiducial is undefined")
+  else if fiducial[1].x==0.0 || fiducial[1].y==0.0 then
+    Error("Second fiducial is undefined")
+  else if fiducial[0].x==fiducial[1].x && fiducial[0].y==fiducial[1].y then
+    Error("Fiducials have identical coordinates")
+  endif
+end
+
+// If show is 1, redraws and displays the list of components. If show is 0,
+// displays preview window. Component list buttons are enabled or disabled
+// according to the parameter active (0: disable, 1: enable, -1: don't change).
+function int Listcomponents(int show,int active)
+  int i,x,y,nopt
+  char s[256],opt[256]
+  if show==0 then
+    change hpreview position=6,MESSAGEDY+VIDEODY+CONTROLDY+16,                 \
+    MAINDX-BUTTONDX-17,MAINDY-MESSAGEDY-VIDEODY-CONTROLDY-22
+    change hlist position=2006,MESSAGEDY+VIDEODY+CONTROLDY+16,                 \
+    MAINDX-BUTTONDX-17,MAINDY-MESSAGEDY-VIDEODY-CONTROLDY-22
+    return
+  endif
+  change hlist position=6,MESSAGEDY+VIDEODY+CONTROLDY+16,                      \
+  MAINDX-BUTTONDX-17,MAINDY-MESSAGEDY-VIDEODY-CONTROLDY-22
+  change hpreview position=2006,MESSAGEDY+VIDEODY+CONTROLDY+16,                \
+  MAINDX-BUTTONDX-17,MAINDY-MESSAGEDY-VIDEODY-CONTROLDY-22
+  if firstcomp+NLIST-1>ncomp firstcomp=ncomp-NLIST+1
+  if firstcomp<0 firstcomp=0
+  draw window=hlist bkcolor=WHITE clear
+  x=10
+  // Draw background of selected line.
+  if active!=0 && selcomp>=firstcomp && selcomp<firstcomp+NLIST then
+    draw color=DARKGRAY bkcolor=LIGHTGRAY
+    draw at x,29+(selcomp-firstcomp)*20
+    draw fillrect x+571,30+(selcomp-firstcomp+1)*20
+  endif
+  // Draw table and legend.
+  draw color=DARKGRAY font=SMALLFONT
+  for i=-1,i<=NLIST,i++ do
+    y=29+20*i
+    draw at x,y to x+570,y
+  enddo
+  draw at x,9 to x,30+20*NLIST
+  draw at x+5,25 text="No."
+  draw at x+30,9 to x+30,30+20*NLIST
+  draw at x+35,25 text="Type"
+  draw at x+100,9 to x+100,30+20*NLIST
+  draw at x+105,25 text="Name"
+  draw at x+200,9 to x+200,30+20*NLIST
+  draw at x+205,25 text="Min"
+  draw at x+270,9 to x+270,30+20*NLIST
+  draw at x+275,25 text="Max"
+  draw at x+340,9 to x+340,30+20*NLIST
+  draw at x+345,25 text="Pads"
+  draw at x+400,9 to x+400,30+20*NLIST
+  draw at x+405,25 text="Ootions"
+  draw at x+570,9 to x+570,30+20*NLIST
+  draw color=BLACK
+  y=46
+  for i=firstcomp,i<firstcomp+NLIST && i<ncomp,i++ do
+    opt[0]='\0'; nopt=0
+    if i==selcomp && active!=0 then
+      draw color=LIGHTRED
+    else
+      draw color=BLACK
+    endif
+    draw at x+5,y text=format("%i",i+1)
+    if comp[i].type==CT_NONE then
+      draw at x+35,y text="--none--"
+    else if comp[i].type==CT_E then
+      draw at x+35,y text="Exact R"
+    else if comp[i].type==CT_R then
+      draw at x+35,y text="Fast R"
+    else if comp[i].type==CT_RCOM then
+      draw at x+35,y text="Rcommon"
+    else if comp[i].type==CT_C then
+      if (comp[i].options & COPT_NOSHORT)                                      \
+        nopt=nopt+sprintf(opt+nopt,"No short")
+      draw at x+35,y text="Capacity"
+    else if comp[i].type==CT_LREF then
+      draw at x+35,y text="L ref"
+    else if comp[i].type==CT_LMEAS then
+      draw at x+35,y text="L meas"
+    else if comp[i].type==CT_L then
+      draw at x+35,y text="Simple L"
+    else if comp[i].type==CT_UI then
+      draw at x+35,y text="U-I"
+    else if comp[i].type==CT_D then
+      draw at x+35,y text="Diode"
+    else if comp[i].type==CT_V then
+      draw at x+35,y text="Varistor"
+    else if comp[i].type==CT_HV then
+      draw at x+35,y text="HV"
+    else if comp[i].type==CT_FW then
+      draw at x+35,y text="4-wire"
+    else
+      draw at x+35,y text="Unknown"
+    endif
+    draw at x+105,y text=format("%s",comp[i].name)
+    Convertunits(comp[i].type,comp[i].vmin,1,s)
+    draw at x+205,y text=s
+    Convertunits(comp[i].type,comp[i].vmax,1,s)
+    draw at x+275,y text=s
+    if comp[i].pad0[0]=='\0' || comp[i].pad1[0]=='\0' ||                       \
+      Stricmp(comp[i].pad0,comp[i].pad1)==0 then
+      draw at x+345,y text="Invalid"
+    else if comp[i].type==CT_FW && comp[i].pad3[0]=='\0' then
+      draw at x+345,y text="Invalid"
+    else if comp[i].pad2[0]=='\0' then
+      draw at x+345,y text="2, OK"
+    else if Stricmp(comp[i].pad0,comp[i].pad2)==0 ||                           \
+      Stricmp(comp[i].pad1,comp[i].pad2)==0 then
+      draw at x+345,y text="Invalid"
+    else if comp[i].pad3[0]=='\0' then
+      draw at x+345,y text="3, OK"
+    else if Stricmp(comp[i].pad0,comp[i].pad3)==0 ||                           \
+      Stricmp(comp[i].pad1,comp[i].pad3)==0 ||                                 \
+      Stricmp(comp[i].pad2,comp[i].pad3)==0 then
+      draw at x+345,y text="Invalid"
+    else
+      draw at x+345,y text="4, OK"
+    endif
+    if (comp[i].options & COPT_UMASK)!=COPT_UDEF then
+      if nopt>0 nopt=nopt+sprintf(opt+nopt,", ")
+      nopt=nopt+sprintf(opt+nopt,"U=%g V",utest[(comp[i].options>>4) & 0xF])
+    endif
+    if (comp[i].options & COPT_IMASK)!=COPT_IDEF then
+      if nopt>0 nopt=nopt+sprintf(opt+nopt,", ")
+      if itest[(comp[i].options>>8) & 0x1F]<1.0 then
+        nopt=nopt+sprintf(opt+nopt,"I=%g uA",                                  \
+        itest[(comp[i].options>>8) & 0x1F]*1000.0)
+      else
+        nopt=nopt+sprintf(opt+nopt,"I=%g mA",                                  \
+        itest[(comp[i].options>>8) & 0x1F])
+      endif
+    endif
+    if (comp[i].options & COPT_DMASK)!=COPT_DDEF then
+      if nopt>0 nopt=nopt+sprintf(opt+nopt,", ")
+      nopt=nopt+sprintf(opt+nopt,"Dly=%i ms",dtime[(comp[i].options>>16) & 0xF])
+    endif
+    if comp[i].options & COPT_POLARITY then
+      if nopt>0 nopt=nopt+sprintf(opt+nopt,", ")
+      nopt=nopt+sprintf(opt+nopt,"Pol")
+    endif
+    if comp[i].options & COPT_LONG then
+      if nopt>0 nopt=nopt+sprintf(opt+nopt,", ")
+      nopt=nopt+sprintf(opt+nopt,"Long")
+    endif
+    if nopt>0 draw at x+405,y text=opt
+    y=y+20
+  enddo
+  draw show
+  Verifyjob()
+end
+
+// Shows preview of the PCB layout or relative positions of the contacting
+// points. Parameter mode is a combination of P_xxx.
+function int Preview(int mode)
+  int i,j,x,y
+  float winx,winy,pcbx,pcby,basex,basey,scale
+  float x0,y0,x1,y1,imagedx,imagedy
+  Listcomponents(0,0)
+  if (mode & P_ERRORS)==0 && hpreerr!=NULL then
+    destroy hpreerr
+    hpreerr=NULL
+    trackerrors=0
+  endif
+  draw window=hpreview color=WHITE bkcolor=WHITE clear
+  if nstepx==0 || nstepy==0 then
+    draw show
+    return
+  endif
+  winx=MAINDX-BUTTONDX-17
+  if mode & P_RSPACE then
+    winx=winx-RSPACE
+  endif
+  winy=MAINDY-MESSAGEDY-VIDEODY-CONTROLDY-22
+  if wizardstep & WIZ_DEFPAD then
+    // Show relative positions of the contacting points.
+    x0=camerax; y0=cameray
+    x1=camerax; y1=cameray
+    for i=0,i<nnamed,i++ do
+      x0=Min(x0,named[i].x)
+      x1=Max(x1,named[i].x)
+      y0=Min(y0,named[i].y)
+      y1=Max(y1,named[i].y)
+    enddo
+    x0=x0-5.0
+    x1=x1+5.0
+    y0=y0-5.0
+    y1=y1+5.0
+    scale=Min(winx/(x1-x0),winy/(y1-y0))
+    basex=winx/2.0-(x0+x1)/2.0*scale
+    basey=winy/2.0+(y0+y1)/2.0*scale
+    // Draw current position of the camera.
+    draw color=LIGHTRED
+    x=basex+camerax*scale
+    y=basey-cameray*scale
+    draw at x,5 to x,winy-5
+    draw at 5,y to winx-5,y
+    // Draw pads.
+    draw color=BLACK bkcolor=BLACK mode=M_CENTERED font=MAINFONT
+    for i=0,i<nnamed,i++ do
+      x=basex+named[i].x*scale
+      y=basey-named[i].y*scale
+      draw at x,y fillellipse 5,5
+      if nnamed<=100 draw at x,y-6 text=named[i].name
+    enddo
+  else
+    // Draw PCB layout.
+    if stepx==0 || stepy==0 then
+      pcbx=winx
+      pcby=winy
+    else
+      pcbx=stepx*nstepx
+      pcby=stepy*nstepy
+    endif
+    if nstepx<10 && nstepy<10 then
+      scale=Min(winx/pcbx,winy/pcby)*0.75
+    else
+      scale=Min(winx/pcbx,winy/pcby)*0.90
+    endif
+    basex=(winx-pcbx*scale)/2.0
+    basey=winy-(winy-pcby*scale)/2.0
+    imagedx=pcbx/nstepx                // No nonsense, see case stepx=0
+    imagedy=pcby/nstepy
+    // Create error list.
+    if (mode & P_ERRORS)!=0 && hpreerr==NULL then
+      hpreerr=control LIST
+        window=hpreview
+        position=MAINDX-BUTTONDX-RSPACE-12,5,RSPACE-10,360
+        help="鼠标下排版的错误列表"
+        size=32768
+        font=FIXEDSYS
+        color=BLACK
+        bkcolor=LIGHTYELLOW
+        mode=M_VSCROLL
+      endc
+    endif
+    if (mode & P_ERRORS)!=0 then
+      trackerrors=1
+    else
+      trackerrors=0
+    endif
+    // Draw PCB.
+    for j=0,j<nstepy,j++ do
+      y0=basey-(j*imagedy)*scale
+      y1=basey-(j*imagedy+imagedy*0.9)*scale
+      for i=0,i<nstepx,i++ do
+        draw color=BLACK
+        x0=basex+(i*imagedx)*scale
+        x1=basex+(i*imagedx+imagedx*0.9)*scale
+        if (mode & P_SELECT)!=0 && test[j][i].excluded!=0 then
+          draw bkcolor=GRAY
+        else if (mode & P_ERRORS)!=0 && test[j][i].nerr>0 then
+          draw bkcolor=LIGHTRED
+        else if (mode & P_ERRORS)!=0 && test[j][i].nmeas<ncomp then
+          draw bkcolor=GRAY
+        else if (mode & P_ERRORS)!=0 && test[j][i].nerr==0 then
+          draw bkcolor=LIGHTGREEN
+        else if (mode & P_PANEL1)!=0 && i==0 && j==0 then
+          draw bkcolor=LIGHTGREEN
+        else
+          draw bkcolor=WHITECYAN
+        endif
+        draw at x0,y0 fillrect=x1,y1
+        test[j][i].x0=x0
+        test[j][i].y0=y1
+        test[j][i].x1=x1
+        test[j][i].y1=y0
+        if (mode & P_SELECT)!=0 && test[j][i].excluded!=0 then
+          draw color=LIGHTRED
+          draw at x0,y1 to x1,y0
+          draw at x1,y1 to x0,y0
+        endif
+      enddo
+    enddo
+    // Draw exclusion rectangle.
+    if (mode & P_SELECT)!=0 && exclon!=0 then
+      draw color=LIGHTRED bkcolor=LIGHTRED
+      draw at exclx0,excly0 rect exclx1,excly1
+      draw at exclx1,excly1 fillellipse 9,9
+    endif
+    // Draw preview requests.
+    if (mode & P_STEPX)!=0 && nstepx>1 then
+      draw color=LIGHTRED bkcolor=RED
+      x0=basex+imagedx*0.3*scale
+      y0=basey-imagedy*0.3*scale
+      x1=basex+(imagedx*(nstepx-1)+imagedx*0.3)*scale
+      y1=y0
+      draw at x0,y0 to x1,y1
+      draw at x0,y0 fillellipse 7,7
+      draw at x1,y1 fillellipse 7,7
+    endif
+    if (mode & P_STEPY)!=0 && nstepy>1 then
+      draw color=LIGHTRED bkcolor=RED
+      x0=basex+imagedx*0.3*scale
+      y0=basey-imagedy*0.3*scale
+      x1=x0
+      y1=basey-(imagedy*(nstepy-1)+imagedy*0.3)*scale
+      draw at x0,y0 to x1,y1
+      draw at x0,y0 fillellipse 7,7
+      draw at x1,y1 fillellipse 7,7
+    endif
+  endif
+  draw show
+  Verifyjob()
+end
+
+// Enables or disables buttons according to the data.
+function int Managebuttons()
+  if pcbname[0]=='\0' || nstepx==0 || nstepy==0 then
+    disable hsave
+  else
+    enable hsave
+  endif
+  enable hsteps
+  if nstepx<=1 || nstepy==0 then
+    disable hstepsizex
+  else
+    enable hstepsizex
+  endif
+  if nstepy<=1 || nstepx==0 then
+    disable hstepsizey
+  else
+    enable hstepsizey
+  endif
+  if nstepx==0 || nstepy==0 then
+    disable hdefpads
+    disable hfiducials
+    disable hcomp
+    disable hopt
+    disable href
+  else
+    enable hdefpads
+    enable hfiducials
+    enable hcomp
+    enable hopt
+    enable href
+  endif
+  enable hstroke
+  if pcbname[0]=='\0' || nstepx==0 || nstepy==0 || ncomp==0 ||                 \
+    (nstepx>1 && (scanstepx[0].x==0.0 || scanstepx[0].y==0.0 ||                \
+    scanstepx[1].x==0.0 || scanstepx[1].y==0.0 ||                              \
+    (scanstepx[0].x==scanstepx[1].x && scanstepx[0].y==scanstepx[1].y))) ||    \
+    (nstepy>1 && (scanstepy[0].x==0.0 || scanstepy[0].y==0.0 ||                \
+    scanstepy[1].x==0.0 || scanstepy[1].y==0.0 ||                              \
+    (scanstepy[0].x==scanstepy[1].x && scanstepy[0].y==scanstepy[1].y))) ||    \
+    fiducial[0].x==0.0 || fiducial[0].y==0.0 ||                                \
+    fiducial[1].x==0.0 || fiducial[1].y==0.0 ||                                \
+    (fiducial[0].x==fiducial[1].x && fiducial[0].y==fiducial[1].y)             \
+  then
+    disable hoffset
+    disable htest
+  else
+    enable hoffset
+    enable htest
+  endif
+  enable hunlock
+end
+
+function int Disablebuttons()
+  disable hsave
+  disable hsteps
+  disable hstepsizex
+  disable hstepsizey
+  disable hdefpads
+  disable hfiducials
+  disable hcomp
+  disable hopt
+  disable href
+  disable hstroke
+  disable hoffset
+  disable htest
+  disable hunlock
+end
+
+// Resets component task. Discards all data.
+function int Resetall()
+  int answer
+  if modified then
+    answer=Yesno("Discard all data",                                           \
+      "Are you sure you want to discard all modifications?")
+    if answer==0 return
+  endif
+  pcbname[0]='\0'
+  nstepx=0
+  nstepy=0
+  allowshy=0
+  Memset(scanstepx,0,Sizeof(scanstepx))
+  Memset(scanstepy,0,Sizeof(scanstepy))
+  stepx=0
+  stepy=0
+  Memset(fiducial,0,Sizeof(fiducial))
+  Memset(comp,0,Sizeof(comp))
+  Memset(reference,0,Sizeof(reference))
+  noref=1
+  fixedref=0
+  nnamed=0
+  ncomp=0
+  selcomp=0
+  modified=0
+  options1=0
+  options2=0
+  optuoffs=0.0
+  modified=0
+end
+
+// Loads data from file.
+function int Load()
+  int i,j,k,n,answer,int1,int2,int3,int4,int5
+  float flt1,flt2,flt3,flt4,flt5,flt6,flt7,flt8
+  char s[512],t[256],key[32],drv[4],dir[260],nam[260],ext[260]
+  handle f
+  Message("")
+  if modified then
+    answer=Yesno("Discard all data",                                           \
+      "Are you sure you want to discard all modifications?")
+    if answer==0 return
+  endif
+  Fnsplit(jobpath,drv,dir,nam,ext)
+  Fnmerge(jobpath,drv,dir,(pcbname[0]=='\0'?nam:pcbname),".tsk")
+  if SYS.Browse(hmain,jobpath,"Select job",0)==0 return
+  f=Fopen(jobpath,"rt")
+  if f==NULL then
+    Error("Unable to open '%s'",jobpath)
+    return
+  endif
+  Resetall()
+  // Job name.
+  fscanf(f,"%s\n",pcbname)
+  n=Strlen(pcbname)
+  if n>0 && pcbname[n-1]=='\n' pcbname[n-1]='\0'
+  // Steps.
+  fscanf(f,"STEPS %i %i %i\n",&nstepx,&nstepy,&allowshy)
+  // Pads used to scan for X and Y steps.
+  fscanf(f,"XSTEP1 %g %g %i\n",&flt1,&flt2,&int1)
+  scanstepx[0].x=flt1; scanstepx[0].y=flt2; scanstepx[0].side=int1
+  fscanf(f,"XSTEP2 %g %g %i\n",&flt1,&flt2,&int1)
+  scanstepx[1].x=flt1; scanstepx[1].y=flt2; scanstepx[1].side=int1
+  fscanf(f,"YSTEP1 %g %g %i\n",&flt1,&flt2,&int1)
+  scanstepy[0].x=flt1; scanstepy[0].y=flt2; scanstepy[0].side=int1
+  fscanf(f,"YSTEP2 %g %g %i\n",&flt1,&flt2,&int1)
+  scanstepy[1].x=flt1; scanstepy[1].y=flt2; scanstepy[1].side=int1
+  // Image size.
+  fscanf(f,"IMAGESIZE %g %g\n",&stepx,&stepy)
+  // Pads used as fiducials.
+  int4=0
+  fscanf(f,"FID1 %g %g %i %i %i %g %g %i\n",                                   \
+    &flt1,&flt2,&int1,&int2,&int3,&flt3,&flt4,&int4)
+  fiducial[0].x=flt1; fiducial[0].y=flt2; fiducial[0].side=int1
+  fiducial[0].fidtype=int2; fiducial[0].fidcolor=int3
+  fiducial[0].a=flt3; fiducial[0].b=flt4; fiducial[0].scanman=int4
+  int4=0
+  fscanf(f,"FID2 %g %g %i %i %i %g %g %i\n",                                   \
+    &flt1,&flt2,&int1,&int2,&int3,&flt3,&flt4,&int4)
+  fiducial[1].x=flt1; fiducial[1].y=flt2; fiducial[1].side=int1
+  fiducial[1].fidtype=int2; fiducial[1].fidcolor=int3
+  fiducial[1].a=flt3; fiducial[1].b=flt4; fiducial[1].scanman=int4
+  // Reference point.
+  fscanf(f,"REF %g %g %i\n",&flt1,&flt2,&int1)
+  reference.x=flt1; reference.y=flt2; reference.side=int1
+  fscanf(f,"FIXEDREF %i %i\n",&fixedref,&noref)
+  // Options.
+  fscanf(f,"OPTIONS1 %08X %i %i %i\n",&options1,&hvvolt,&hvtime,&hvfix)
+  acc=5
+  fscanf(f,"OPTIONS2 %08X %f %g %i %g %i\n",&options2,&optuoffs,&v,&p,&h,&acc)
+  // Pads and components.
+  while 1 do
+    if fscanf(f,"%s",s)<0                                                      \
+      break                            // Unexpected end of file
+    n=Strlen(s)
+    if n==0 continue
+    // Remove trailing CR/LF. Note that leading spaces are stripped by fscanf().
+    while n>0 && (s[n-1]=='\n') do
+      n--
+    enddo
+    s[n]='\0'
+    i=Scanname(s,key)
+    if Stricmp(key,"COMP")==0 then
+      // Component. Extract type.
+      i=i+Scanname(s+i,t)
+      for j=0,j<NTYPE,j++ do
+        if Stricmp(typename[j],t)==0 break
+      enddo
+      if j>=NTYPE continue             // Unknown component type
+      comp[ncomp].type=j
+      if s[i]!='(' continue            // All errors are silently ignored
+      i++
+      for j=0,j<4,j++ do
+        i=i+Scanname(s+i,t)
+        if j==0 then
+          Strcpy(comp[ncomp].pad0,t)
+        else if j==1 then
+          Strcpy(comp[ncomp].pad1,t)
+        else if j==2 then
+          Strcpy(comp[ncomp].pad2,t)
+        else
+          Strcpy(comp[ncomp].pad3,t)
+        endif
+        if s[i]==',' i++
+      enddo
+      if s[i]!=')' continue            // All errors are silently ignored
+      i++
+      sscanf(s+i,"%f,%f,%08X %s",&flt1,&flt2,&int1,t);
+      comp[ncomp].vmin=flt1
+      comp[ncomp].vmax=flt2
+      comp[ncomp].options=int1
+      n=Strlen(t)
+      if n>0 && t[n-1]=='\n' t[n-1]='\0'
+      Strncpy(comp[ncomp].name,t,31)
+      ncomp++
+    else if Memcmp(s,"NAME",4)==0 then
+      // Named component.
+      sscanf(s,"NAME %g %g %i %s\n",&flt1,&flt2,&int1,t)
+      named[nnamed].x=flt1
+      named[nnamed].y=flt2
+      named[nnamed].side=int1
+      n=Strlen(t)
+      if n>0 && t[n-1]=='\n' t[n-1]='\0'
+      Strncpy(named[nnamed].name,t,31)
+      nnamed++
+    endif
+  enddo
+  Fclose(f)
+  modified=0
+  hvinit=0
+end
+
+// Saves data to file.
+function int Save()
+  int i,n
+  char s[512],drv[4],dir[260],nam[260],ext[260]
+  handle f
+  if pcbname[0]=='\0' || nstepx==0 || nstepy==0 return
+  Fnsplit(jobpath,drv,dir,nam,ext)
+  Fnmerge(jobpath,drv,dir,pcbname,".tsk")
+  f=Fopen(jobpath,"wt")
+  if f==NULL then
+    Error("Unable to create '%s'",jobpath)
+    return
+  endif
+  // Job name.
+  fprintf(f,"%s\n",pcbname)
+  // Steps.
+  fprintf(f,"STEPS %i %i %i\n",nstepx,nstepy,allowshy)
+  // Pads used to scan for X and Y steps.
+  fprintf(f,"XSTEP1 %g %g %i\n",scanstepx[0].x,scanstepx[0].y,scanstepx[0].side)
+  fprintf(f,"XSTEP2 %g %g %i\n",scanstepx[1].x,scanstepx[1].y,scanstepx[1].side)
+  fprintf(f,"YSTEP1 %g %g %i\n",scanstepy[0].x,scanstepy[0].y,scanstepy[0].side)
+  fprintf(f,"YSTEP2 %g %g %i\n",scanstepy[1].x,scanstepy[1].y,scanstepy[1].side)
+  // Image size.
+  fprintf(f,"IMAGESIZE %g %g\n",stepx,stepy)
+  // Pads used as fiducials.
+  fprintf(f,"FID1 %g %g %i %i %i %g %g %i\n",fiducial[0].x,fiducial[0].y,      \
+    fiducial[0].side,fiducial[0].fidtype,fiducial[0].fidcolor,                 \
+    fiducial[0].a,fiducial[0].b,fiducial[0].scanman)
+  fprintf(f,"FID2 %g %g %i %i %i %g %g %i\n",fiducial[1].x,fiducial[1].y,      \
+    fiducial[1].side,fiducial[1].fidtype,fiducial[1].fidcolor,                 \
+    fiducial[1].a,fiducial[1].b,fiducial[1].scanman)
+  // Reference point.
+  fprintf(f,"REF %g %g %i\n",reference.x,reference.y,reference.side)
+  fprintf(f,"FIXEDREF %i %i\n",fixedref,noref)
+  // Options.
+  fprintf(f,"OPTIONS1 %08X %i %i %i\n",options1,hvvolt,hvtime,hvfix)
+  fprintf(f,"OPTIONS2 %08X %f %g %i %g %i\n",options2,optuoffs,v,p,h,acc)
+  // Pads.
+  for i=0,i<nnamed,i++ do
+    fprintf(f,"NAME %g,%g,%i %s\n",                                            \
+    named[i].x,named[i].y,named[i].side,named[i].name)
+  enddo
+  // Components.
+  for i=0,i<ncomp,i++ do
+    n=sprintf(s,"%s(%s,%s",                                                    \
+      typename[comp[i].type],comp[i].pad0,comp[i].pad1)
+    if comp[i].pad2[0]!='\0' then
+      n=n+sprintf(s+n,",%s",comp[i].pad2)
+      if comp[i].pad3[0]!='\0' then
+        n=n+sprintf(s+n,",%s",comp[i].pad3)
+      endif
+    endif
+    fprintf(f,"COMP %s) %f,%f,%08X %s\n",s,                                    \
+      comp[i].vmin,comp[i].vmax,comp[i].options,comp[i].name)
+    ;
+  enddo
+  Message("Job '%s' saved to disk",pcbname)
+  Fclose(f)
+  modified=0
+end
+
+
+////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////// SCANNER ////////////////////////////////////
+
+// Converts board coordinates xb,yb into tester coordinates xt,yt. In-place
+// conversion is allowed.
+function int Convert(float *xt, float *yt,float xb,float yb)
+  float x,y
+  x=xb*convcfi-yb*convsfi+convdx
+  y=xb*convsfi+yb*convcfi+convdy
+  xt[0]=x
+  yt[0]=y
+end
+
+// Converst panel coordinates xb,yb for panel px,py to tester coordinates xt,yt.
+function int Paneltotester(float *xt,float *yt,float xb,float yb,int px,int py)
+  float dx,dy
+  // Correct for X panel step.
+  if px>0 then
+    dx=scanstepx[1].x-scanstepx[0].x
+    dy=scanstepx[1].y-scanstepx[0].y
+    if dx<0 then
+      dx=-dx
+      dy=-dy
+    endif
+    xb=xb+dx*px/(nstepx-1)
+    yb=yb+dy*px/(nstepx-1)
+  endif
+  // Correct for Y panel step.
+  if py>0 then
+    dx=scanstepy[1].x-scanstepy[0].x
+    dy=scanstepy[1].y-scanstepy[0].y
+    if dy<0 then
+      dx=-dx
+      dy=-dy
+    endif
+    xb=xb+dx*py/(nstepy-1)
+    yb=yb+dy*py/(nstepy-1)
+  endif
+  Convert(xt,yt,xb,yb)
+end
+
+// Converts pad name to pad coordinates.
+function int Padbyname(float *xt,float *yt,int *side,char *name)
+  int i
+  for i=0,i<nnamed,i++ do
+    if Stricmp(name,named[i].name)==0 break
+  enddo
+  if i>=nnamed then
+    xt[0]=0.0
+    yt[0]=0.0
+    side[0]=0
+    return -1
+  endif
+  xt[0]=named[i].x
+  yt[0]=named[i].y
+  side[0]=named[i].side
+  return 0
+end
+
+// Converst pad name for panel px,py to tester coordinates xt,yt,side. Returns
+// 0 on success and -1 on error.
+function int Padtotester(float *xt,float *yt,int *side,                        \
+  char *name,int px,int py)
+  float x,y,dx,dy
+  // Find pad coordinates.
+  if Padbyname(&x,&y,side,name)<0 then
+    return -1
+    xt[0]=0.0
+    yt[0]=0.0
+    return -1
+  endif
+  // Correct for X panel step.
+  if px>0 then
+    dx=scanstepx[1].x-scanstepx[0].x
+    dy=scanstepx[1].y-scanstepx[0].y
+    if dx<0 then
+      dx=-dx
+      dy=-dy
+    endif
+    x=x+dx*px/(nstepx-1)
+    y=y+dy*px/(nstepx-1)
+  endif
+  // Correct for Y panel step.
+  if py>0 then
+    dx=scanstepy[1].x-scanstepy[0].x
+    dy=scanstepy[1].y-scanstepy[0].y
+    if dy<0 then
+      dx=-dx
+      dy=-dy
+    endif
+    x=x+dx*py/(nstepy-1)
+    y=y+dy*py/(nstepy-1)
+  endif
+  Convert(xt,yt,x,y)
+end
+
+// Searches for the fiducial with the given index. Returns -1 if operator
+// decided to interrupt the test, 2 if procedure was unable to define fiducial,
+// 3 if fiducial was not found, 4 if camera was unable to reach the fiducial,
+// and 0 if fiducial was found correctly and posx and posy are assigned
+// corrected coordinates.
+function int Searchfiducial(int index,float *posx,float *posy,char *errmsg)
+  int j,t,head,active,channel,side,attempts,clip,err
+  int videox,videoy,nfound
+  float x,y,dx,dy,bestx,besty,angle,found[4][3],corrmax,xsc,ysc
+  handle hfid[3]
+  char s[256]
+  x=fiducial[index].x+offsetx
+  y=fiducial[index].y+offsety                   
+  side=fiducial[index].side
+  attempts=8; err=0
+  active=-1                            // Active head is yet undefined
+  SYS.Killimm(CAMMOVE)                 // Recover from previous scanning
+  while (attempts>0 && err==0) do
+    attempts--
+    head=Camerafromy(y,side,&channel,&angle)
+    if head<0 then
+      Strcpy(errmsg,"Fiducial outside the working area")
+      err=1; break
+    endif
+    SYS.Autoset(channel,0)
+    Cameraxy(x,y,side)
+    sprintf(s,"Headcam scale[%i]",head)
+    xsc=8.0; ysc=8.0                   // Magnification, um/pixel
+    getini("System",s,"%f,%f",&xsc,&ysc)
+    xsc=Max(2.0,Min(20.0,xsc))
+    ysc=Max(2.0,Min(20.0,ysc))
+    if head!=active then
+      // Move previously active camera away from the working area.
+      if active>=0 then
+        sprintf(s,"M %i(Z) NOP",active)
+        SERV.Cmdimm(SCRATCH,s)
+      endif
+      // Define fiducials for new camera, first deleting existing ones.
+      for j=0,j<3,j++ do
+        if hfid[j]!=NULL SYS.Deletemodel(hfid[j])
+        // +/- 10% size variations.
+        hfid[j]=SYS.Syntmodel(channel,fiducial[index].fidtype,                 \
+          fiducial[index].a*(0.9+j*0.1),                                       \
+          fiducial[index].b*(0.9+j*0.1),                                       \
+          0.0,0.0,fiducial[index].fidcolor)
+        if hfid[j]==NULL then          // Unable to define fiducial
+          Strcpy(errmsg,"Unable to create fiducial");
+          err=2
+        endif
+      enddo
+      if err!=0 break
+    endif
+    // Move camera into the coordinates.
+    if $LAY.cameras!=0 then            // Dedicated camera
+      sprintf(s,"M %i(%.3f,%.3fA5) NOP",head,x,y)
+      clip=0
+    else                               // Head camera
+      sprintf(s,"OUTPORT32 HEAD(%i) 0x80000002,3",head)
+      SERV.Cmdimm(SCRATCH,s)
+      sprintf(s,"M @%i[%.3f,%.3f] NOP",head,x,y)
+      clip=((head^side) & 1?1:-1)
+    endif
+    SERV.Cmdimm(CAMMOVE,s)
+    active=head
+    t=Time()
+    while $A[CAMMOVE].length==0 && err==0 do
+      if Pressed(hok) then             // Operator interrupted test
+        Strcpy(errmsg,"Interrupted by operator")
+        err=-1
+      else if Time()-t>10000 then      // Timeout
+        Strcpy(errmsg,"Timeout")
+        err=1
+      endif
+      wait
+    enddo
+    if err!=0 break
+    if $A[CAMMOVE].answer!=S_NOP then
+      Strcpy(errmsg,"Invalid answer from Crate");
+      err=1; break
+    endif
+    SYS.Nextframe(channel)
+    SYS.Videosize(channel,&videox,&videoy,&j)
+    corrmax=0.0
+    for j=0,j<3,j++ do
+      if hfid[j]==NULL continue
+      nfound=SYS.Recognangle(hfid[j],0,0,videox,videoy,found,angle,clip)
+      if nfound==0 continue
+      if found[0,2]>corrmax then
+        bestx=found[0,0]
+        besty=found[0,1]
+        corrmax=found[0,2]
+      endif
+    enddo
+    if corrmax<350.0 continue          // Fiducial not found
+    dx=(bestx-videox/2)*xsc/1000.0
+    dy=(besty-videoy/2)*ysc/1000.0
+    // Offsets dx and dy are given in millimeters along the camera
+    // axes. We must rotate them into the tester coordinates.
+    x=x+(dx*Cos(angle)+dy*Sin(angle))*(side==0?1.0:-1.0)
+    y=y-(dy*Cos(angle)-dx*Sin(angle))
+    if Abs(dx)<0.05 && Abs(dy)<0.05 then
+      posx[0]=x                        // Fiducial found exactly
+      posy[0]=y
+      break
+    endif
+  enddo
+  if attempts<=0 then
+    Strcpy(errmsg,"Unable to find fiducial");
+    err=3
+  endif
+  // Clean up and report result.
+  for j=0,j<3,j++ do
+    if hfid[j]!=NULL SYS.Deletemodel(hfid[j])
+  enddo
+  if $LAY.cameras==0 && $LAY.headcameras!=0 then
+    SERV.Cmdimm(SCRATCH,"OUTPORT32 ALL 0x80000002,0")
+  endif
+  return err
+end
+
+// Service function, calculates correction factors.
+function int Corrections(float refx0,float refy0,float refx1,float refy1)
+  float r
+  r=(fiducial[1].x-fiducial[0].x)*(fiducial[1].x-fiducial[0].x)+               \
+    (fiducial[1].y-fiducial[0].y)*(fiducial[1].y-fiducial[0].y)
+  convcfi=((fiducial[1].x-fiducial[0].x)*(refx1-refx0)+                        \
+    (fiducial[1].y-fiducial[0].y)*(refy1-refy0))/r
+  convsfi=((fiducial[1].x-fiducial[0].x)*(refy1-refy0)-                        \
+    (fiducial[1].y-fiducial[0].y)*(refx1-refx0))/r
+  convdx=refx0-fiducial[0].x*convcfi+fiducial[0].y*convsfi
+  convdy=refy0-fiducial[0].x*convsfi-fiducial[0].y*convcfi
+end
+
+// Scans board and calculates corrections. If ideal pad coordinates are x0,y0
+// then real coordinates are
+//   x=x0*convcfi-y0*convsfi+convdx;
+//   y=x0*convsfi+y0*convcfi+convdy.
+// On success returns 0. On error, fills errmsg and returns -1 if operator
+// decided to interrupt the test, 2 if procedure was unable to define fiducial,
+// 3 if fiducial was not found, and 4 if camera was unable to reach the
+// fiducial.
+function int Scanboard(char *errmsg)
+  int i,err
+  float refx0,refy0,refx1,refy1,r
+  char s[256]
+  // Move all heads in home position.
+  for i=0,i<$LAY.nfing*2,i++ do
+    sprintf(s,"M %i(Z) NOP",i)
+    SERV.Cmdimm(SCRATCH,s)
+  enddo
+  // Scan first fiducial.
+  err=Searchfiducial(0,&refx0,&refy0,errmsg)
+  if err!=0 return err
+  // Scan second fiducial.
+  err=Searchfiducial(1,&refx1,&refy1,errmsg)
+  if err!=0 return err
+  // Calculate conversions.
+  Corrections(refx0,refy0,refx1,refy1)
+end
+
+
+////////////////////////////////////////////////////////////////////////////////
+//////////////////////// TASK GENERATION AND EXECUTION /////////////////////////
+
+typedef struct t_cmd                   // Command
+  int            index                 // Index in comp[]
+  int            order                 // Keep order or -1 if not needed
+  int            px,py                 // Panel
+  int            npad                  // Number of heads in measurement
+  int            ref                   // Index of reference (npad or -1)
+  int            head[NCONT]           // Selected heads that will contact pads
+  float          x[NCONT]              // X head coordinates
+  float          y[NCONT]              // Y head coordinates
+  float          shy                   // S3 shuttle Y coordinate
+  float          ycorr                 // Y correction (optimized shy)
+  int            result                // One of ERR_xxx
+  float          value1,value2         // Measured value
+ends
+
+struct t_cmd     *cmd                  // List of commands
+int              *job;                 // Final command queue, ncmd items
+int              cmdvalid              // Whethet cmd and job allocated
+int              ncmd                  // Number of commands
+
+int              cmdindex[NSEND]       // Index of pending command
+int              next                  // Next command to send to tester
+int              ndone                 // Number of executed commands
+int              nsent                 // Number of pending commands
+int              firstmove             // First command is not yet sent
+float            lastx[32]             // Last head X coordinate
+float            lasty[32]             // Last head Y coordinate
+
+int optbypanel=1
+
+// Compares two commands with given indices first by order of inductance
+// calibration and measurement, then by shuttle coordinate (zero coordinate is
+// always placed last), then optionally by panel, then by leftmost X
+// coordinate, then by Y.
+function int Heapcompare(int i1,int i2,int user)
+  float x1,y1,x2,y2
+  // Order has the highest priority.
+  if cmd[i1].order>=0 && cmd[i2].order>=0 then
+    if cmd[i1].order<cmd[i2].order return -1
+    if cmd[i1].order>cmd[i2].order return 1
+  endif
+  // Shuttle Y coordinate has the second-level priority.
+  if cmd[i1].shy==0.0 && cmd[i2].shy!=0.0 return 1
+  if cmd[i1].shy!=0.0 && cmd[i2].shy==0.0 return -1
+  if cmd[i1].shy<cmd[i2].shy return -1
+  if cmd[i1].shy>cmd[i2].shy return 1
+  // Optional panel is the third.
+  if optbypanel then
+    if cmd[i1].px<cmd[i2].px return -1
+    if cmd[i1].px>cmd[i2].px return 1
+    if cmd[i1].py<cmd[i2].py return -1
+    if cmd[i1].py>cmd[i2].py return 1
+  endif
+  // Now by coordinates.
+  if cmd[i1].npad>=3 then
+    x1=Min(cmd[i1].x[0],cmd[i1].x[1],cmd[i1].x[2])
+    y1=Min(cmd[i1].y[0],cmd[i1].y[1],cmd[i1].y[2])
+  else
+    x1=Min(cmd[i1].x[0],cmd[i1].x[1])
+    y1=Min(cmd[i1].y[0],cmd[i1].y[1])
+  endif
+  if cmd[i2].npad>=3 then
+    x2=Min(cmd[i2].x[0],cmd[i2].x[1],cmd[i2].x[2])
+    y2=Min(cmd[i2].y[0],cmd[i2].y[1],cmd[i2].y[2])
+  else
+    x2=Min(cmd[i2].x[0],cmd[i2].x[1])
+    y2=Min(cmd[i2].y[0],cmd[i2].y[1])
+  endif
+  if x1<x2 return -1
+  if x1>x2 return 1
+  if y1<y2 return -1
+  if y1>y2 return 1
+  return 0
+end
+
+// Heap sort, faster than qsort() in worst case (if data is partially sorted).
+// Due to the limitations of SCRIPT2, can only sort list of integer indices
+// that point to the real data (or which represent the data itself). Requires
+// function Heapcompare() that compares items.
+function int Heapsort(int *data,int count,int user)
+  int j,k,n,q,t
+  if (count<2) return
+  n=count-1
+  for k=n/2,k>=0,k-- do
+    q=k
+    while q<=n/2 do
+      j=2*q
+      if j<n && Heapcompare(data[j],data[j+1],user)<0 then
+        j++
+      endif
+      if Heapcompare(data[q],data[j],user)<0 then
+        t=data[j]; data[j]=data[q]; data[q]=t
+      else
+        break
+      endif
+      q=j
+    enddo
+  enddo
+  while n>0 do
+    t=data[0]; data[0]=data[n]; data[n]=t
+    n--
+    q=0
+    while q<=n/2 do
+      j=2*q
+      if j<n && Heapcompare(data[j],data[j+1],user)<0 then
+        j++
+      endif
+      if Heapcompare(data[q],data[j],user)<0 then
+        t=data[j]; data[j]=data[q]; data[q]=t
+      else
+        break
+      endif
+      q=j
+    enddo
+  enddo
+end
+
+// Generates measurements for each panel and distributes them into the head
+// queues. I assume that first finger makes measurements and all other are
+// like antennas and stay for longer time on the same coordinates. On success
+// returns 0. On error fills errmsg message and returns -1.
+function int Generatetask(char *errmsg)
+  int i,j,k,l,m,n,px,py,pad,npad,nmax,ref,rail[NCONT],head[NCONT],p[NCONT]
+  int *q,qstart[16],nq[16],next[16],ny[16],nposted[16],njob,moveshuttle,done
+  int lrefqueue,order,side[NCONT]
+  float r,xt[NCONT],yt[NCONT],y[NCONT],shy,lastshy
+  float testerymin,testerymax,ymin,ymax,gapmin,gapmax,ylimit
+  char padname[32]
+  struct t_cmd c
+  lastshy=0.0
+  // Get size of test area.
+  testerymin=1.0e99; testerymax=-1.0e99
+  for j=0,j<$LAY.nfing,j++ do
+    testerymin=Min(testerymin,$LAY.bottom[j]/1000.0)
+    testerymax=Max(testerymax,$LAY.top[j]/1000.0)
+  enddo
+  // Allocate memory for the list of commands and optimization queues.
+  if cmdvalid then
+    Free(cmd); Free(job); cmdvalid=0
+  endif
+  if Alloc(cmd,nstepx*nstepy*ncomp*Sizeof(c))==0 then
+    Strcpy(errmsg,"Low memory")
+    return -1
+  endif
+  if Alloc(job,nstepx*nstepy*ncomp*4)==0 then
+    Strcpy(errmsg,"Low memory")
+    Free(cmd)
+    return -1
+  endif
+  if Alloc(q,nstepx*nstepy*ncomp*16*4)==0 then
+    Strcpy(errmsg,"Low memory")
+    Free(cmd)
+    Free(job)
+    return -1
+  endif
+  cmdvalid=1
+  for i=0,i<16,i++ do
+    qstart[i]=nstepx*nstepy*ncomp*i
+    lastx[i*2]=-1.0e30
+    lasty[i*2]=$LAY.yoffset[i]/1000.0
+    lastx[i*2+1]=1.0e30
+    lasty[i*2+1]=$LAY.yoffset[i]/1000.0
+  enddo
+  // Gather measurement commands.
+  ncmd=0
+  for py=0,py<nstepy,py++ do           // For all steps (panels)
+    for px=0,px<nstepx,px++ do
+      if test[py,px].excluded                                                  \
+        continue
+      lrefqueue=-1
+      order=-1
+      for i=0,i<ncomp,i++ do           // For all components
+        ymin=1.0e99; ymax=-1.0e99
+        // Get coordinates and rails of all participating heads.
+        for pad=0,pad<4,pad++ do
+          if pad==0 then
+            Strcpy(padname,comp[i].pad0)
+          else if pad==1 then
+            Strcpy(padname,comp[i].pad1)
+          else if pad==2 then
+            Strcpy(padname,comp[i].pad2)
+          else
+            Strcpy(padname,comp[i].pad3)
+          endif
+          if padname[0]=='\0' break
+          if pad==0 && comp[i].type==CT_RCOM then
+            // First head must contact pad 0 on the panel (0,0).
+            k=Padtotester(xt+pad,yt+pad,side+pad,padname,0,0)
+          else
+            k=Padtotester(xt+pad,yt+pad,side+pad,padname,px,py)
+          endif
+          if k<0 then
+            sprintf(errmsg,                                                    \
+              "Component '%s': undefined pad '%s'",comp[i].name,padname)
+            goto error
+          endif
+          ymin=Min(ymin,yt[pad])
+          ymax=Max(ymax,yt[pad])
+          rail[pad]=Railfromy(yt[pad],side[pad])
+          if rail[pad]<0 || xt[pad]<$LAY.leftlimit/1000.0 ||                   \
+            xt[pad]>$LAY.rightlimit/1000.0 then
+            sprintf(errmsg,                                                    \
+              "Some pads on panel (%i,%i) are outside the tester area",px,py)
+            goto error
+          endif
+        enddo
+        npad=pad
+        if npad<2 then
+          sprintf(errmsg,                                                      \
+            "Component '%s': need at least 2 pads",comp[i].name)
+          goto error
+        endif
+        // Check whether shuttle movements are necessary.
+        moveshuttle=-1
+        for j=0,j<$LAY.nfing,j++ do
+          n=0
+          for pad=0,pad<npad,pad++ do
+            if rail[pad]!=j continue
+            y[n]=yt[pad]; p[n]=pad; n++
+          enddo
+          if n<=2 continue             // Safe to test
+          if allowshy==0 then
+            // Three or more pads per rail and shuttle movements are not
+            // enabled, give up.
+            sprintf(errmsg,                                                    \
+              "3 pads on the same rail for component %s on panel (%i,%i)",     \
+              comp[i].name,px,py)
+            goto error
+          endif
+          // Sort Y coordinates. Bubble sort!
+          for k=0,k<n-1,k++ do
+            for m=k+1,m<n,m++ do
+              if y[m]<y[k] then
+                l=p[m]; p[m]=p[k]; p[k]=l
+                r=y[m]; y[m]=y[k]; y[k]=r
+              endif
+            enddo
+          enddo
+          if n==3 then
+            if y[0]>y[1]-0.004 then
+              y[1]=y[1]+0.002; y[2]=y[2]+0.002
+              y[0]=y[0]-0.002
+            else if y[2]<y[1]+0.004 then
+              y[0]=y[0]-0.002; y[1]=y[1]-0.002
+              y[2]=y[2]+0.002
+            endif
+            gapmin=y[0]; gapmax=y[2]
+            yt[p[0]]=y[0]; yt[p[1]]=y[1]; yt[p[2]]=y[2]
+          else
+            if y[2]<y[1]+0.004 then
+              y[0]=y[0]-0.002; y[1]=y[1]-0.002
+              y[2]=y[2]+0.002; y[3]=y[3]+0.002
+            endif
+            gapmin=y[1]; gapmax=y[2]
+            yt[p[0]]=y[0]; yt[p[1]]=y[1]; yt[p[2]]=y[2]; yt[p[3]]=y[3]
+          endif
+          // As total number of contacts is limited to 4, It can be at most one
+          // rail with 3 or more heads.
+          moveshuttle=j
+          break
+        enddo
+        if moveshuttle<0 then
+          shy=0.0
+        else
+          // Shuttle movement is necessary. Try to find the border where
+          // components can be tested.
+          if moveshuttle<$LAY.nfing &&                                         \
+            $LAY.top[moveshuttle]==$LAY.bottom[moveshuttle+1] &&               \
+            $LAY.side[moveshuttle]==$LAY.side[moveshuttle+1] &&                \
+            (gapmax>$LAY.yoffset[moveshuttle]/1000.0 || moveshuttle==0 ||      \
+              $LAY.side[moveshuttle]!=$LAY.side[moveshuttle-1]) &&             \
+            ymax+($LAY.top[moveshuttle]/1000.0-gapmax)<testerymax then
+            ylimit=$LAY.top[moveshuttle]/1000.0
+          else if moveshuttle>0 &&                                             \
+            $LAY.bottom[moveshuttle]==$LAY.top[moveshuttle-1] &&               \
+            $LAY.side[moveshuttle]==$LAY.side[moveshuttle-1] &&                \
+            (gapmin<$LAY.yoffset[moveshuttle]/1000.0 ||                        \
+              moveshuttle==$LAY.nfing-1 ||                                     \
+              $LAY.side[moveshuttle]!=$LAY.side[moveshuttle+1]) &&             \
+            ymin-(gapmin-$LAY.bottom[moveshuttle]/1000.0)>=testerymin then
+            ylimit=$LAY.bottom[moveshuttle]/1000.0
+          else
+            sprintf(errmsg,                                                    \
+              "Shuttle movement impossible for component %s on panel (%i,%i)", \
+              comp[i].name,px,py)
+            goto error
+          endif
+          // Determine shuttle movement. It must move gapmin below ylimit and
+          // gapmax above ylimit, still keeping the whole panel inside the
+          // working area.
+          gapmin=Min(gapmin,ymin+ylimit-testerymin)
+          gapmax=Max(gapmax,ymax+ylimit-testerymax)
+          if gapmin>gapmax then
+            sprintf(errmsg,                                                    \
+              "Shuttle movement impossible for component %s on panel (%i,%i)", \
+              comp[i].name,px,py)
+            goto error
+          endif
+          if lastshy<ylimit-gapmax+0.001 || lastshy>ylimit-gapmin-0.001 then
+            lastshy=ylimit-(gapmin+gapmax)/2.0
+          endif
+          // Now we must recalculate all movements.
+          for pad=0,pad<npad,pad++ do
+            yt[pad]=yt[pad]+lastshy
+            rail[pad]=Railfromy(yt[pad],side[pad])
+            if rail[pad]<0 || xt[pad]<$LAY.leftlimit/1000.0 ||                 \
+              xt[pad]>$LAY.rightlimit/1000.0 then
+              sprintf(errmsg,                                                  \
+                "Some pads on panel (%i,%i) are outside the tester area",px,py)
+              goto error
+            endif
+          enddo
+          shy=-lastshy
+        endif
+        // Distribute heads within the rails.
+        for j=0,j<$LAY.nfing,j++ do
+          n=0
+          for pad=0,pad<npad,pad++ do
+            if rail[pad]!=j continue
+            p[n]=pad; n++
+          enddo
+          if n==0 then
+            continue
+          else if n==1 then
+            head[p[0]]=rail[p[0]]*2    // Default is left head
+          else if n==2 then
+            if xt[p[0]]<xt[p[1]] then
+              head[p[0]]=rail[p[0]]*2; head[p[1]]=rail[p[1]]*2+1
+            else
+              head[p[0]]=rail[p[0]]*2+1; head[p[1]]=rail[p[1]]*2
+            endif
+          else
+            sprintf(errmsg,                                                    \
+              "Internal error: %i pads on the rail for %s on panel (%i,%i)",   \
+              n,comp[i].name,px,py)
+            goto error
+          endif
+        enddo
+        // If reference is specified, try to add it to the measurement. Invalid
+        // references are silently ignored.
+        ref=-1
+        if noref==0 && (reference.x!=0.0 || reference.y!=0.0) then
+          if fixedref then
+            Paneltotester(xt+npad,yt+npad,reference.x,reference.y,0,0)
+          else
+            Paneltotester(xt+npad,yt+npad,reference.x,reference.y,px,py)
+          endif
+          yt[npad]=yt[npad]-shy
+          rail[npad]=Railfromy(yt[npad],reference.side)
+          head[npad]=rail[npad]*2      // Default is left head
+          if rail[npad]>=0 then
+            n=1
+            for j=0,j<npad,j++ do
+              if rail[j]==rail[npad] then
+                k=j; n++
+              endif
+            enddo
+            if n==1 then
+              ref=npad                 // OK to use reference
+            else if n==2 then
+              ref=npad                 // OK to use reference, distribute heads
+              if xt[k]<xt[npad] then
+                head[k]=rail[npad]*2; head[npad]=rail[npad]*2+1
+              else
+                head[k]=rail[npad]*2+1; head[npad]=rail[npad]*2
+              endif
+            endif
+          endif
+        endif
+        // If there is only one pad on the rail and its coordinates coincide
+        // with the last coordinates of the opposite head on this rail, switch
+        // to the opposite head.
+
+
+        // NOT YET
+
+
+
+        // Fill command.
+        cmd[ncmd].index=i
+        cmd[ncmd].px=px
+        cmd[ncmd].py=py
+        cmd[ncmd].npad=npad
+        cmd[ncmd].ref=ref
+        for pad=0,pad<(ref<0?npad:npad+1),pad++ do
+          cmd[ncmd].head[pad]=head[pad]
+          cmd[ncmd].x[pad]=xt[pad]
+          cmd[ncmd].y[pad]=yt[pad]
+        enddo
+        cmd[ncmd].shy=shy
+        cmd[ncmd].ycorr=0.0
+        cmd[ncmd].result=ERR_NOTEST
+        // Add command to rail queue. This "rail" also includes opposite rail
+        // for the double-sided testers. All CT_LREF and CT_LMEAS commands
+        // belonging to some panel come into the same queue, so that their
+        // order of execution can be preserved.
+        if comp[i].type==CT_LREF || comp[i].type==CT_LMEAS then
+          if lrefqueue<0                                                       \
+            lrefqueue=Railfromy(yt[0],0)
+          k=lrefqueue
+          if comp[i].type==CT_LREF then
+            cmd[ncmd].order=i; order=i+1
+          else
+            if order<0 order=i
+            cmd[ncmd].order=order
+          endif
+        else
+          k=Railfromy(yt[0],0)
+          cmd[ncmd].order=-1
+        endif
+        q[qstart[k]+nq[k]]=ncmd
+        nq[k]++
+        ncmd++
+      enddo
+    enddo
+  enddo
+  // If shuttle optimization is active, round all shuttle Y coordinates to the
+  // nearest 0.5 or 1.0-mm location (maximal correction 250 or 500 um).
+  if USEYOPT!=0 && allowshy!=0 then
+    for k=0,k<$LAY.nfing,k++ do
+      for i=0,i<nq[k],i++ do
+        shy=cmd[q[qstart[k]+i]].shy
+        if shy==0.0 continue
+        if USEYOPT==2 then
+          r=Round(shy+0.500,1.000)
+        else
+          r=Round(shy+0.250,0.500)
+        endif
+        cmd[q[qstart[k]+i]].ycorr=shy-r
+        cmd[q[qstart[k]+i]].shy=r
+      enddo
+    enddo
+  endif
+  // Sort rail queues first by shy, then by the X coordinates of the leftmost
+  // head.
+  for k=0,k<$LAY.nfing,k++ do
+    if nq[k]<=1 continue
+    Heapsort(q+qstart[k],nq[k],0)
+  enddo
+  // Merge queues together. Each shuttle Y coordinate is processed separately.
+  // Non-zero shuttle coordintes are processed first. Within shuttle position,
+  // I take measurements from each rail queue proportionally to its size.
+  Memset(next,0,Sizeof(next))
+  njob=0
+  while 1 do
+    // Find rail with the minimal non-zero shuttle coordinate.
+    shy=1.0e99
+    done=1
+    for k=0,k<$LAY.nfing,k++ do
+      if next[k]>=nq[k] continue
+      done=0
+      if cmd[q[qstart[k]+next[k]]].shy==0 continue
+      shy=Min(shy,cmd[q[qstart[k]+next[k]]].shy)
+    enddo
+    if done break                      // All commands are distributed
+    if shy>1.0e90 shy=0.0              // Only commands with zero shy remained
+    // Calculate lengths of the queues with given shuttle coordinate.
+    nmax=0
+    for k=0,k<$LAY.nfing,k++ do
+      ny[k]=0; nposted[k]=0
+      for i=next[k],i<nq[k],i++ do
+        if cmd[q[qstart[k]+i]].shy!=shy break
+        ny[k]++
+      enddo
+      nmax=Max(nmax,ny[k])
+    enddo
+    // Distribute commands with given shuttle coordinate.
+    for i=0,i<=nmax,i++ do
+      for k=0,k<$LAY.nfing,k++ do
+        if nposted[k]<(i*ny[k])/nmax then
+          job[njob]=q[qstart[k]+next[k]]
+          njob++; next[k]++; nposted[k]++
+        endif
+      enddo
+    enddo
+  enddo
+  // Clean up and return success.
+  Free(q)
+  return 0
+error:
+  // Error detected, report.
+  Free(q)
+  return -1
+end
+
+// Initializes variables and make initializations necessary to run electrical
+// test. Returns 0 on success and -1 on error that prevents test.
+function int Preparefortest()
+  int i
+  char s[80]
+  next=0                               // Next command to send
+  nsent=0                              // Number of pending commands
+  ndone=0                              // Number of received answers
+  for i=0,i<NSEND,i++ do
+    cmdindex[i]=-1                     // Invalidate list of indices
+  enddo
+  firstmove=1
+  for i=0,i<$LAY.nfing*2,i=i+2 do
+    lastx[i]=-1.0e30
+    lasty[i]=$LAY.yoffset[i/2]/1000.0
+    lastx[i+1]=1.0e30
+    lasty[i+1]=$LAY.yoffset[i/2]/1000.0
+  enddo
+  // All four-wire measurements must specify 4 pads.
+  for i=0,i<ncomp,i++ do
+    if comp[i].type==CT_FW && comp[i].pad3[0]=='\0' break
+  enddo
+  if i<ncomp then
+    Error("There are 4-wire measurements with less than 4 pads")
+    return -1
+  endif
+  // If HV measurements are specified, make initialization. Not necessary if
+  // initializations with exactly the same parameters were already done not
+  // longer than 10 minutes ago.
+  for i=0,i<ncomp,i++ do
+    if comp[i].type==CT_HV break
+  enddo
+  if i<ncomp && (hvinit==0 || Time()-hvinit>600000) then
+    s[0]=S_HVINIT                      // S_HVINIT
+    $uint2(s+1)=hvvolt                 // Test voltage
+    $uint2(s+3)=(hvfix?0x4:0x0)        // Mode: fix test time
+    $uint2(s+5)=1000                   // Test current, uA
+    $uint2(s+7)=2000                   // Max resistance, MOhm
+    $uint4(s+9)=hvtime                 // Min time under full voltage, ms
+    $uint4(s+13)=1000*1000             // Rising speed, V/s
+    $uint2(s+17)=0                     // Head initialization time, ms
+    $uint4(s+19)=0                     // Reserved
+    $uint4(s+23)=0                     // Reserved
+    $uint4(s+27)=0                     // Reserved
+    SYS.Killimm(0)
+    SYS.Sendimm(0,31,s)
+    hvinit=Time()
+    while 1 do
+      if $A[0].length>0 then
+        if $A[0].answer!=S_HVINIT then
+          Error("Error while initializing HV measurements")
+          return -1
+        else if $int4($A[0]+5)!=0 then
+          Error("Error while initializing HV measurements")
+          return -1
+        endif
+        break
+      else if Time()-hvinit>10000 then
+        SYS.Killimm(0)
+        Error("Timeout while initializing HV measurements")
+        return -1
+      endif
+      wait
+    enddo
+  endif
+  return 0
+end
+
+// Tester, call periodically to execute job. Returns 1 when user stopped test,
+// -1 on Close and 0 in any other case.
+function int Nextteststep()
+  int i,j,k,m,n,slot,px,py,head,ref,range,status,ns,nerr,used[32],result
+  float xavoid,umax,imax,value1,value2,z,vmin
+  char s[1024],suffix[128]
+  if ndone>=ncmd return                // Job executed
+  // Check whether there are some answers.
+  for slot=0,slot<NSEND,slot++ do
+    if cmdindex[slot]<0 continue       // Free slot
+    if $A[slot].length==0 continue     // Command is still pending
+    // Answer is here, mark command as executed and analyse answer.
+    k=cmdindex[slot]
+    px=cmd[k].px
+    py=cmd[k].py
+    i=cmd[k].index                     // Index in comp
+    cmdindex[slot]=-1
+    nsent--
+    ndone++
+    if $A[slot].answer!=S_MOVE then
+      result=ERR_ANSWER
+      value1=0.0; value2=0.0
+    else if comp[i].type==CT_E || comp[i].type==CT_R ||                        \
+      comp[i].type==CT_RCOM || comp[i].type==CT_FW then
+      status=$A[slot].status
+      value1=$A[slot].r
+      if (status & 0x0100)!=0 value1=value1*1.0e-6
+      value2=0.0
+      vmin=comp[i].vmin
+      if vmin==0.0 vmin=-0.1;          // Low negative values are allowed
+      if (status & 0x8800)!=0 then
+        result=ERR_BAD
+      else if value1<vmin || value1>comp[i].vmax then
+        result=ERR_RANGE
+      else if (status & 0x0600)!=0 then
+        result=ERR_NOCONT
+      else
+        result=ERR_OK
+      endif
+    else if comp[i].type==CT_C then
+      status=$A[slot].status
+      SERV.Convertfastc($A[slot],&value1,&z)
+      value2=0.0
+      vmin=comp[i].vmin
+      if vmin==0.0 vmin=-0.03;         // Low negative values are allowed
+      if (status & 0x9800)!=0 then
+        result=ERR_BAD
+      else if (status & 0x0020)!=0 then
+        result=ERR_SHORT
+      else if value1<vmin || value1>comp[i].vmax then
+        result=ERR_RANGE
+      else if (status & 0x0600)!=0 then
+        result=ERR_NOCONT
+      else
+        result=ERR_OK
+      endif
+    else if comp[i].type==CT_LREF then
+      value1=0.0; value2=0.0
+      result=ERR_OK                    // Answer is ignored
+    else if comp[i].type==CT_LMEAS || comp[i].type==CT_L then
+      status=$A[slot].status
+      value1=$float4($A[slot]+12)/1000.0
+      value2=0.0
+      vmin=comp[i].vmin
+      if vmin==0.0 vmin=-0.005;        // Low negative values are allowed
+      if (status & 0x8800)!=0 then
+        result=ERR_BAD
+      else if (status & 0x2000)!=0 then
+        result=ERR_NOCAL
+      else if value1<vmin || value1>comp[i].vmax then
+        result=ERR_RANGE
+      else if (status & 0x0600)!=0 then
+        result=ERR_NOCONT
+      else
+        result=ERR_OK
+      endif
+    else if comp[i].type==CT_UI then
+      if comp[i].options & COPT_POLARITY then
+        value1=-$float4($A[slot]+10)
+      else
+        value1=$float4($A[slot]+10)
+      endif
+      if (status & 0x8800)!=0 then
+        result=ERR_BAD
+      else if (status & 0x0600)!=0 then
+        result=ERR_NOCONT
+      else if value1<comp[i].vmin/2 then
+        result=ERR_SHORT
+      else if $int2($A[slot]+8) & 0x1000 then
+        result=ERR_OPEN
+      else if value1<comp[i].vmin || value1>comp[i].vmax then
+        result=ERR_RANGE
+      else
+        result=ERR_OK
+      endif
+    else if comp[i].type==CT_D then
+      if comp[i].options & COPT_POLARITY then
+        value2=-$float4($A[slot]+20)
+        value1=-$float4($A[slot]+10)
+      else
+        value2=$float4($A[slot]+10)
+        value1=$float4($A[slot]+20)
+      endif
+      if (status & 0x8800)!=0 then
+        result=ERR_BAD
+      else if (status & 0x0600)!=0 then
+        result=ERR_NOCONT
+      else if value2>(-comp[i].vmin/2) && value1<comp[i].vmin/2 then
+        result=ERR_SHORT
+      else if $int2($A[slot]+8) & $int2($A[slot]+18) & 0x1000 then
+        result=ERR_OPEN
+      else if value1<comp[i].vmin || value1>comp[i].vmax then
+        if value2>=(-comp[i].vmax) && value2<=(-comp[i].vmin) then
+          result=ERR_POL
+        else
+          result=ERR_RANGE
+        endif
+      else
+        result=ERR_OK
+      endif
+    else if comp[i].type==CT_V then
+      value1=$float4($A[slot]+10)
+      value2=$float4($A[slot]+20)
+      if (status & 0x8800)!=0 then
+        result=ERR_BAD
+      else if (status & 0x0600)!=0 then
+        result=ERR_NOCONT
+      else if value1>(-comp[i].vmin/2) && value2<comp[i].vmin/2 then
+        result=ERR_SHORT
+      else if $int2($A[slot]+8) & $int2($A[slot]+18) & 0x1000 then
+        result=ERR_OPEN
+      else if Abs(Abs(value1)-Abs(value2))>comp[i].vmin/5 then
+        result=ERR_UNSYM
+      else if value1<(-comp[i].vmax) || value1>(-comp[i].vmin) ||              \
+        value2<comp[i].vmin || value2>comp[i].vmax then
+        result=ERR_RANGE
+      else
+        result=ERR_OK
+      endif
+    else if comp[i].type==CT_HV then
+      status=$A[slot].status
+      value1=$A[slot].r
+      value2=0.0
+      if (status & 0x8093)!=0 then
+        result=ERR_BAD
+      else if (status & 0x0020)!=0 then
+        result=ERR_BREAK
+      else if value1<comp[i].vmin || value1>comp[i].vmax then
+        result=ERR_RANGE
+      else if (status & 0x0600)!=0 then
+        result=ERR_NOCONT
+      else
+        result=ERR_OK
+      endif
+    else
+      result=ERR_INTERN
+      value1=0.0; value2=0.0
+    endif
+    cmd[k].result=result
+    cmd[k].value1=value1
+    cmd[k].value2=value2
+    test[py,px].nmeas=test[py,px].nmeas+1
+    if result!=ERR_OK then
+      nerr=test[py,px].nerr
+      if nerr<MAXERR then
+        // It's better when errors are sorted by components.
+        for j=0,j<nerr,j++ do
+          if cmd[test[py,px].index[j]].index>i break
+        enddo
+        for m=nerr,m>j,m-- do
+          test[py,px].loop[m]=test[py,px].loop[m-1]
+          test[py,px].index[m]=test[py,px].index[m-1]
+        enddo
+        test[py,px].loop[j]=loop
+        test[py,px].index[j]=k
+      endif
+      test[py,px].nerr=nerr+1
+    endif
+  enddo
+  // Check whether we can post next command.
+  if nsent<NSEND && next<ncmd then
+    // Find free slot.
+    for slot=0,slot<NSEND,slot++ do
+      if cmdindex[slot]<0 break
+    enddo
+    if slot>=NSEND return              // Internal error, quite impossible!
+    k=job[next]                        // Index in cmd
+    Memset(used,0,Sizeof(used))
+    n=sprintf(s,"M ")
+    // Add movements listed in command.
+    for j=0,j<cmd[k].npad,j++ do
+      head=cmd[k].head[j]
+      n=n+sprintf(s+n,"%i(%.3f,%.3f:%.3fA%iV%iH%gP%i) ",                       \
+        head,cmd[k].x[j],cmd[k].y[j],cmd[k].ycorr,acc,v,h,p)
+      lastx[head]=cmd[k].x[j]
+      lasty[head]=cmd[k].y[j]
+      used[head]++
+    enddo
+    ref=cmd[k].ref
+    if ref>=0 then
+      head=cmd[k].head[ref]
+      n=n+sprintf(s+n,"%i(%.3f,%.3f:%.3fA%iV%iH%gP%i) GND(%i) ",               \
+        head,cmd[k].x[ref],cmd[k].y[ref],cmd[k].ycorr,acc,v,h,p,head)
+      lastx[head]=cmd[k].x[ref]
+      lasty[head]=cmd[k].y[ref]
+      used[head]++
+    endif
+    // Add panel.
+    n=n+sprintf(s+n,"GROUP(%i,1,0) ",cmd[k].py*nstepx+cmd[k].px+1)
+    // Add shuttle movement, if specified.
+    if cmd[k].shy!=0.0 then
+      n=n+sprintf(s+n,"SHY(%.3f) ",cmd[k].shy)
+    endif
+    // If this is the first movement, or if previous movement may block,
+    // post avoiding movements.
+    for j=0,j<$LAY.nfing*2,j=j+2 do
+      if used[j]==0 && firstmove then
+        n=n+sprintf(s+n,"%i(Z) ",j)
+        lastx[j]=-1.0e30
+        lasty[j]=$LAY.yoffset[j/2]/1000.0
+      else if used[j]==0 && used[j+1]!=0 && lastx[j]>lastx[j+1] then
+        xavoid=Max(lastx[j+1]-20.0,$LAY.leftlimit/1000.0)
+        n=n+sprintf(s+n,"%i(%.3f,%.3fH20) ",j,xavoid,lasty[j+1])
+        lastx[j]=xavoid
+        lasty[j]=lasty[j+1]
+      endif
+      if used[j+1]==0 && firstmove then
+        n=n+sprintf(s+n,"%i(Z) ",j+1)
+        lastx[j+1]=1.0e30
+        lasty[j+1]=$LAY.yoffset[j/2]/1000.0
+      else if used[j]!=0 && used[j+1]==0 && lastx[j]>lastx[j+1] then
+        xavoid=Min(lastx[j]+20.0,$LAY.rightlimit/1000.0)
+        n=n+sprintf(s+n,"%i(%.3f,%.3fH20) ",j+1,xavoid,lasty[j])
+        lastx[j+1]=xavoid
+        lasty[j+1]=lasty[j]
+      endif
+    enddo
+    firstmove=0
+    // Now add measurement prefix (part preceding list of heads, including
+    // opening parenthesis) and prepare suffix (part following list of heads,
+    // including closing parenthesis).
+    Strcpy(suffix,")")
+    i=cmd[k].index                     // Index in comp
+    if comp[i].type==CT_E || comp[i].type==CT_RCOM then
+      n=n+sprintf(s+n,"E(")
+      ns=0
+      if (comp[i].options & COPT_UMASK)!=COPT_UDEF then
+        ns=sprintf(suffix,",UMAX=%g",utest[(comp[i].options>>4) & 0xF])
+      endif
+      if (comp[i].options & COPT_IMASK)!=COPT_IDEF then
+        ns=ns+sprintf(suffix+ns,                                               \
+        ",IMAX=%g",itest[(comp[i].options>>8) & 0x1F]/1000.0)
+      endif
+      if (comp[i].options & COPT_DMASK)!=COPT_DDEF then
+        ns=ns+sprintf(suffix+ns,",DLY=%i",dtime[(comp[i].options>>16) & 0xF])
+      endif
+      if comp[i].options & COPT_POLARITY then
+        ns=ns+sprintf(suffix+ns,",POL")
+      endif
+      ns=ns+sprintf(suffix+ns,")")
+    else if comp[i].type==CT_R then
+      n=n+sprintf(s+n,"R(")
+      ns=0
+      if (comp[i].options & COPT_UMASK)!=COPT_UDEF then
+        ns=sprintf(suffix,",UMAX=%g",utest[(comp[i].options>>4) & 0xF])
+      endif
+      if (comp[i].options & COPT_IMASK)!=COPT_IDEF then
+        ns=ns+sprintf(suffix+ns,                                               \
+        ",IMAX=%g",itest[(comp[i].options>>8) & 0x1F]/1000.0)
+      endif
+      if (comp[i].options & COPT_DMASK)!=COPT_DDEF then
+        ns=ns+sprintf(suffix+ns,",DLY=%i",dtime[(comp[i].options>>16) & 0xF])
+      endif
+      ns=ns+sprintf(suffix+ns,")")
+    else if comp[i].type==CT_C then
+      n=n+sprintf(s+n,"UC(")
+      if comp[i].vmin<30.0 then
+        range=1
+      else if comp[i].vmin<300.0 then
+        range=2
+      else if comp[i].vmin<3000.0 then
+        range=3
+      else if comp[i].vmin<30000.0 then
+        range=4
+      else
+        range=5
+      endif
+      ns=sprintf(suffix,",G=%i",range)
+      if (comp[i].options & COPT_UMASK)!=COPT_UDEF then
+        ns=ns+sprintf(suffix+ns,",U=%g",utest[(comp[i].options>>4) & 0xF])
+      endif
+      if comp[i].options & COPT_NOSHORT then
+        ns=ns+sprintf(suffix+ns,",N")
+      endif
+      ns=ns+sprintf(suffix+ns,")")
+    else if comp[i].type==CT_LREF || comp[i].type==CT_LMEAS then
+      if comp[i].type==CT_LREF then
+        n=n+sprintf(s+n,"LREF(")
+      else
+        n=n+sprintf(s+n,"LMEAS(")
+      endif
+      if (comp[i].options & COPT_UMASK)!=COPT_UDEF then
+        ns=ns+sprintf(suffix+ns,",U=%g",utest[(comp[i].options>>4) & 0xF])
+      endif
+      if (comp[i].options & COPT_FMASK)!=COPT_FDEF then
+        ns=ns+sprintf(suffix+ns,",F=%g",ftest[(comp[i].options>>13) & 0x7])
+      endif
+      if (comp[i].options & COPT_DMASK)!=COPT_DDEF then
+        ns=ns+sprintf(suffix+ns,",DLY=%i",dtime[(comp[i].options>>16) & 0xF])
+      endif
+      ns=ns+sprintf(suffix+ns,",MEDIUM)")
+    else if comp[i].type==CT_L then
+      n=n+sprintf(s+n,"RL(")
+    else if comp[i].type==CT_UI then
+      if (comp[i].options & COPT_UMASK)!=COPT_UDEF then
+        umax=utest[(comp[i].options>>4) & 0xF]
+      else
+        umax=comp[i].vmax*1.03+0.001
+      endif
+      if (comp[i].options & COPT_IMASK)==COPT_IDEF then
+        imax=1.0                       // Default current 1 mA
+      else
+        imax=itest[(comp[i].options>>8) & 0x1F]
+      endif
+      n=n+sprintf(s+n,"UIEX(")
+      if comp[i].options & COPT_POLARITY then
+        ns=sprintf(suffix,",UMIN=%g,UMAX=0.0,I=(%g))",-umax,-imax)
+      else
+        ns=sprintf(suffix,",UMIN=0.0,UMAX=%g,I=(%g))",umax,imax)
+      endif
+      if (comp[i].options & COPT_DMASK)!=COPT_DDEF then
+        ns=ns+sprintf(suffix+ns,",DLY=%i",dtime[(comp[i].options>>16) & 0xF])
+      endif
+    else if comp[i].type==CT_D then
+      if (comp[i].options & COPT_UMASK)!=COPT_UDEF then
+        umax=utest[(comp[i].options>>4) & 0xF]
+      else
+        umax=comp[i].vmax*1.03+0.001
+      endif
+      if (comp[i].options & COPT_IMASK)==COPT_IDEF then
+        imax=1.0                       // Default current 1 mA
+      else
+        imax=itest[(comp[i].options>>8) & 0x1F]
+      endif
+      n=n+sprintf(s+n,"UIEX(")
+      ns=sprintf(suffix,",UMIN=%g,UMAX=%g,I=(%g,%g))",-umax,umax,-imax,imax)
+      if (comp[i].options & COPT_DMASK)!=COPT_DDEF then
+        ns=ns+sprintf(suffix+ns,",DLY=%i",dtime[(comp[i].options>>16) & 0xF])
+      endif
+    else if comp[i].type==CT_V then
+      if (comp[i].options & COPT_UMASK)!=COPT_UDEF then
+        umax=utest[(comp[i].options>>4) & 0xF]
+      else
+        umax=comp[i].vmax*1.03+0.001
+      endif
+      if (comp[i].options & COPT_IMASK)==COPT_IDEF then
+        imax=1.0                       // Default current 1 mA
+      else
+        imax=itest[(comp[i].options>>8) & 0x1F]
+      endif
+      n=n+sprintf(s+n,"UIEX(")
+      ns=sprintf(suffix,",UMIN=%g,UMAX=%g,I=(%g,%g))",-umax,umax,-imax,imax)
+      if (comp[i].options & COPT_DMASK)!=COPT_DDEF then
+        ns=ns+sprintf(suffix+ns,",DLY=%i",dtime[(comp[i].options>>16) & 0xF])
+      endif
+    else if comp[i].type==CT_HV then
+      n=n+sprintf(s+n,"H(")
+    else if comp[i].type==CT_FW then
+      n=n+sprintf(s+n,"Q(")
+      if (comp[i].options & COPT_UMASK)!=COPT_UDEF then
+        ns=sprintf(suffix,",UMAX=%g",utest[(comp[i].options>>4) & 0xF])
+      endif
+      if (comp[i].options & COPT_IMASK)!=COPT_IDEF then
+        ns=ns+sprintf(suffix+ns,                                               \
+        ",IMAX=%g",itest[(comp[i].options>>8) & 0x1F]/1000.0)
+      endif
+      if (comp[i].options & COPT_DMASK)!=COPT_DDEF then
+        ns=ns+sprintf(suffix+ns,",DLY=%i",dtime[(comp[i].options>>16) & 0xF])
+      endif
+      if comp[i].options & COPT_LONG then
+        ns=ns+sprintf(suffix+ns,",XL)")
+      endif
+    else
+      n=n+sprintf(s+n,"NOP(")          // Nonsense; in fact, internal error
+    endif
+    // Add measurement heads.
+    n=n+sprintf(s+n,"%i,%i",cmd[k].head[0],cmd[k].head[1])
+    if cmd[k].npad>=3 then
+      n=n+sprintf(s+n,",%i",cmd[k].head[2])
+    endif
+    if cmd[k].npad==4 then
+      n=n+sprintf(s+n,",%i",cmd[k].head[3])
+    endif
+    // Add suffix.
+    Strcpy(s+n,suffix)
+    // Send command.
+    if SERV.Cmdimm(slot,s)<0 then
+      cmd[k].result=ERR_INTERN
+      cmd[k].value1=0.0
+      cmd[k].value2=0.0
+      px=cmd[k].px
+      py=cmd[k].py
+      test[py,px].nmeas=test[py,px].nmeas+1
+      nerr=test[py,px].nerr
+      if nerr<MAXERR then
+        // It's better when errors are sorted by components.
+        for j=0,j<nerr,j++ do
+          if cmd[test[py,px].index[j]].index>i break
+        enddo
+        for m=nerr,m>j,m-- do
+          test[py,px].loop[m]=test[py,px].loop[m-1]
+          test[py,px].index[m]=test[py,px].index[m-1]
+        enddo
+        test[py,px].loop[j]=loop
+        test[py,px].index[j]=k
+      endif
+      test[py,px].nerr=nerr+1
+      ndone++
+    else
+      cmdindex[slot]=k
+      nsent++
+    endif
+    next++
+  endif
+end
+
+// Writes test results to the log file.
+function int Protocoltestresults(float testtime)
+  int i,j,m,n,px,py,result
+  char s[256]
+  if htxt==NULL return
+  fprintf(htxt,                                                                \
+    "\n===================================================================\n\n")
+  fprintf(htxt,"SAMPLE '%s'",sampleid)
+  if nloop>1 fprintf(htxt," LOOP %i",loop+1)
+  fprintf(htxt,", TEST DURATION %.1f SEC\n\n",testtime)
+  for py=0,py<nstepy,py++ do           // For all steps (panels)
+    for px=0,px<nstepx,px++ do
+      fprintf(htxt,"-- PANEL (%i,%i) --\n",py,px)
+      if test[py,px].excluded then
+        fprintf(htxt,"  Excluded from electrical test\n")
+        fprintf(htxt,"\n")
+        continue
+      endif
+      for i=0,i<ncomp,i++ do
+        // Component index and name.
+        n=sprintf(s,"%3i   %-15s ",i+1,comp[i].name)
+        // Type of component.
+        if comp[i].type==CT_E then
+          n=n+sprintf(s+n,"Exact R  ")
+        else if comp[i].type==CT_R then
+          n=n+sprintf(s+n,"Fast R   ")
+        else if comp[i].type==CT_RCOM then
+          n=n+sprintf(s+n,"Rcommon  ")
+        else if comp[i].type==CT_C then
+          n=n+sprintf(s+n,"C        ")
+        else if comp[i].type==CT_LREF then
+          continue                     // Not protocolled
+        else if comp[i].type==CT_LMEAS then
+          n=n+sprintf(s+n,"L meas   ")
+        else if comp[i].type==CT_L then
+          n=n+sprintf(s+n,"Simple L ")
+        else if comp[i].type==CT_UI then
+          n=n+sprintf(s+n,"U-I      ")
+        else if comp[i].type==CT_D then
+          n=n+sprintf(s+n,"Diode    ")
+        else if comp[i].type==CT_V then
+          n=n+sprintf(s+n,"Varistor ")
+        else if comp[i].type==CT_HV then
+          n=n+sprintf(s+n,"HV       ")
+        else if comp[i].type==CT_FW then
+          n=n+sprintf(s+n,"4-wire   ")
+        else
+          n=n+sprintf(s+n,"???      ")
+        endif
+        // Measured value. FOR THIS SO TO SAY SOLUTION I MUST BE DECAPITATED,
+        // BURNED ALIVE, HUNG AND THEN DROWNED - NOT NECESSARILY IN THIS ORDER.
+        for j=0,j<ncmd,j++ do
+          if cmd[j].index==i && cmd[j].px==px && cmd[j].py==py break
+        enddo
+        if j>=ncmd then
+          m=sprintf(s+n,"<Internal error>")
+          result=ERR_INTERN
+        else if comp[i].type==CT_D || comp[i].type==CT_V then
+          m=Convertunits2(comp[i].type,cmd[j].value1,cmd[j].value2,s+n)
+          result=cmd[j].result
+        else
+          m=Convertunits(comp[i].type,cmd[j].value1,0,s+n)
+          result=cmd[j].result
+        endif
+        n=n+m
+        if result!=ERR_OK then
+          while m<28 do
+            s[n]=' '; n++; m++
+          enddo
+          n=n+Geterrorbycode(cmd[j].result,s+n)
+        endif
+        s[n]='\0'
+        fprintf(htxt,"%s\n",s)
+      enddo
+      fprintf(htxt,"\n")
+    enddo
+  enddo
+end
+
+
+////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////// WIZARDS ////////////////////////////////////
+
+// Auxiliary wizard, empties the wizard window.
+function int Emptywizard()
+  clear hwizard
+  wizardstep=WIZ_EMPTY
+  Pressed(hvideo)
+end
+
+// Auxiliary wizard, searches for npad (1, 2 or 3) pads using video camera.
+// Manual mode is used in manual scan, clear? Before using search functions,
+// fill search[] and searchpad with the pad data.
+function int Searchwizard(int npad,int manual,int usenamed)
+  int i
+  if npad<1 || npad>3 return -1
+  Message("")
+  Emptywizard()
+  hnamed=NULL
+  hgonamed=NULL
+  if searchpad>=npad searchpad=0
+  if search[searchpad].x==0.0 && search[searchpad].y==0.0 then
+    search[searchpad].x=camerax
+    search[searchpad].y=cameray
+    search[searchpad].side=cameraside
+    search[searchpad].fidtype=SYNT_CIRCLE
+    search[searchpad].fidcolor=WHITEONBLACK
+    search[searchpad].a=50.0
+    search[searchpad].b=0.0
+    search[searchpad].scanman=0
+  endif
+  draw window=hwizard font=INFOFONT color=BLACK
+  if npad>=2 then
+    hselpad[0]=control BUTTON
+      window=hwizard
+      position=10,10,(npad==3?70:120),26
+      name="测点 1"
+      help="按下可扫描焊盘 1 的坐标"
+      font=MEDIUMFONT
+      color=(searchpad==0?LIGHTRED:BLACK)
+      bkcolor=(searchpad==0?YELLOW:GRAY)
+    endc
+    hselpad[1]=control BUTTON
+      window=hwizard
+      position=(npad==3?90:148),10,(npad==3?70:120),26
+      name="测点 2"
+      help="按下可扫描焊盘 2 的坐标"
+      font=MEDIUMFONT
+      color=(searchpad==1?LIGHTRED:BLACK)
+      bkcolor=(searchpad==1?YELLOW:GRAY)
+    endc
+  else
+    hselpad[0]=NULL
+    hselpad[1]=NULL
+  endif
+  if npad==3 then
+    husethird=control CHECKBOX
+      window=hwizard
+      position=178,15,18,18
+      name=""
+      help="使用焊盘 3"
+    endc
+    hselpad[2]=control BUTTON
+      window=hwizard
+      position=198,10,70,26
+      name="测点 3"
+      help="按下可扫描焊盘 3 的坐标"
+      font=MEDIUMFONT
+      color=(searchpad==2?LIGHTRED:BLACK)
+      bkcolor=(searchpad==2?YELLOW:GRAY)
+    endc
+  else
+    husethird=NULL
+    hselpad[2]=NULL
+  endif
+  redrawbtn=1
+  if manual==0 then
+    if usenamed then
+      draw at 93,63 text="Go to"
+      hnamed=control COMBOLIST
+        window=hwizard
+        position=130,43,109,500
+        help="选择一个有名称的焊盘"
+        font=MEDIUMFONT
+        mode=M_VSCROLL|M_REPEAT
+      endc
+      for i=0,i<nnamed,i++ do
+        add hnamed text=named[i].name
+      enddo
+      hgonamed=control BUTTON
+        window=hwizard
+        position=238,43,30,27
+        text="Go"
+        help="转到选定的命名焊盘"
+        font=MEDIUMFONT
+      endc
+      gonamed=0
+      if nnamed==0 then
+        disable hnamed
+        disable hgonamed
+      endif
+    endif
+    draw at 137,95 text="Side ="
+    hsearchside=control COMBOLIST
+      window=hwizard
+      position=181,75,87,200
+      help="实际选定焊盘的面"
+      font=MEDIUMFONT
+    endc
+    add hsearchside text="Top"
+    if $LAY.nfing>0 && $LAY.side[$LAY.nfing-1]==1 then
+      add hsearchside text="Bottom"
+    endif
+    change hsearchside select=search[searchpad].side
+  else
+    hsearchside=NULL
+  endif
+  hu=control BUTTON
+    window=hwizard
+    position=44,50,34,34
+    name="上"
+    help="按住可向上移动相机"
+    mode=M_REPEAT
+    font=MEDIUMFONT
+  endc
+  hl=control BUTTON
+    window=hwizard
+    position=10,84,34,34
+    name="左"
+    help="按住不放，将相机向上移动"
+    mode=M_REPEAT
+    font=MEDIUMFONT
+  endc
+  hr=control BUTTON
+    window=hwizard
+    position=78,84,34,34
+    name="右"
+    help="按住不放，将相机向右移动"
+    mode=M_REPEAT
+    font=MEDIUMFONT
+  endc
+  hd=control BUTTON
+    window=hwizard
+    position=44,118,34,34
+    name="下"
+    help="按住可向下移动相机"
+    mode=M_REPEAT
+    font=MEDIUMFONT
+  endc
+  draw at 137,127 text="Click ="
+  hsearchstep=control COMBOLIST
+    window=hwizard
+    position=181,107,65,200
+    help="定位过程中使用的步长，毫米"
+    font=MEDIUMFONT
+  endc
+  draw at 251,127 text="mm"
+  add hsearchstep text="0.001"
+  add hsearchstep text="0.010"
+  add hsearchstep text="0.100"
+  add hsearchstep text="1.000"
+  add hsearchstep text="10.00"
+  change hsearchstep select=stepindex
+  draw show
+  hok=control BUTTON
+    window=hwizard
+    position=210,317,62,24
+    help="确认设置"
+    text="确定"
+    font=MEDIUMFONT
+  endc
+  // Start movement to the first specified point.
+  Movecamera(search[searchpad].x,search[searchpad].y,search[searchpad].side)
+  wizardstep=WIZ_SEARCH
+end
+
+// Auxiliary wizard, allows to select up to 4 pads for test.
+function int Padwizard()
+  int i,j,x,y
+  Message("")
+  Emptywizard()
+  hnamed=NULL
+  hgonamed=NULL
+  draw window=hwizard font=MEDIUMFONT color=BLACK
+  draw mode=M_CENTERED at 140,27 text="Pads:"
+  for i=0,i<4,i++ do
+    x=8+(i & 1)*136
+    y=33+(i/2)*36
+    hgopad[i]=control BUTTON
+      window=hwizard
+      position=x,y,20,27
+      name=format("%i",i+1)
+      help="转到选定的焊盘"
+      font=MEDIUMFONT
+      bkcolor=LIGHTGRAY
+    endc
+    hcomppad[i]=control COMBOLIST
+      window=hwizard
+      position=x+19,y,107,500
+      help="选择一个有名称的焊盘"
+      font=MEDIUMFONT
+      mode=M_VSCROLL|M_REPEAT
+    endc
+    add hcomppad[i] text="-- None --"
+    for j=0,j<nnamed,j++ do
+      add hcomppad[i] text=named[j].name
+    enddo
+  enddo
+  redrawbtn=1
+  draw show
+  hok=control BUTTON
+    window=hwizard
+    position=210,317,62,24
+    help="确认设置"
+    text="确定"
+    font=MEDIUMFONT
+  endc
+  // Start movement to the first specified point.
+  Movecamera(search[searchpad].x,search[searchpad].y,search[searchpad].side)
+  wizardstep=WIZ_PAD
+end
+
+// Allows to enter job name and number of steps.
+function int Stepswizard()
+  int i
+  Message("")
+  Emptywizard()
+  if nstepx==0 nstepx=1
+  if nstepy==0 nstepy=1
+  draw window=hwizard font=INFOFONT color=BLACK
+  draw at 10,39 text="Job name:"
+  draw at 10,74 text="Steps in X:"
+  draw at 10,109 text="Steps in Y:"
+  hname=control EDIT
+    window=hwizard
+    position=90,18,180,26
+    help="在此处输入任务名称"
+    text=pcbname
+    color=BLACK
+    bkcolor=WHITE
+    mode=M_BORDER
+    font=MEDIUMFONT
+  endc
+  hstepsx=control COMBOLIST
+    window=hwizard
+    position=90,53,80,254
+    help="在X中输入步数"
+    color=BLACK
+    bkcolor=WHITE
+    mode=M_VSCROLL
+    font=MEDIUMFONT
+  endc
+  for i=1,i<=MAXSTEPX,i++ do
+    add hstepsx text=format("%i",i)
+  enddo
+  change hstepsx select=nstepx-1
+  hstepsy=control COMBOLIST
+    window=hwizard
+    position=90,88,80,254
+    help="在Y中输入步数"
+    color=BLACK
+    bkcolor=WHITE
+    mode=M_VSCROLL
+    font=MEDIUMFONT
+  endc
+  for i=1,i<=MAXSTEPY,i++ do
+    add hstepsy text=format("%i",i)
+  enddo
+  change hstepsy select=nstepy-1
+  hallowshy=control CHECKBOX
+    window=hwizard
+    position=10,128,240,24
+    text="Allow S3 shuttle movements"
+    help="允许架板框Y移动"
+    font=MEDIUMFONT
+    mode=(allowshy?M_CHECKED:0)
+  endc
+  draw at 10,275 wrap=260
+  draw text="Note: steps must be 100% identical, rotations are not allowed. "
+  draw text="If there are close normal and rotated panels, combine them into "
+  draw text="the one bigger panel."
+  draw show
+  hok=control BUTTON
+    window=hwizard
+    position=200,317,72,24
+    help="确认设置"
+    text="确定"
+    font=MEDIUMFONT
+  endc
+  wizardstep=WIZ_STEPS
+end
+
+// Allows to determine the panel X step.
+function int Stepsizexwizard()
+  if nstepx<=1 return
+  Memcpy(search,scanstepx,Sizeof(search))
+  searchpad=0
+  Searchwizard(2,0,0)
+  Overlay(1,0,-1,0.0,0.0)
+  draw window=hwizard font=INFOFONT color=BLACK
+  draw at 10,240 wrap=260
+  draw text="To determine the horizontal step size, please scan identical "
+  draw text="pads on the leftmost and on the rightmost panel, as shown on the "
+  draw text="picture below. The order of pads and Y position are unimportant. "
+  draw text="Press OK when ready."
+  draw show
+  wizardstep=wizardstep|WIZ_XSTEP
+end
+
+// Allows to determine the panel Y step.
+function int Stepsizeywizard()
+  if nstepy<=1 return
+  Memcpy(search,scanstepy,Sizeof(search))
+  searchpad=0
+  Searchwizard(2,0,0)
+  Overlay(1,0,-1,0.0,0.0)
+  draw window=hwizard font=INFOFONT color=BLACK
+  draw at 10,240 wrap=260
+  draw text="To determine the vertical step size, please scan identical "
+  draw text="pads on the topmost and on the bottommost panel, as shown on the "
+  draw text="picture below. The order of pads and X position are unimportant. "
+  draw text="Press OK when ready."
+  draw show
+  wizardstep=wizardstep|WIZ_YSTEP
+end
+
+// Allows to set fiducials for optical PCB alignment.
+function int Fiducialswizard()
+  Memcpy(search,fiducial,Sizeof(search))
+  searchpad=0
+  Searchwizard(2,0,1)
+  Overlay(1,0,fiducial[searchpad].fidtype,                                     \
+    fiducial[searchpad].a,fiducial[searchpad].b)
+  draw window=hwizard font=INFOFONT color=BLACK
+  hscanman=control CHECKBOX
+    window=hwizard
+    position=110,155,160,22
+    name="手动扫描"
+    help="手动扫描此基准点"
+    font=MEDIUMFONT
+    mode=(search[searchpad].scanman?M_CHECKED:0)
+  endc
+  draw at 10,201 text="Fiducial type"
+  hfidtype=control COMBOLIST
+    window=hwizard
+    position=110,180,160,200
+    help="基准点类型"
+    font=MEDIUMFONT
+  endc
+  add hfidtype text="White circle"
+  add hfidtype text="White rectangle"
+  add hfidtype text="White cross"
+  add hfidtype text="Black circle"
+  add hfidtype text="Black rectangle"
+  add hfidtype text="Black cross"
+  if search[searchpad].fidtype==SYNT_CIRCLE &&                                 \
+    search[searchpad].fidcolor==WHITEONBLACK then
+    change hfidtype select=0
+  else if search[searchpad].fidtype==SYNT_RECT &&                              \
+    search[searchpad].fidcolor==WHITEONBLACK then
+    change hfidtype select=1
+  else if search[searchpad].fidtype==SYNT_CROSS &&                             \
+    search[searchpad].fidcolor==WHITEONBLACK then
+    change hfidtype select=2
+  else if search[searchpad].fidtype==SYNT_CIRCLE &&                            \
+    search[searchpad].fidcolor==BLACKONWHITE then
+    change hfidtype select=3
+  else if search[searchpad].fidtype==SYNT_RECT &&                              \
+    search[searchpad].fidcolor==BLACKONWHITE then
+    change hfidtype select=4
+  else if search[searchpad].fidtype==SYNT_CROSS &&                             \
+    search[searchpad].fidcolor==BLACKONWHITE then
+    change hfidtype select=5
+  else
+    change hfidtype select=0
+  endif
+  draw at 10,235 text="Fiducial size A"
+  hfidsizea=control HSCROLL
+    window=hwizard
+    position=110,216,160,22
+    help="基准大小A，像素"
+    limits=0,(($LAY.config & LC_TYPEMASK)==LC_S3?1024:512)
+  endc
+  change hfidsizea select=fiducial[searchpad].a
+  draw at 10,262 text="Fiducial size B"
+  hfidsizeb=control HSCROLL
+    window=hwizard
+    position=110,243,160,22
+    help="基准大小B，像素"
+    limits=0,(($LAY.config & LC_TYPEMASK)==LC_S3?1024:512)
+  endc
+  change hfidsizeb select=fiducial[searchpad].b
+  draw at 10,295 wrap=260
+  draw text="Select two pads that will be used as fiducials. They must "
+  draw text="lie as far away from each other as possible."
+  draw show
+  wizardstep=wizardstep|WIZ_FID
+end
+
+// Assigns names to selected points.
+function int Defpadwizard()
+  int i
+  Searchwizard(1,0,0)
+  Overlay(1,0,-1,0,0)
+  draw window=hwizard font=INFOFONT color=BLACK
+  draw at 10,214 text="Pad name:"
+  hpadname=control COMBOEDIT
+    window=hwizard
+    position=85,194,130,500
+    help="新组件的名称"
+    bkcolor=WHITE
+    font=MEDIUMFONT
+    mode=M_BORDER|M_VSCROLL|M_REPEAT
+  endc
+  for i=0,i<nnamed,i++ do
+    add hpadname text=named[i].name
+  enddo
+  haddpad=control BUTTON
+    window=hwizard
+    position=223,194,44,26
+    name="添加"
+    help="按此按钮可添加新焊盘或用相同名称替换现有焊盘"
+    font=MEDIUMFONT
+  endc
+  hfollowpad=control BUTTON
+    window=hwizard
+    position=85,230,89,26
+    name="跟随"
+    help="按下可删除具有指定名称的焊盘"
+    font=MEDIUMFONT
+  endc
+  hdelpad=control BUTTON
+    window=hwizard
+    position=179,230,89,26
+    name="删除"
+    help="双击可删除具有指定名称的焊盘"
+    font=MEDIUMFONT
+    mode=M_DBLCLICK
+  endc
+  hreadles=control BUTTON
+    window=hwizard
+    position=10,317,180,24
+    name="读取LES文件"
+    help="从LES读取坐标，丢弃所有实际数据!"
+    font=MEDIUMFONT
+    mode=M_DBLCLICK
+  endc
+  draw show
+  i=Getnearestnamedpad(search[0].x,search[0].y,search[0].side)
+  if i>=0 change hpadname text=named[i].name
+  Strcpy(oldpad,"^^^^^")
+  wizardstep=wizardstep|WIZ_DEFPAD
+end
+
+// Checks whether currently processed component is valid. Returns 1 if it is
+// valid and 0 otherwise.
+function int Iscomponentvalid()
+  if comp[selcomp].type==CT_FW &&                                              \
+    (comp[selcomp].pad2[0]=='\0' || comp[selcomp].pad3[0]=='\0')               \
+    return 0
+  if comp[selcomp].type==CT_NONE ||                                            \
+    comp[selcomp].vmin>=comp[selcomp].vmax ||                                  \
+    comp[selcomp].pad0[0]=='\0' || comp[selcomp].pad1[0]=='\0' ||              \
+    (search[0].x==0.0 && search[0].y==0.0) ||                                  \
+    (search[1].x==0.0 && search[1].y==0.0) ||                                  \
+    (search[0].x==search[1].x && search[0].y==search[1].y)                     \
+    return 0
+  if comp[selcomp].pad2[0]=='\0'                                               \
+    return 1
+  if (search[2].x==0.0 && search[2].y==0.0) ||                                 \
+    (search[0].x==search[2].x && search[0].y==search[2].y) ||                  \
+    (search[1].x==search[2].x && search[1].y==search[2].y)                     \
+    return 0
+  if comp[selcomp].pad3[0]=='\0'                                               \
+    return 1
+  if (search[3].x==0.0 && search[3].y==0.0) ||                                 \
+    (search[0].x==search[3].x && search[0].y==search[3].y) ||                  \
+    (search[1].x==search[3].x && search[1].y==search[3].y) ||                  \
+    (search[2].x==search[3].x && search[2].y==search[3].y)                     \
+    return 0
+  return 1
+end
+
+// Service function of components wizard, sets data of the actually selected
+// component to its controls.
+function int Setcomponentdata()
+  int i,index,newcomp
+  float factor
+  if selcomp>=ncomp selcomp=ncomp
+  if selcomp>=NCOMP return
+  change hcomptype select=comp[selcomp].type
+  change hcompname text=comp[selcomp].name
+  change hcompid text=format(" %i",selcomp+1)
+  clear hunits
+  clear hitest
+  newcomp=(comp[selcomp].vmin==0.0 && comp[selcomp].vmax==0.0)
+  switch comp[selcomp].type
+  case CT_E,CT_RCOM:                   // Exact resistance
+    add hunits text="mOhm"
+    add hunits text="Ohm"
+    add hunits text="kOhm"
+    add hunits text="MOhm "
+    if newcomp then
+      index=1; factor=1.000
+    else if comp[selcomp].vmax<1.0 then
+      index=0; factor=0.001
+    else if comp[selcomp].vmax<1000.0 then
+      index=1; factor=1.000
+    else if comp[selcomp].vmax<1.0e6 then
+      index=2; factor=1000.0
+    else
+      index=3; factor=1.0e6
+    endif
+    change hcompopt name="极限"
+    change hcompopt help="更改测量的极性"
+    change hcompopt mode=(comp[selcomp].options & COPT_POLARITY?M_CHECKED:0)
+    enable hcompopt
+    enable hutest
+    change hutest select=(comp[selcomp].options>>4) & 0x0F
+    change hititle text="Itest"
+    enable hitest
+    change hitest help="最大允许测试电流"
+    for i=0,i<32,i++ do
+      if i==0 then
+        add hitest text="Default"
+      else if itest[i]<1.00 then
+        add hitest text=format("%g uA",itest[i]*1000.0)
+      else
+        add hitest text=format("%g mA",itest[i])
+      endif
+    enddo
+    change hitest select=(comp[selcomp].options>>8) & 0x1F
+    enable hdelay
+    change hdelay select=(comp[selcomp].options>>16) & 0x0F
+  case CT_R:                           // Fast resistance
+    add hunits text="mOhm"
+    add hunits text="Ohm"
+    add hunits text="kOhm"
+    add hunits text="MOhm "
+    if newcomp then
+      index=1; factor=1.000
+    else if comp[selcomp].vmax<1.0 then
+      index=0; factor=0.001
+    else if comp[selcomp].vmax<1000.0 then
+      index=1; factor=1.000
+    else if comp[selcomp].vmax<1.0e6 then
+      index=2; factor=1000.0
+    else
+      index=3; factor=1.0e6
+    endif
+    change hcompopt name=""
+    change hcompopt help=" "
+    change hcompopt mode=0
+    disable hcompopt
+    enable hutest
+    change hutest select=(comp[selcomp].options>>4) & 0xF
+    change hititle text="Itest"
+    enable hitest
+    change hitest help="最大允许测试电流"
+    for i=0,i<32,i++ do
+      if i==0 then
+        add hitest text="Default"
+      else if itest[i]<1.00 then
+        add hitest text=format("%g uA",itest[i]*1000.0)
+      else
+        add hitest text=format("%g mA",itest[i])
+      endif
+    enddo
+    change hitest select=(comp[selcomp].options>>8) & 0x1F
+    enable hdelay
+    change hdelay select=(comp[selcomp].options>>16) & 0x0F
+  case CT_C:                           // Capacitor
+    add hunits text="fF"
+    add hunits text="pF"
+    add hunits text="nF"
+    add hunits text="uF"
+    if newcomp then
+      index=1; factor=1.000
+    else if comp[selcomp].vmax<1.0 then
+      index=0; factor=0.001
+    else if comp[selcomp].vmax<1000.0 then
+      index=1; factor=1.000
+    else if comp[selcomp].vmax<1.0e6 then
+      index=2; factor=1000.0
+    else
+      index=3; factor=1.0e6
+    endif
+    change hcompopt name="无短路"
+    change hcompopt help="跳过C期间的短测试"
+    change hcompopt mode=(comp[selcomp].options & COPT_NOSHORT?M_CHECKED:0)
+    enable hcompopt
+    enable hutest
+    change hutest select=(comp[selcomp].options>>4) & 0xF
+    change hititle text="Freq"
+    enable hitest
+    change hitest help="测试频率"
+    for i=0,i<8,i++ do
+      if i==0 then
+        add hitest text="Default"
+      else
+        add hitest text=format("%g kHz",ftest[i]/1000.0)
+      endif
+    enddo
+    change hitest select=(comp[selcomp].options>>13) & 0x7
+    disable hdelay
+    change hdelay select=0
+  case CT_LREF:                        // Inductance reference
+    index=1; factor=1.000
+    change hcompopt name=""
+    change hcompopt help=" "
+    change hcompopt mode=0
+    disable hcompopt
+    enable hutest
+    change hutest select=(comp[selcomp].options>>4) & 0xF
+    change hititle text="Freq"
+    enable hitest
+    change hitest help="测试频率"
+    for i=0,i<8,i++ do
+      if i==0 then
+        add hitest text="Default"
+      else
+        add hitest text=format("%g kHz",ftest[i]/1000.0)
+      endif
+    enddo
+    change hitest select=(comp[selcomp].options>>13) & 0x7
+    enable hdelay
+    change hdelay select=(comp[selcomp].options>>16) & 0x0F
+  case CT_LMEAS:                       // Inductance measurement
+    add hunits text="nH"
+    add hunits text="uH"
+    add hunits text="mH"
+    add hunits text="H"
+    if newcomp then
+      index=1; factor=1.000
+    else if comp[selcomp].vmax<1.0 then
+      index=0; factor=0.001
+    else if comp[selcomp].vmax<1000.0 then
+      index=1; factor=1.000
+    else if comp[selcomp].vmax<1.0e6 then
+      index=2; factor=1000.0
+    else
+      index=3; factor=1.0e6
+    endif
+    change hcompopt name=""
+    change hcompopt help=" "
+    change hcompopt mode=0
+    disable hcompopt
+    enable hutest
+    change hutest select=(comp[selcomp].options>>4) & 0xF
+    change hititle text="Freq"
+    enable hitest
+    change hitest help="测试频率"
+    for i=0,i<8,i++ do
+      if i==0 then
+        add hitest text="Default"
+      else
+        add hitest text=format("%g kHz",ftest[i]/1000.0)
+      endif
+    enddo
+    change hitest select=(comp[selcomp].options>>13) & 0x7
+    enable hdelay
+    change hdelay select=(comp[selcomp].options>>16) & 0x0F
+  case CT_L:                           // Simple inductance
+    add hunits text="nH"
+    add hunits text="uH"
+    add hunits text="mH"
+    add hunits text="H"
+    if newcomp then
+      index=1; factor=1.000
+    else if comp[selcomp].vmax<1.0 then
+      index=0; factor=0.001
+    else if comp[selcomp].vmax<1000.0 then
+      index=1; factor=1.000
+    else if comp[selcomp].vmax<1.0e6 then
+      index=2; factor=1000.0
+    else
+      index=3; factor=1.0e6
+    endif
+    change hcompopt name=""
+    change hcompopt help=" "
+    change hcompopt mode=0
+    disable hcompopt
+    change hutest select=0
+    disable hutest
+    change hititle text=""
+    change hitest select=0
+    add hitest text="Default"
+    disable hitest
+    disable hdelay
+    change hdelay select=0
+  case CT_UI,CT_D:                     // U-I, diode
+    add hunits text="V"
+    index=0; factor=1.000
+    change hcompopt name="极限"
+    change hcompopt help="更改测量的极性"
+    change hcompopt mode=(comp[selcomp].options & COPT_POLARITY?M_CHECKED:0)
+    enable hcompopt
+    enable hutest
+    change hutest select=(comp[selcomp].options>>4) & 0xF
+    change hititle text="Itest"
+    enable hitest
+    change hitest help="测试电流，设置极性否定"
+    for i=0,i<32,i++ do
+      if i==0 then
+        add hitest text="Default"
+      else if itest[i]<1.00 then
+        add hitest text=format("%g uA",itest[i]*1000.0)
+      else
+        add hitest text=format("%g mA",itest[i])
+      endif
+    enddo
+    change hitest select=(comp[selcomp].options>>8) & 0x1F
+    enable hdelay
+    change hdelay select=(comp[selcomp].options>>16) & 0x0F
+  case CT_V:                           // Varistor
+    add hunits text="V"
+    index=0; factor=1.000
+    change hcompopt name=""
+    change hcompopt help=" "
+    change hcompopt mode=0
+    disable hcompopt
+    enable hutest
+    change hutest select=(comp[selcomp].options>>4) & 0xF
+    change hititle text="Itest"
+    enable hitest
+    change hitest help="测试电流"
+    for i=0,i<32,i++ do
+      if i==0 then
+        add hitest text="Default"
+      else if itest[i]<1.00 then
+        add hitest text=format("%g uA",itest[i]*1000.0)
+      else
+        add hitest text=format("%g mA",itest[i])
+      endif
+    enddo
+    change hitest select=(comp[selcomp].options>>8) & 0x1F
+    enable hdelay
+    change hdelay select=(comp[selcomp].options>>16) & 0x0F
+  case CT_HV:                          // High voltage
+    add hunits text="mOhm"
+    add hunits text="Ohm"
+    add hunits text="kOhm"
+    add hunits text="MOhm "
+    if newcomp then
+      index=3; factor=1000.0
+    else if comp[selcomp].vmax<1.0 then
+      index=0; factor=0.001
+    else if comp[selcomp].vmax<1000.0 then
+      index=1; factor=1.000
+    else if comp[selcomp].vmax<1.0e6 then
+      index=2; factor=1000.0
+    else
+      index=3; factor=1.0e6
+    endif
+    change hcompopt name=""
+    change hcompopt help=" "
+    change hcompopt mode=0
+    disable hcompopt
+    change hutest select=0
+    disable hutest
+    change hititle text=""
+    change hitest select=0
+    add hitest text="Default"
+    disable hitest
+    disable hdelay
+    change hdelay select=0
+  case CT_FW:                          // Four-wire resistance
+    add hunits text="mOhm"
+    add hunits text="Ohm"
+    add hunits text="kOhm"
+    add hunits text="MOhm "
+    if newcomp then
+      index=1; factor=1.000
+    else if comp[selcomp].vmax<1.0 then
+      index=0; factor=0.001
+    else if comp[selcomp].vmax<1000.0 then
+      index=1; factor=1.000
+    else if comp[selcomp].vmax<1.0e6 then
+      index=2; factor=1000.0
+    else
+      index=3; factor=1.0e6
+    endif
+    change hcompopt name="长"
+    change hcompopt help="延长测量时间"
+    change hcompopt mode=(comp[selcomp].options & COPT_LONG?M_CHECKED:0)
+    enable hcompopt
+    enable hutest
+    change hutest select=(comp[selcomp].options>>4) & 0x0F
+    change hititle text="Itest"
+    enable hitest
+    change hitest help="最大允许测试电流"
+    for i=0,i<32,i++ do
+      if i==0 then
+        add hitest text="Default"
+      else if itest[i]<1.00 then
+        add hitest text=format("%g uA",itest[i]*1000.0)
+      else
+        add hitest text=format("%g mA",itest[i])
+      endif
+    enddo
+    change hitest select=(comp[selcomp].options>>8) & 0x1F
+    enable hdelay
+    change hdelay select=(comp[selcomp].options>>16) & 0x0F
+  default:
+    index=0; factor=1.000
+    change hcompopt name=""
+    change hcompopt help=" "
+    change hcompopt mode=0
+    disable hcompopt
+    change hutest select=0
+    disable hutest
+    change hititle text=""
+    change hitest select=0
+    disable hitest
+    disable hdelay
+    change hdelay select=0
+  endsw
+  if comp[selcomp].type==CT_LREF then
+    change hunits bkcolor=LIGHTGRAY
+    disable hunits
+    change hvalmin text=""
+    change hvalmin bkcolor=LIGHTGRAY
+    disable hvalmin
+    change hvalmax text=""
+    change hvalmax bkcolor=LIGHTGRAY
+    disable hvalmax
+  else
+    enable hunits
+    change hunits bkcolor=WHITE
+    change hunits select=index
+    enable hvalmin
+    change hvalmin bkcolor=WHITE
+    change hvalmin text=format("%.4g",comp[selcomp].vmin/factor)
+    enable hvalmax
+    change hvalmax bkcolor=WHITE
+    change hvalmax text=format("%.4g",comp[selcomp].vmax/factor)
+  endif
+  if selcomp>0 then
+    enable hprev
+  else
+    disable hprev
+  endif
+  if Iscomponentvalid() then
+    enable hdel
+    enable hok
+    if selcomp>=ncomp-1 && selcomp<NCOMP-1 then
+      enable hdupl
+    else
+      disable hdupl
+    endif
+  else
+    disable hdel
+    disable hok
+    disable hdupl
+  endif
+end
+
+// Allows to add component for test.
+function int Componentswizard()
+  int i,side
+  float x,y
+  Memset(search,0,Sizeof(search))
+  Padbyname(&x,&y,&side,comp[selcomp].pad0)
+  search[0].x=x; search[0].y=y; search[0].side=side
+  Padbyname(&x,&y,&side,comp[selcomp].pad1)
+  search[1].x=x; search[1].y=y; search[1].side=side
+  Padbyname(&x,&y,&side,comp[selcomp].pad2)
+  search[2].x=x; search[2].y=y; search[2].side=side
+  Padbyname(&x,&y,&side,comp[selcomp].pad3)
+  search[3].x=x; search[3].y=y; search[3].side=side
+  searchpad=0
+  Padwizard()
+  Overlay(1,0,-1,0.0,0.0)
+  draw window=hwizard mode=M_CENTERED font=MEDIUMFONT
+  draw at 140,125 text="Measurement:"
+  draw font=INFOFONT color=BLACK mode=M_LEFT
+  draw at 10,154 text="Comp"
+  hcomptype=control COMBOLIST
+    window=hwizard
+    position=50,133,115,300
+    help="组件类型"
+    font=MEDIUMFONT
+    mode=M_VSCROLL
+  endc
+  add hcomptype text="-- New --"
+  add hcomptype text="Exact R"         // CT_E
+  add hcomptype text="Fast R"          // CT_R
+  add hcomptype text="Rcommon"         // CT_RCOM
+  add hcomptype text="Capacity"        // CT_C
+  add hcomptype text="L ref"           // CT_LREF
+  add hcomptype text="L meas"          // CT_LMEAS
+  add hcomptype text="Simple L"        // CT_L
+  add hcomptype text="U-I"             // CT_UI
+  add hcomptype text="Diode"           // CT_D
+  add hcomptype text="Varistor"        // CT_V
+  add hcomptype text="HV"              // CT_HV
+  add hcomptype text="4-wire"          // CT_FW
+  draw at 185,154 text="No.="
+  hcompid=control TEXT
+    window=hwizard
+    position=218,134,54,24
+    help="编辑组件的索引"
+    font=MEDIUMFONT
+    bkcolor=WHITE
+    mode=M_BORDER
+  endc
+  draw at 10,184 text="Name"
+  hcompname=control EDIT
+    window=hwizard
+    position=50,165,115,24
+    help="在此处输入组件的名称(可选)"
+    font=MEDIUMFONT
+    bkcolor=WHITE
+  endc
+  draw at 10,212 text="Min."
+  hvalmin=control EDIT
+    window=hwizard
+    position=50,193,90,24
+    help="组件的最小可接受值"
+    font=MEDIUMFONT
+    bkcolor=WHITE
+  endc
+  hunits=control COMBOLIST
+    window=hwizard
+    position=155,193,80,200
+    help="测量单位"
+    font=MEDIUMFONT
+  endc
+  draw at 10,240 text="Max."
+  hvalmax=control EDIT
+    window=hwizard
+    position=50,221,90,24
+    help="组件的最大可接受值"
+    font=MEDIUMFONT
+    bkcolor=WHITE
+  endc
+  hcompopt=control CHECKBOX
+    window=hwizard
+    position=155,222,97,24
+    name=""
+    help=" "
+    font=MEDIUMFONT
+  endc
+  draw at 10,270 text="Utest"
+  hutest=control COMBOLIST
+    window=hwizard
+    position=50,250,90,360
+    help="测试电压"
+    font=MEDIUMFONT
+    mode=M_VSCROLL
+  endc
+  for i=0,i<16,i++ do
+    if i==0 then
+      add hutest text="Default"
+    else
+      add hutest text=format("%g V",utest[i])
+    endif
+  enddo
+  hititle=control TEXT
+    window=hwizard
+    position=148,254,34,16
+    text=""
+    help=" "
+    font=INFOFONT
+  endc
+  hitest=control COMBOLIST
+    window=hwizard
+    position=182,250,90,360
+    help=" "
+    font=MEDIUMFONT
+    mode=M_VSCROLL
+  endc
+  draw at 10,302 text="Delay"
+  hdelay=control COMBOLIST
+    window=hwizard
+    position=50,282,90,360
+    help="接触后的延迟，毫秒"
+    font=MEDIUMFONT
+    mode=M_VSCROLL
+  endc
+  for i=0,i<16,i++ do
+    add hdelay text=format("%i ms",dtime[i])
+  enddo
+  hprev=control BUTTON
+    window=hwizard
+    position=10,317,52,24
+    help="转到上一个组件"
+    text="Prev"
+    font=MEDIUMFONT
+  endc
+  hdupl=control BUTTON
+    window=hwizard
+    position=67,317,82,24
+    text="Duplicate"
+    help="将此组件复制到下一个组件并转到下一个组件"
+    font=MEDIUMFONT
+  endc
+  hdel=control BUTTON
+    window=hwizard
+    position=154,317,51,24
+    text="Del"
+    help="双击可从列表中删除此组件"
+    font=MEDIUMFONT
+    mode=M_DBLCLICK
+  endc
+  Setcomponentdata()
+  change hok text="Next"
+  change hok help="转到下一个组件"
+  draw show
+  wizardstep=wizardstep|WIZ_COMP
+end
+
+// Allows to set options for test.
+function int Optionswizard()
+  int i
+  Emptywizard()
+  draw window=hwizard font=MEDIUMFONT color=BLACK
+  draw at 5,28 text="High voltage:"
+  draw font=INFOFONT color=BLACK
+  draw at 40,60 text="Voltage:"
+  hhvvolt=control COMBOLIST
+    window=hwizard
+    position=120,40,80,280
+    help="击测(Z速度)，mm/s"
+    font=MEDIUMFONT
+    mode=M_VSCROLL
+  endc
+  draw at 210,60 text="volt"
+  for i=25,i<=1000,i=i+5 do
+    add hhvvolt text=format("%i",i)
+  enddo
+  change hhvvolt select=(hvvolt-25)/5
+  draw at 40,90 text="Duration:"
+  hhvtime=control COMBOLIST
+    window=hwizard
+    position=120,70,80,280
+    help="全电压下高压测量的持续时间,ms"
+    font=MEDIUMFONT
+    mode=M_VSCROLL
+  endc
+  draw at 210,90 text="ms"
+  for i=1,i<=100,i++ do
+    add hhvtime text=format("%i",i)
+  enddo
+  change hhvtime select=hvtime-1
+  hhvfix=control CHECKBOX
+    window=hwizard
+    position=40,106,150,24
+    text="Fix duration"
+    help="固定高压测量持续时间"
+    font=MEDIUMFONT
+    mode=(hvfix?M_CHECKED:0)
+  endc
+  hok=control BUTTON
+    window=hwizard
+    position=210,317,62,24
+    help="确认设置"
+    text="确定"
+    font=MEDIUMFONT
+  endc
+  draw show
+  wizardstep=wizardstep|WIZ_OPTIONS
+end
+
+// Allows to add reference for test.
+function int Referencewizard()
+  Memcpy(search[0],reference,Sizeof(reference))
+  searchpad=0
+  Searchwizard(1,0,1)
+  Overlay(1,0,-1,0.0,0.0)
+  hnoref=control CHECKBOX
+    window=hwizard
+    position=10,168,180,22
+    text="No reference"
+    help="不使用电容检查"
+    font=MEDIUMFONT
+    mode=(noref?M_CHECKED:0)
+  endc
+  hfixedref=control CHECKBOX
+    window=hwizard
+    position=10,189,180,22
+    text="Fixed reference"
+    help="参考测试头始终保持在指定点上"
+    font=MEDIUMFONT
+    mode=(fixedref?M_CHECKED:0)
+  endc
+  if noref disable hfixedref
+  draw window=hwizard font=INFOFONT color=BLACK
+  draw at 10,250 wrap=260
+  draw text="Locate reference pad used as antenna to verify contacts. If "
+  draw text="antenna interferes with the measurement, it will be ignored."
+  draw show
+  wizardstep=wizardstep|WIZ_REF
+end
+
+// Allows to set stroke for test.
+function int Strokewizard()
+  int i
+  Emptywizard()
+  draw window=hwizard font=MEDIUMFONT color=BLACK
+  draw at 45,28 text="Stroke parameters"
+  draw font=INFOFONT color=BLACK
+  draw at 10,70 text="Stroke:"
+  hv=control COMBOLIST
+    window=hwizard
+    position=90,50,80,280
+    help="击测(Z速度)，mm/s"
+    font=MEDIUMFONT
+    mode=M_VSCROLL
+  endc
+  draw at 180,70 text="mm/s"
+  for i=5,i<=150,i=i+5 do
+    add hv text=format("%i",i)
+  enddo
+  change hv select=v/5-1
+  draw at 10,100 text="Pressure:"
+  hp=control COMBOLIST
+    window=hwizard
+    position=90,80,80,280
+    help="压力，内部单位"
+    font=MEDIUMFONT
+    mode=M_VSCROLL
+  endc
+  draw at 180,100 text="units"
+  for i=5,i<=150,i=i+5 do
+    add hp text=format("%i",i)
+  enddo
+  change hp select=p/5-1
+  draw at 10,130 text="Height:"
+  hh=control COMBOLIST
+    window=hwizard
+    position=90,110,80,280
+    help="压力，克"
+    font=MEDIUMFONT
+    mode=M_VSCROLL
+  endc
+  draw at 180,130 text="mm"
+  for i=1,i<=20,i++ do
+    add hh text=format("%i",i)
+  enddo
+  change hh select=h-1
+  hok=control BUTTON
+    window=hwizard
+    position=210,317,62,24
+    help="确认设置"
+    text="确定"
+    font=MEDIUMFONT
+  endc
+  draw show
+  wizardstep=wizardstep|WIZ_STROKE
+end
+
+// Allows to set offset of the test board.
+function int Offsetwizard()
+  Memcpy(search,fiducial,Sizeof(fiducial))
+  search[0].x=search[0].x+offsetx
+  search[0].y=search[0].y+offsety
+  search[1].x=search[1].x+offsetx
+  search[1].y=search[1].y+offsety
+  searchpad=0
+  Searchwizard(2,0,0)
+  Overlay(1,0,-1,0.0,0.0)
+  draw window=hwizard font=INFOFONT color=BLACK
+  draw at 10,240 wrap=260
+  draw text="Locate new position of the first fiducial. To update task "
+  draw text="permanently, locate both fiducials and doubleclick button below."
+  draw show
+  hzero=control BUTTON
+    window=hwizard
+    position=10,317,40,24
+    name="置零"
+    help="清除偏移量"
+  endc
+  hupdate=control BUTTON
+    window=hwizard
+    position=60,317,110,24
+    name="更新任务"
+    help="双击可重新计算任务中所有焊盘的位置"
+    mode=M_DBLCLICK
+  endc
+  updenabled=-1
+  wizardstep=wizardstep|WIZ_OFFSET
+end
+
+// Allows to run test.
+function int Testwizard()
+  int i,j,err
+  float x0,y0,x1,y1
+  char errmsg[256]
+  Emptywizard()
+  // Prepare for test.
+  for j=0,j<MAXSTEPY,j++ do
+    for i=0,i<MAXSTEPX,i++ do
+      test[j][i].nmeas=0
+      test[j][i].nerr=0
+    enddo
+  enddo
+  trackx=-1
+  tracky=-1
+  // Create job.
+  err=Generatetask(errmsg)
+  if err!=0 then
+    Error("%s",errmsg)
+    return
+  endif
+  Overlay(1,0,-1,0.0,0.0)
+  hprotocol=control LIST
+    window=hwizard
+    position=5,5,268,260
+    help="测试协议"
+    size=262144
+    font=TERMINALFONT
+    color=BLACK
+    bkcolor=WHITE
+    mode=M_VSCROLL
+  endc
+  hok=control BUTTON
+    window=hwizard
+    position=210,317,62,24
+    text="停止"
+    help="停止测试"
+    font=MEDIUMFONT
+  endc
+  add hprotocol text="Test is running..."
+  Convert(&x0,&y0,fiducial[0].x,fiducial[0].y)
+  Convert(&x1,&y1,fiducial[1].x,fiducial[1].y)
+  change hprotocol color=BLACK
+  change hprotocol bkcolor=WHITE
+  add hprotocol text="Board scanned"
+  change hprotocol color=DARKGRAY
+  add hprotocol text=format("  Offset 1: (%.3f,%.3f) mm",                      \
+    x0-fiducial[0].x,y0-fiducial[0].y)
+  add hprotocol text=format("  Offset 2: (%.3f,%.3f) mm",                      \
+    x1-fiducial[1].x,y1-fiducial[1].y)
+  if Preparefortest()<0 then
+    Emptywizard()
+    wizardstep=WIZ_EMPTY
+    return
+  endif
+  loop=0
+  if nloop>1 then
+    change hprotocol color=BLACK
+    add hprotocol text=format("Loop %i",loop+1)
+  endif
+  starttime=Time()
+  showtime=starttime
+  wizardstep=WIZ_TEST
+end
+
+// Asks for sample ID.
+function int Prewizard()
+  int i
+  Emptywizard()
+  draw window=hwizard font=MEDIUMFONT color=BLACK
+  draw at 20,48 text="Enter sample ID:"
+  hsampleid=control EDIT
+    window=hwizard
+    position=20,60,233,24
+    text=sampleid
+    help="样本ID"
+    font=MEDIUMFONT
+    mode=M_BORDER
+  endc
+  draw font=INFOFONT color=BLACK
+  draw at 20,148 text="Number of test loops:"
+  nloop=1
+  hrepeat=control COMBOLIST
+    window=hwizard
+    position=160,126,70,500
+    help="选择完整测试循环数"
+    font=MEDIUMFONT
+    mode=M_VSCROLL|M_REPEAT
+  endc
+  for i=1,i<=100,i++ do
+    add hrepeat text=format("%i",i)
+  enddo
+  change hrepeat select=nloop-1
+  draw at 10,228 wrap=270
+  draw text="Use left mouse button to exclude panels from the test, or "
+  draw text="press " font=MAINFONT text="Enable all panels " font=INFOFONT
+  draw text="to include all disabled panels."
+  hincall=control BUTTON
+    window=hwizard
+    position=10,317,150,24
+    text="Enable all panels"
+    help="将所有禁用的排版包括到测试中"
+    font=MEDIUMFONT
+  endc
+  hok=control BUTTON
+    window=hwizard
+    position=210,317,62,24
+    text="Test"
+    help="按下开始测试"
+    font=MEDIUMFONT
+  endc
+  draw show
+  wizardstep=WIZ_PRETEST
+  exclon=0
+  Preview(P_SELECT)
+end
+
+// Scans board.
+function int Scanwizard()
+  int err
+  char errmsg[256]
+  if fiducial[0].scanman==0 then
+    // Automatic scanning.
+    err=Scanboard(errmsg)
+    if err<0 then
+      Emptywizard()
+    else if err==2 then
+      change hprotocol color=LIGHTRED
+      change hprotocol bkcolor=WHITE
+      add hprotocol text="Unable to define fiducial(s)"
+    else if err==3 then
+      change hprotocol color=LIGHTRED
+      change hprotocol bkcolor=WHITE
+      add hprotocol text="Fiducial(s) not found!"
+    else if err==4 then
+      change hprotocol color=LIGHTRED
+      change hprotocol bkcolor=WHITE
+      add hprotocol text="Fiducial(s) not reachable!"
+    else if err!=0 then
+      change hprotocol color=LIGHTRED
+      change hprotocol bkcolor=WHITE
+      add hprotocol text="Failed to scan board!"
+    else
+      Testwizard()
+    endif
+    if err!=0 Error("%s",errmsg)
+  else
+    // Manual scanning.
+    Memcpy(search,fiducial,Sizeof(fiducial))
+    search[0].x=search[0].x+offsetx
+    search[0].y=search[0].y+offsety
+    search[1].x=search[1].x+offsetx
+    search[1].y=search[1].y+offsety
+    searchpad=0
+    Searchwizard(2,1,0)
+    okenabled=1
+    Overlay(1,0,search[searchpad].fidtype,                                     \
+      search[searchpad].a,search[searchpad].b)
+    draw window=hwizard font=MEDIUMFONT color=BLACK
+    draw mode=M_CENTERED at (MAINDX-VIDEODX-BUTTONDX-22)/2,193
+    draw text="Manual scanning"
+    draw mode=M_LEFT at 12,222 wrap=MAINDX-VIDEODX-BUTTONDX-27 font=TIMESFONT
+    draw text="Please find location of two pads that are selected as "
+    draw text="fiducials. Press " font=MAINFONT text="OK " font=TIMESFONT
+    draw text="when ready. Grayed " font=MAINFONT text="OK " font=TIMESFONT
+    draw text="button means that the distance between pads differs more "
+    draw text="than 3% from expected - maybe wrong pads?"
+    draw show
+    wizardstep=wizardstep|WIZ_MANUAL
+  endif
+end
+
+
+////////////////////////////////////////////////////////////////////////////////
+////////////////////////// WIZARD PROCESSING FUNCTION //////////////////////////
+
+// Reads coordinates from the LES file and position from view. Returns 0 if
+// file is read and -1 on error (old data is still valid).
+function int Readlesfile()
+  int i,j,x,y,sign,side,nstep,hasmatrix
+  float factor,xpad,ypad,temp,dx,dy
+  float a00,a01,a10,a11,b0,b1
+  char s[1024],name[32],step[32],viewpath[260]
+  char drv[4],dir[260],nam[260],ext[260]
+  handle f
+  Fnsplit(lespath,drv,dir,nam,ext)
+  Fnmerge(lespath,drv,dir,pcbname,".les")
+  if SYS.Browse(hmain,lespath,"Read Test Player task",0)==0 return -1
+  // Read view file.
+  a00=1.0; a01=0.0;a10=0.0; a11=1.0
+  b0=0.0; b1=0.0
+  Fnsplit(lespath,drv,dir,nam,ext)
+  Fnmerge(viewpath,drv,dir,nam,".vw")
+  f=Fopen(viewpath,"rt")
+  if f!=NULL then
+    hasmatrix=0
+    while 1 do
+      if Fscanf(f,"%s\n",s)<0 break
+      if Memcmp(s,":MATRIX ",8)==0 && hasmatrix==0 then
+        sscanf(s+8,"%f,%f,%f,%f",&a00,&a01,&a10,&a11)
+        hasmatrix=1
+      else if Memcmp(s,":PHYSORIGIN ",12)==0 then
+        sscanf(s+12,"%f,%f",&b0,&b1)
+        b0=b0*0.01
+        b1=b1*0.01
+        break
+      endif
+    enddo
+    Fclose(f)
+  endif
+  // Read and process LES file.
+  f=Fopen(lespath,"rt")
+  if f==NULL then
+    Error("Unable to open '%s'",lespath)
+    return -1
+  endif
+  Fscanf(f,"%s\n",s)
+  if Memcmp(s,"#ATFH:",6)!=0 then
+    Fclose(f)
+    Error("Not a .LES file: '%s'",lespath)
+    return -1
+  endif
+  // Read header.
+  factor=1.0/100.0
+  nstep=0
+  while 1 do
+    if Fscanf(f,"%s\n",s)<0 then
+      Fclose(f)
+      Error("Unexpected end of file: '%s'",lespath)
+      return -1
+    endif
+    if s[0]=='%' break
+    if Memcmp(s,"UNIT:MM:1000",12)==0 then
+      factor=1.0/1000.0
+    else if Memcmp(s,"UNIT:MM:100",11)==0 then
+      factor=1.0/100.0
+    else if Memcmp(s,"UNIT:INCH:10000",15)==0 then
+      factor=25.4/10000.0
+    else if Memcmp(s,"UNIT:",5)==0 then
+      Fclose(f)
+      Error("Unsupported scale: %s",s)
+      return -1
+    else if Memcmp(s,"STEP:",5)==0 && nstep==0 then
+      i=5
+      while Isdigit(s[i]) do i++; enddo
+      if s[i]!=':' continue            // Error in step
+      i++
+      while s[i]=='X' || s[i]=='Y' || s[i]=='D' || s[i]=='O' do
+        step[nstep]=s[i]; nstep++; i++
+      enddo
+      if nstep==0 continue             // Error in step
+      if step[nstep-1]=='O' nstep--
+      step[nstep]='\0'
+      if s[i]!=':' continue            // Error in step
+      x=0; i++
+      if s[i]=='-' then
+        sign=-1; i++
+      else
+        sign=1
+      endif
+      while Isdigit(s[i]) do
+        x=x*10+s[i]-'0'; i++
+      enddo
+      x=x*sign
+      if s[i]!=',' continue            // Error in step
+      y=0; i++
+      if s[i]=='-' then
+        sign=-1; i++
+      else
+        sign=1
+      endif
+      while Isdigit(s[i]) do
+        y=y*10+s[i]-'0'; i++
+      enddo
+      y=y*sign
+    endif
+  enddo
+  dx=x*factor
+  dy=y*factor
+  // Read pad coordinates.
+  nnamed=0
+  while 1 do
+    if Fscanf(f,"%s\n",s)<0 break
+    if s[0]!='I' continue              // Net ID?
+    if nnamed>=NNAMED then
+      Error("More than %i pads, rest skipped",NNAMED)
+      break
+    endif
+    name[0]='I'; i=1
+    while Isdigit(s[i]) do
+      name[i]=s[i]; i++
+    enddo
+    name[i]='\0'
+    if s[i]!='X' continue
+    x=0; i++
+    if s[i]=='-' then
+      sign=-1; i++
+    else
+      sign=1
+    endif
+    while Isdigit(s[i]) do
+      x=x*10+s[i]-'0'; i++
+    enddo
+    x=x*sign
+    if s[i]!='Y' continue
+    y=0; i++
+    if s[i]=='-' then
+      sign=-1; i++
+    else
+      sign=1
+    endif
+    while Isdigit(s[i]) do
+      y=y*10+s[i]-'0'; i++
+    enddo
+    y=y*sign
+    while s[i]!='\n' && s[i]!='\r' && s[i]!='\0' && s[i]!='V' do
+      i++
+    enddo
+    side=0
+    if s[i]=='V' then
+      if s[i+1]!='1' || Isdigit(s[i+2]) side=1
+    endif
+    // Apply coordinate transformations from LES file.
+    xpad=x*factor
+    ypad=y*factor
+    for j=0,j<nstep,j++ do
+      if step[j]=='X' then
+        ypad=-ypad
+      else if step[j]=='Y' then
+        xpad=-xpad
+      else if step[j]=='D' then
+        temp=xpad; xpad=ypad; ypad=-temp
+      endif
+    enddo
+    xpad=xpad+dx
+    ypad=ypad+dy
+    // Apply coordinate transformations from view file.
+    named[nnamed].x=xpad*a00+ypad*a01+b0
+    named[nnamed].y=xpad*a10+ypad*a11+b1
+    named[nnamed].side=side
+    Strcpy(named[nnamed].name,name)
+    nnamed++
+  enddo
+  Fclose(f)
+  return 0
+end
+
+function int Checkwizard()
+  int i,j,k,padchanged,padmoved,compchanged,preset,olddone
+  int x0,y0,x1,y1,mousex,mousey,buttons
+  float r0,r,step,xmin,ymin,xmax,ymax,xscale,yscale,zoom,x,y,dx,dy,dt
+  char s[256],padname[32]
+  struct t_comp dummy
+  struct t_named dammy
+  float steps[5] = { 0.001, 0.010, 0.100, 1.000, 10.00 }
+  if wizardstep & WIZ_SEARCH then
+    // Video search wizard. Note that this wizard is auxiliary and does not
+    // process the OK button.
+    step=steps[Status(hsearchstep)]
+    xmin=$LAY.leftlimit/1000.0
+    xmax=$LAY.rightlimit/1000.0
+    if $LAY.cameras!=0 then
+      xmin=xmin+$LAY.videodeadx/1000.0
+      xmax=xmax-$LAY.videodeadx/1000.0
+    endif
+    ymin=9.0e99
+    ymax=-9.0e99
+    for i=0,i<$LAY.nfing,i++ do
+      ymin=Min(ymin,$LAY.bottom[i]/1000.0)
+      ymax=Max(ymax,$LAY.top[i]/1000.0)
+    enddo
+    preset=-1
+    for i=0,i<3,i++ do
+      if hselpad[i]!=NULL && Pressed(hselpad[i]) && searchpad!=i then
+        preset=i
+        redrawbtn=1
+        break
+      endif
+    enddo
+    if preset>=0 then
+      searchpad=preset
+      if search[searchpad].x==0.0 && search[searchpad].y==0.0 then
+        search[searchpad].x=camerax
+        search[searchpad].y=cameray
+        search[searchpad].side=cameraside
+        search[searchpad].fidtype=SYNT_CIRCLE
+        search[searchpad].fidcolor=WHITEONBLACK
+        search[searchpad].a=50.0
+        search[searchpad].b=0.0
+      endif
+      change hsearchside select=search[searchpad].side
+      Movecamera(search[searchpad].x,search[searchpad].y,search[searchpad].side)
+      padchanged=1
+    else if Pressed(hu) then
+      search[searchpad].y=search[searchpad].y+step*(Min(10,Status(hu))+1)
+      if search[searchpad].y<ymin search[searchpad].y=ymin
+      if search[searchpad].y>ymax search[searchpad].y=ymax
+      Movecamera(search[searchpad].x,search[searchpad].y,search[searchpad].side)
+      padmoved=1
+    else if Pressed(hl) then
+      search[searchpad].x=search[searchpad].x-step*(Min(10,Status(hl))+1)
+      if search[searchpad].x<xmin search[searchpad].x=xmin
+      if search[searchpad].x>xmax search[searchpad].x=xmax
+      Movecamera(search[searchpad].x,search[searchpad].y,search[searchpad].side)
+      padmoved=1
+    else if Pressed(hr) then
+      search[searchpad].x=search[searchpad].x+step*(Min(10,Status(hr))+1)
+      if search[searchpad].x<xmin search[searchpad].x=xmin
+      if search[searchpad].x>xmax search[searchpad].x=xmax
+      Movecamera(search[searchpad].x,search[searchpad].y,search[searchpad].side)
+      padmoved=1
+    else if Pressed(hd) then
+      search[searchpad].y=search[searchpad].y-step*(Min(10,Status(hd))+1)
+      if search[searchpad].y<ymin search[searchpad].y=ymin
+      if search[searchpad].y>ymax search[searchpad].y=ymax
+      Movecamera(search[searchpad].x,search[searchpad].y,search[searchpad].side)
+      padmoved=1
+    else if Pressed(hsearchside) then
+      search[searchpad].side=Status(hsearchside)
+      Movecamera(search[searchpad].x,search[searchpad].y,search[searchpad].side)
+    else if Pressed(hsearchstep) then
+      stepindex=Status(hsearchstep)
+    else if Pressed(hgonamed) then
+      i=Status(hnamed)
+      search[searchpad].x=named[i].x
+      if search[searchpad].x<xmin search[searchpad].x=xmin
+      if search[searchpad].x>xmax search[searchpad].x=xmax
+      search[searchpad].y=named[i].y
+      if search[searchpad].y<ymin search[searchpad].y=ymin
+      if search[searchpad].y>ymax search[searchpad].y=ymax
+      search[searchpad].side=named[i].side
+      Movecamera(search[searchpad].x,search[searchpad].y,search[searchpad].side)
+      padmoved=1
+      gonamed=1
+    else if Pressed(hvideo)==1 then
+      zoom=Getzoom(hzoom)
+      sprintf(s,"Video scale[%i]",search[searchpad].side)
+      xscale=8.0; yscale=8.0           // Default video magnification
+      getini("System",s,"%f,%f",&xscale,&yscale)
+      if search[searchpad].side==1 then
+        dx=-(Limit0(hvideo)-(VIDEODX-2)/2)/512.0/zoom*xscale
+      else
+        dx=(Limit0(hvideo)-(VIDEODX-2)/2)/512.0/zoom*xscale
+      endif
+      dy=-(Limit1(hvideo)-(VIDEODY-2)/2)/512.0/zoom*yscale
+      search[searchpad].x=search[searchpad].x+dx
+      if search[searchpad].x<xmin search[searchpad].x=xmin
+      if search[searchpad].x>xmax search[searchpad].x=xmax
+      search[searchpad].y=search[searchpad].y+dy
+      if search[searchpad].y<ymin search[searchpad].y=ymin
+      if search[searchpad].y>ymax search[searchpad].y=ymax
+      Movecamera(search[searchpad].x,search[searchpad].y,search[searchpad].side)
+      padmoved=1
+    endif
+    if redrawbtn then
+      for i=0,i<3,i++ do
+        if hselpad[i]!=NULL then
+          change hselpad[i] color=(i==searchpad?LIGHTRED:BLACK)
+          change hselpad[i] bkcolor=(i==searchpad?YELLOW:GRAY)
+          j=Getnearestnamedpad(search[i].x,search[i].y,search[i].side)
+          if j>=0 then
+            change hselpad[i] text=named[j].name
+          else
+            change hselpad[i] text=format("Pad %i",i+1)
+          endif
+        endif
+      enddo
+      redrawbtn=0
+    endif
+    if padmoved && (wizardstep & WIZ_DEFPAD)!=0 Preview(0)
+  endif
+  if wizardstep & WIZ_PAD then
+    // Component pad selection.
+    for i=0,i<4,i++ do
+      if Pressed(hgopad[i]) then
+        Movecamera(search[i].x,search[i].y,search[i].side)
+        searchpad=i
+        redrawbtn=1
+      else if Pressed(hcomppad[i]) then
+        j=Status(hcomppad[i])
+        if j==0 then
+          search[i].x=0.0
+          search[i].y=0.0
+          search[i].side=0
+          padname[0]='\0'
+        else
+          search[i].x=named[j-1].x
+          search[i].y=named[j-1].y
+          search[i].side=named[j-1].side
+          Strcpy(padname,named[j-1].name)
+        endif
+        if i==0 then
+          Strcpy(comp[selcomp].pad0,padname)
+        else if i==1 then
+          Strcpy(comp[selcomp].pad1,padname)
+        else if i==2 then
+          Strcpy(comp[selcomp].pad2,padname)
+        else
+          Strcpy(comp[selcomp].pad3,padname)
+        endif
+        Movecamera(search[i].x,search[i].y,search[i].side)
+        searchpad=i
+        redrawbtn=1
+        padchanged=1
+      endif
+    enddo
+    if redrawbtn then
+      for i=0,i<4,i++ do
+        if i==searchpad then
+          change hgopad[i] color=LIGHTRED
+          change hgopad[i] bkcolor=YELLOW
+        else
+          change hgopad[i] color=BLACK
+          change hgopad[i] bkcolor=LIGHTGRAY
+        endif
+        if i==0 then
+          Strcpy(padname,comp[selcomp].pad0)
+        else if i==1 then
+          Strcpy(padname,comp[selcomp].pad1)
+        else if i==2 then
+          Strcpy(padname,comp[selcomp].pad2)
+        else
+          Strcpy(padname,comp[selcomp].pad3)
+        endif
+        for j=0,j<nnamed,j++ do
+          if Stricmp(named[j].name,padname)==0 break
+        enddo
+        if j>=nnamed then
+          change hcomppad[i] select=0
+        else
+          change hcomppad[i] select=j+1
+        endif
+      enddo
+      redrawbtn=0
+    endif
+  endif
+  if wizardstep & WIZ_STEPS then
+    // Number of steps.
+    Text(hname,pcbname)
+    allowshy=Status(hallowshy)
+    if pcbname[0]=='\0' then
+      disable hok
+    else
+      enable hok
+    endif
+    if Pressed(hstepsx) then
+      i=Status(hstepsx)+1
+      if i!=nstepx then
+        if nstepx>1 && i>1 && scanstepx[0].x!=0.0 && scanstepx[0].y!=0.0 &&    \
+          scanstepx[1].x!=0.0 && scanstepx[1].y!=0.0 then
+          scanstepx[1].x=scanstepx[0].x+                                       \
+            (scanstepx[1].x-scanstepx[0].x)/(nstepx-1.0)*(i-1.0)
+          scanstepx[1].y=scanstepx[0].y+                                       \
+            (scanstepx[1].y-scanstepx[0].y)/(nstepx-1.0)*(i-1.0)
+          ;
+        else
+          scanstepx[1].x=0.0
+          scanstepx[1].y=0.0
+        endif
+        nstepx=i
+      endif
+      Preview(0)
+    else if Pressed(hstepsy) then
+      i=Status(hstepsy)+1
+      if i!=nstepy then
+        if nstepy>1 && i>1 && scanstepy[0].x!=0.0 && scanstepy[0].y!=0.0 &&    \
+          scanstepy[1].x!=0.0 && scanstepy[1].y!=0.0 then
+          scanstepy[1].x=scanstepy[0].x+                                       \
+            (scanstepy[1].x-scanstepy[0].x)/(nstepy-1.0)*(i-1.0)
+          scanstepy[1].y=scanstepy[0].y+                                       \
+            (scanstepy[1].y-scanstepy[0].y)/(nstepy-1.0)*(i-1.0)
+          ;
+        else
+          scanstepy[1].x=0.0
+          scanstepy[1].y=0.0
+        endif
+        nstepy=i
+      endif
+      Preview(0)
+    else if Pressed(hok) then
+      Emptywizard()
+      Managebuttons()
+      Preview(0)
+      modified=1
+    endif
+  endif
+  if wizardstep & WIZ_XSTEP then
+    if Pressed(hok) && nstepx>1 then
+      // This is a preliminary value!
+      Memcpy(scanstepx,search,Sizeof(search))
+      stepx=Abs((scanstepx[1].x-scanstepx[0].x)/(nstepx-1))
+      Emptywizard()
+      Managebuttons()
+      Preview(0)
+      modified=1
+    endif
+  endif
+  if wizardstep & WIZ_YSTEP then
+    if Pressed(hok) && nstepy>1 then
+      // This is a preliminary value!
+      Memcpy(scanstepy,search,Sizeof(search))
+      stepy=Abs((scanstepy[1].y-scanstepy[0].y)/(nstepy-1))
+      Emptywizard()
+      Managebuttons()
+      Preview(0)
+      modified=1
+    endif
+  endif
+  if wizardstep & WIZ_FID then
+    if Pressed(hscanman) then
+      search[0].scanman=Status(hscanman)
+      search[1].scanman=Status(hscanman)
+    else if Pressed(hfidtype) || Pressed(hfidsizea) || Pressed(hfidsizeb) then
+      search[searchpad].a=Status(hfidsizea)
+      search[searchpad].b=Status(hfidsizeb)
+      if Status(hfidtype)==0 then
+        search[searchpad].fidtype=SYNT_CIRCLE
+        search[searchpad].fidcolor=WHITEONBLACK
+      else if Status(hfidtype)==1 then
+        search[searchpad].fidtype=SYNT_RECT
+        search[searchpad].fidcolor=WHITEONBLACK
+      else if Status(hfidtype)==2 then
+        search[searchpad].fidtype=SYNT_CROSS
+        search[searchpad].fidcolor=WHITEONBLACK
+      else if Status(hfidtype)==3 then
+        search[searchpad].fidtype=SYNT_CIRCLE
+        search[searchpad].fidcolor=BLACKONWHITE
+      else if Status(hfidtype)==4 then
+        search[searchpad].fidtype=SYNT_RECT
+        search[searchpad].fidcolor=BLACKONWHITE
+      else
+        search[searchpad].fidtype=SYNT_CROSS
+        search[searchpad].fidcolor=BLACKONWHITE
+      endif
+      if search[searchpad].fidtype==SYNT_CIRCLE &&                             \
+        search[searchpad].b>search[searchpad].a then
+        search[searchpad].b=search[searchpad].a
+        change hfidsizeb select=search[searchpad].b
+      endif
+      Overlay(1,0,search[searchpad].fidtype,                                   \
+        search[searchpad].a,search[searchpad].b)
+      ;
+    endif
+    if padchanged then
+      if search[searchpad].fidtype==SYNT_CIRCLE &&                             \
+        search[searchpad].fidcolor==WHITEONBLACK then
+        change hfidtype select=0
+      else if search[searchpad].fidtype==SYNT_RECT &&                          \
+        search[searchpad].fidcolor==WHITEONBLACK then
+        change hfidtype select=1
+      else if search[searchpad].fidtype==SYNT_CROSS &&                         \
+        search[searchpad].fidcolor==WHITEONBLACK then
+        change hfidtype select=2
+      else if search[searchpad].fidtype==SYNT_CIRCLE &&                        \
+        search[searchpad].fidcolor==BLACKONWHITE then
+        change hfidtype select=3
+      else if search[searchpad].fidtype==SYNT_RECT &&                          \
+        search[searchpad].fidcolor==BLACKONWHITE then
+        change hfidtype select=4
+      else if search[searchpad].fidtype==SYNT_CROSS &&                         \
+        search[searchpad].fidcolor==BLACKONWHITE then
+        change hfidtype select=5
+      else
+        change hfidtype select=0
+      endif
+      change hfidsizea select=search[searchpad].a
+      change hfidsizeb select=search[searchpad].b
+      Overlay(1,0,search[searchpad].fidtype,                                   \
+        search[searchpad].a,search[searchpad].b)
+      ;
+    endif
+    if Pressed(hok) then
+      Memcpy(fiducial,search,Sizeof(search))
+      Emptywizard()
+      Managebuttons()
+      Preview(0)
+      modified=1
+    endif
+  endif
+  if wizardstep & WIZ_DEFPAD then
+    Text(hpadname,s); s[31]='\0'
+    i=Getnamedpadbyname(s)
+    if Strcmp(oldpad,s)!=0 then
+      if s[0]=='\0' then
+        disable haddpad
+        disable hfollowpad
+        disable hdelpad
+      else if i<0 then
+        enable haddpad
+        disable hfollowpad
+        disable hdelpad
+      else
+        enable haddpad
+        enable hfollowpad
+        enable hdelpad
+      endif
+      Strcpy(oldpad,s)
+    endif
+    padchanged=0
+    if (Pressed(hpadname) || Pressed(haddpad)) && nnamed<NNAMED && s[0]!=0 then
+      // Delete identically named pad.
+      if i>=0 then
+        for j=i,j<nnamed-1,j++ do
+          Memcpy(named[j],named[j+1],Sizeof(dammy))
+        enddo
+        nnamed--
+      endif
+      // Find location where new pad will be inserted.
+      for i=0,i<nnamed,i++ do
+        if Stricmp(named[i].name,s)>0 break
+      enddo
+      // Insert new named pad.
+      for j=nnamed,j>i,j-- do
+        Memcpy(named[j],named[j-1],Sizeof(dammy))
+      enddo
+      named[i].x=search[0].x
+      named[i].y=search[0].y
+      named[i].side=search[0].side
+      Strcpy(named[i].name,s)
+      nnamed++
+      modified=1
+      // Update pad list.
+      enable hnamed
+      enable hgonamed
+      clear hnamed
+      for j=0,j<nnamed,j++ do
+        add hnamed text=named[j].name
+      enddo
+      change hnamed select=i
+      padchanged=1
+    else if Pressed(hfollowpad) && i>=0 then
+      search[0].x=named[i].x
+      search[0].y=named[i].y
+      search[0].side=named[i].side
+      change hsearchside select=named[i].side
+      Movecamera(named[i].x,named[i].y,named[i].side)
+      Preview(0)
+    else if Pressed(hdelpad) && s[0]!='\0' && i>=0 then
+      // Delete pad.
+      for j=i,j<nnamed-1,j++ do
+        Memcpy(named[j],named[j+1],Sizeof(dammy))
+      enddo
+      nnamed--
+      modified=1
+      padchanged=1
+    else if Pressed(hreadles) then
+      if Readlesfile()==0 then
+        modified=1
+        padchanged=1
+      endif
+    else if Pressed(hok) then
+      Emptywizard()
+      Managebuttons()
+      Preview(0)
+    endif
+    if padchanged then
+      Preview(0)
+      clear hpadname
+      for i=0,i<nnamed,i++ do
+        add hpadname text=named[i].name
+      enddo
+      change hpadname text=s
+    endif
+  endif
+  if wizardstep & WIZ_COMP then
+    compchanged=0
+    if Mousexy(hlist,&mousex,&mousey,&buttons)==1 &&                           \
+      mousex>=12 && mousex<=550 && (buttons & 0x8000)==0 &&                    \
+      (buttons & 1)!=0 && (prevlistbtn & 1)==0 && mousey>=31 then
+      // Left mouse button pressed.
+      i=(mousey-31)/20
+      if i+firstcomp<ncomp then
+        selcomp=i+firstcomp
+        Componentswizard()
+        compchanged=1
+      endif
+    endif
+    prevlistbtn=buttons
+    if Pressed(hlistup) && firstcomp>0 then
+      firstcomp--
+      Listcomponents(1,-1)
+    else if Pressed(hlistdn) && firstcomp+NLIST-1<ncomp then
+      firstcomp++
+      Listcomponents(1,-1)
+    else if Pressed(hcomptype) then
+      comp[selcomp].type=Status(hcomptype)
+      Setcomponentdata()
+      compchanged=1
+    else if Pressed(hcompopt) then
+      if comp[selcomp].type==CT_E || comp[selcomp].type==CT_RCOM ||            \
+        comp[selcomp].type==CT_UI || comp[selcomp].type==CT_D                  \
+      then
+        if Status(hcompopt)==0 then
+          comp[selcomp].options=comp[selcomp].options & (~COPT_POLARITY)
+        else
+          comp[selcomp].options=comp[selcomp].options | COPT_POLARITY
+        endif
+        compchanged=1
+      else if comp[selcomp].type==CT_C then
+        if Status(hcompopt)==0 then
+          comp[selcomp].options=comp[selcomp].options & (~COPT_NOSHORT)
+        else
+          comp[selcomp].options=comp[selcomp].options | COPT_NOSHORT
+        endif
+        compchanged=1
+      else if comp[selcomp].type==CT_FW then
+        if Status(hcompopt)==0 then
+          comp[selcomp].options=comp[selcomp].options & (~COPT_LONG)
+        else
+          comp[selcomp].options=comp[selcomp].options | COPT_LONG
+        endif
+        compchanged=1
+      endif
+    else if Pressed(hutest) then
+      comp[selcomp].options=(comp[selcomp].options & (~COPT_UMASK)) |          \
+        ((Status(hutest)<<4) & COPT_UMASK)
+      compchanged=1
+    else if Pressed(hitest) then
+      if comp[selcomp].type==CT_C then
+        comp[selcomp].options=(comp[selcomp].options & (~COPT_FMASK)) |        \
+        ((Status(hitest)<<13) & COPT_FMASK)
+      else
+        comp[selcomp].options=(comp[selcomp].options & (~COPT_IMASK)) |        \
+        ((Status(hitest)<<8) & COPT_IMASK)
+      endif
+      compchanged=1
+    else if Pressed(hdelay) then
+      comp[selcomp].options=(comp[selcomp].options & (~COPT_DMASK)) |          \
+        ((Status(hdelay)<<16) & COPT_DMASK)
+      compchanged=1
+    else if Pressed(hprev) && selcomp>0 then
+      selcomp--
+      if selcomp<firstcomp firstcomp=selcomp
+      Componentswizard()
+      compchanged=1
+    else if Pressed(hdupl) then
+      if selcomp==ncomp && ncomp<NCOMP ncomp++
+      Memcpy(comp[selcomp+1],comp[selcomp],Sizeof(dummy))
+      selcomp++
+      if selcomp>=firstcomp+NLIST firstcomp=Min(selcomp-NLIST+1,NCOMP-NLIST)
+      Componentswizard()
+      compchanged=1
+    else if Pressed(hdel) then
+      if selcomp<ncomp then
+        for j=selcomp,j<ncomp-1,j++ do
+          Memcpy(comp[j],comp[j+1],Sizeof(dummy))
+        enddo
+        Memset(comp[ncomp-1],0,Sizeof(dummy))
+        ncomp--
+        if ncomp==0 then
+          selcomp=0
+        else if selcomp>=ncomp then
+          selcomp--
+          if selcomp<firstcomp firstcomp=selcomp
+        endif
+        Componentswizard()
+        compchanged=1
+      endif
+    else if Pressed(hok) then
+      if selcomp==ncomp && ncomp<NCOMP ncomp++
+      if selcomp<NCOMP-1 selcomp++
+      if selcomp>=firstcomp+NLIST firstcomp=Min(selcomp-NLIST+1,NCOMP-NLIST)
+      Componentswizard()
+      compchanged=1
+    endif
+    // OllyTest does not support the possibility to trigger on the change of
+    // the contents of Edit window, only on return, hence the time-consuming
+    // checks below. Anyway time-savings here are unimportant.
+    Text(hcompname,s)
+    if Strcmp(s,comp[selcomp].name)!=0 then
+      Strncpy(comp[selcomp].name,s,31)
+      compchanged=1
+    endif
+    Text(hvalmin,s)
+    if Texttovalue(s,comp[selcomp].type,Status(hunits),&r)==0 then
+      if comp[selcomp].vmin!=r compchanged=1
+      comp[selcomp].vmin=r
+    endif
+    Text(hvalmax,s)
+    if Texttovalue(s,comp[selcomp].type,Status(hunits),&r)==0 then
+      if comp[selcomp].vmax!=r compchanged=1
+      comp[selcomp].vmax=r
+    endif
+    if compchanged || padchanged then
+      Listcomponents(1,-1)
+      if Iscomponentvalid() then
+        enable hok
+      else
+        disable hok
+      endif
+    endif
+  endif
+  if wizardstep & WIZ_OPTIONS then
+    if Pressed(hhvvolt) then
+      hvvolt=Status(hhvvolt)*5+25
+      modified=1
+      hvinit=0
+    else if Pressed(hhvtime) then
+      hvtime=Status(hhvtime)+1
+      modified=1
+      hvinit=0
+    else if Pressed(hhvfix) then
+      hvfix=Status(hhvfix)
+      modified=1
+      hvinit=0
+    else if Pressed(hok) then
+      Emptywizard()
+      Managebuttons()
+      Preview(0)
+    endif
+  endif
+  if wizardstep & WIZ_REF then
+    if Pressed(hnoref) then
+      noref=Status(hnoref)
+      if noref==0 then
+        enable hfixedref
+      else
+        disable hfixedref
+      endif
+    else if Pressed(hfixedref) then
+      fixedref=Status(hfixedref)
+    else if Pressed(hok) then
+      Memcpy(reference,search[0],Sizeof(reference))
+      Emptywizard()
+      Managebuttons()
+      Preview(0)
+      modified=1
+    endif
+  endif
+  if wizardstep & WIZ_STROKE then
+    if Pressed(hv) then
+      v=Status(hv)*5.0+5.0
+      modified=1
+    else if Pressed(hp) then
+      p=Status(hp)*5.0+5.0
+      modified=1
+    else if Pressed(hh) then
+      h=Status(hh)+1.0
+      modified=1
+    else if Pressed(hok) then
+      Emptywizard()
+      Managebuttons()
+      Preview(0)
+    endif
+  endif
+  if wizardstep & WIZ_OFFSET then
+    r0=Sqrt((fiducial[1].x-fiducial[0].x)*(fiducial[1].x-fiducial[0].x)+       \
+      (fiducial[1].y-fiducial[0].y)*(fiducial[1].y-fiducial[0].y))
+    r=Sqrt((search[1].x-search[0].x)*(search[1].x-search[0].x)+                \
+      (search[1].y-search[0].y)*(search[1].y-search[0].y))
+    if Abs(r-r0)>r0*0.03 then
+      if updenabled!=0 disable hupdate
+      updenabled=0
+    else
+      if updenabled!=1 enable hupdate
+      updenabled=1
+    endif
+    if Pressed(hzero) then
+      Memcpy(search,fiducial,Sizeof(fiducial))
+      offsetx=0
+      offsety=0
+      Movecamera(search[searchpad].x,search[searchpad].y,search[searchpad].side)
+    else if Pressed(hupdate) then
+      Corrections(search[0].x,search[0].y,search[1].x,search[1].y)
+      for i=0,i<2,i++ do
+        if nstepx>1 && scanstepx[i].x!=0.0 && scanstepx[i].y!=0.0 then
+          Convert(&x,&y,scanstepx[i].x,scanstepx[i].y)
+          scanstepx[i].x=x; scanstepx[i].y=y
+        endif
+        if nstepy>1 && scanstepy[i].x!=0.0 && scanstepy[i].y!=0.0 then
+          Convert(&x,&y,scanstepy[i].x,scanstepy[i].y)
+          scanstepy[i].x=x; scanstepy[i].y=y
+        endif
+      enddo
+      stepx=Abs((scanstepx[1].x-scanstepx[0].x)/(nstepx-1))
+      stepy=Abs((scanstepy[1].y-scanstepy[0].y)/(nstepy-1))
+      for j=0,j<nnamed,j++ do
+        Convert(&x,&y,named[j].x,named[j].y)
+        named[j].x=x; named[j].y=y
+      enddo
+      if noref==0 && (reference.x!=0.0 || reference.y!=0.0) then
+        Convert(&x,&y,reference.x,reference.y)
+        reference.x=x; reference.y=y
+      endif
+      Memcpy(fiducial,search,Sizeof(fiducial))
+      offsetx=0                        // Offset is no longer necessary
+      offsety=0
+      Emptywizard()
+      Managebuttons()
+      Preview(0)
+      modified=1
+    else if Pressed(hok) then
+      offsetx=search[0].x-fiducial[0].x
+      offsety=search[0].y-fiducial[0].y
+      Emptywizard()
+      Managebuttons()
+      Preview(0)
+      modified=1
+    endif
+  endif
+  if wizardstep & WIZ_PRETEST then
+    if Pressed(hrepeat) then
+      nloop=Status(hrepeat)+1
+    else if Pressed(hincall) then
+      for j=0,j<nstepy,j++ do
+        for i=0,i<nstepx,i++ do
+          test[j][i].excluded=0
+        enddo
+      enddo
+      Preview(P_SELECT)
+    else if Pressed(hok) then
+      Text(hsampleid,sampleid)
+      Emptywizard()
+      Scanwizard()
+    endif
+    if Mousexy(hpreview,&mousex,&mousey,&buttons)==1 then
+      if exclon==0 && (buttons & 0x8001)==0x0001 then
+        exclx0=mousex; excly0=mousey
+        exclx1=mousex; excly1=mousey
+        exclon=1
+        Preview(P_SELECT)
+      else if exclon==1 && (buttons & 1)!=0 then
+        exclx1=mousex; excly1=mousey
+        exclon=1
+        Preview(P_SELECT)
+      else if exclon==1 && (buttons & 1)==0 then
+        for j=0,j<nstepy,j++ do
+          for i=0,i<nstepx,i++ do
+            x0=test[j][i].x0
+            y0=test[j][i].y0
+            x1=test[j][i].x1
+            y1=test[j][i].y1
+            // X intersection.
+            if (x0<exclx0 && x1<exclx0 && x0<exclx1 && x1<exclx1) ||           \
+              (x0>exclx0 && x1>exclx0 && x0>exclx1 && x1>exclx1) continue
+            // Y intersection.
+            if (y0<excly0 && y1<excly0 && y0<excly1 && y1<excly1) ||           \
+              (y0>excly0 && y1>excly0 && y0>excly1 && y1>excly1) continue
+            test[j][i].excluded=!test[j][i].excluded
+          enddo
+        enddo
+        exclon=0
+        Preview(P_SELECT)
+      endif
+    endif
+  endif
+  if wizardstep & WIZ_MANUAL then
+    if padchanged then
+      Overlay(1,0,search[searchpad].fidtype,                                   \
+      search[searchpad].a,search[searchpad].b)
+    endif
+    r0=Sqrt((fiducial[1].x-fiducial[0].x)*(fiducial[1].x-fiducial[0].x)+       \
+      (fiducial[1].y-fiducial[0].y)*(fiducial[1].y-fiducial[0].y))
+    r=Sqrt((search[1].x-search[0].x)*(search[1].x-search[0].x)+                \
+      (search[1].y-search[0].y)*(search[1].y-search[0].y))
+    if Abs(r-r0)>r0*0.03 then
+      if okenabled!=0 disable hok
+      okenabled=0
+    else
+      if okenabled==0 enable hok
+      okenabled=1
+    endif
+    if Pressed(hok) then
+      offsetx=search[0].x-fiducial[0].x
+      offsety=search[0].y-fiducial[0].y
+      Corrections(search[0].x,search[0].y,search[1].x,search[1].y)
+      Emptywizard()
+      Managebuttons()
+      Preview(0)
+      modified=1
+      Testwizard()
+    endif
+  endif
+  if wizardstep & WIZ_TEST then
+    if Pressed(hok) then
+      // Move all heads in home position.
+      for i=0,i<$LAY.nfing*2,i++ do
+        sprintf(s,"M %i(Z) NOP",i)
+        SERV.Cmdimm(SCRATCH,s)
+      enddo
+      Emptywizard()
+    endif
+    olddone=ndone
+    j=Nextteststep()
+    if j==0 j=Nextteststep()
+    if j==0 j=Nextteststep()
+    if j==0 j=Nextteststep()
+    if j>0 then
+      Emptywizard()
+    else if j<0 then
+      return -1
+    endif
+    if ndone<ncmd && Time()-showtime>500 then
+      Preview(P_RSPACE|P_ERRORS)
+      showtime=Time()
+    endif
+    if ndone>=ncmd && ndone!=olddone then
+      // Test loop finished, show results.
+      Preview(P_RSPACE|P_ERRORS)
+      dt=(Time()-starttime)/1000.0
+      Protocoltestresults(dt)
+      change hprotocol color=BLACK
+      add hprotocol text=format("Test finished, duration %.3f sec",dt)
+      loop++
+      if loop<nloop then
+        // Start next test loop.
+        if Preparefortest()<0 then
+          Emptywizard()
+          wizardstep=WIZ_EMPTY
+        else
+          add hprotocol text=format("Loop %i",loop+1)
+          starttime=Time()
+          showtime=starttime
+        endif
+      else
+        // Test completed.
+        Preview(P_RSPACE|P_ERRORS)
+        change hok text="确定"
+      endif
+    endif
+  endif
+end
+
+// Main function. Here execution starts.
+function int main()
+  int i,j,k,n,y,mousex,mousey,buttons,index
+  char s[256],buf[256]
+  // Controls.
+  hmain=control WINDOW
+    window=NULL
+    position=10,10,MAINDX,MAINDY
+    name=format("%s v%s",DESCRIPTION,VERSION)
+    help=" "
+    bkcolor=WHITEBLUE
+    size=1024
+  endc
+  hmessage=control TEXT
+    window=hmain
+    position=5,5,MAINDX-BUTTONDX-15,MESSAGEDY
+    help="信息"
+    font=MEDIUMFONT
+    bkcolor=WHITE
+    mode=M_BORDER
+  endc
+  hvideo=control GRAPH
+    window=hmain
+    position=6,MESSAGEDY+11,VIDEODX-2,VIDEODY-2
+    help="实时视频"
+    bkcolor=VIDEOFILL
+  endc
+  draw window=hmain font=INFOFONT color=BLACK
+  draw at 6,MESSAGEDY+VIDEODY+31 text="Gain"
+  hbrightness=control HSCROLL
+    window=hmain
+    name="亮度"
+    help="调整视频图像的增益"
+    position=43,MESSAGEDY+VIDEODY+14,145,21
+    limits=-100,100
+  endc
+  draw at 6,MESSAGEDY+VIDEODY+56 text="Exp"
+  hcontrast=control HSCROLL
+    window=hmain
+    name="对比度"
+    help="调整视频图像的曝光度"
+    position=43,MESSAGEDY+VIDEODY+39,145,21
+    limits=-100,100
+  endc
+  if ($LAY.config & LC_TYPEMASK)==LC_S3 then
+    draw at 200,MESSAGEDY+VIDEODY+31 text="Zoom"
+    hzoom=control COMBOLIST
+      window=hmain
+      help="更改视频图像的缩放比例"
+      position=240,MESSAGEDY+VIDEODY+13,52,200
+    endc
+    hfocusup=control BUTTON
+      window=hmain
+      position=200,MESSAGEDY+VIDEODY+39,21,21
+      name="-"
+      help="按住可向上移动相机"
+      font=MEDIUMFONT
+      mode=M_REPEAT
+    endc
+    hfocus=control TEXT
+      window=hmain
+      position=220,MESSAGEDY+VIDEODY+39,52,21
+      help="当前相机的Z坐标，微米"
+      mode=M_BORDER|M_CENTERED
+      font=MEDIUMFONT
+      bkcolor=LIGHTYELLOW
+      color=BLACK
+    endc
+    hfocusdn=control BUTTON
+      window=hmain
+      position=271,MESSAGEDY+VIDEODY+39,21,21
+      name="+"
+      help="按住可向下移动相机"
+      font=MEDIUMFONT
+      mode=M_REPEAT
+    endc
+  else
+    draw at 200,MESSAGEDY+VIDEODY+44 text="Zoom"
+    hzoom=control COMBOLIST
+      window=hmain
+      help="更改视频图像的缩放比例"
+      position=240,MESSAGEDY+VIDEODY+23,50,200
+      font=MEDIUMFONT
+    endc
+    hfocusup=NULL
+    hfocus=NULL
+    hfocusdn=NULL
+  endif
+  add hzoom text="0.1"
+  add hzoom text="0.2"
+  add hzoom text="0.3"
+  add hzoom text="0.5"
+  add hzoom text="1.0"
+  add hzoom text="2.0"
+  change hzoom select=(($LAY.config & LC_TYPEMASK)==LC_S3?1:3)
+  draw at 300,MESSAGEDY+VIDEODY+31 text="X="
+  hcamerax=control TEXT
+    window=hmain
+    help="相机的实际X坐标，毫米"
+    position=322,MESSAGEDY+VIDEODY+14,83,21
+    font=MEDIUMFONT
+    mode=M_BORDER
+  endc
+  draw at 300,MESSAGEDY+VIDEODY+56 text="Y="
+  hcameray=control TEXT
+    window=hmain
+    help="相机的实际Y坐标，毫米"
+    position=322,MESSAGEDY+VIDEODY+39,83,21
+    font=MEDIUMFONT
+    mode=M_BORDER
+  endc
+  draw show
+  hwizard=control CHILD
+    window=hmain
+    position=VIDEODX+11,MESSAGEDY+11,                                          \
+      MAINDX-VIDEODX-BUTTONDX-22,VIDEODY+CONTROLDY-2
+    help=" "
+    bkcolor=LIGHTGRAY
+    size=1024
+  endc
+  hpreview=control GRAPH
+    window=hmain
+    position=6,MESSAGEDY+VIDEODY+CONTROLDY+16,MAINDX-BUTTONDX-17,              \
+      MAINDY-MESSAGEDY-VIDEODY-CONTROLDY-22
+    help="任务预览"
+    bkcolor=WHITE
+  endc
+  // List of components is initially hidden. It replaces hpreview.
+  hlist=control GRAPH
+    window=hmain
+    position=2006,MESSAGEDY+VIDEODY+CONTROLDY+16,MAINDX-BUTTONDX-17,           \
+      MAINDY-MESSAGEDY-VIDEODY-CONTROLDY-22
+    help="组件列表，单击选择"
+    bkcolor=WHITE
+  endc
+  hlistup=control BUTTON
+    window=hlist
+    position=600,32,70,30
+    text="Up"
+    help="按下可向上滚动列表"
+  endc
+  hlistdn=control BUTTON
+    window=hlist
+    position=600,32+20*NLIST-31,70,30
+    text="Down"
+    help="按下可向下滚动列表"
+  endc
+  // Buttons.
+  y=5
+  hnew=control BUTTON
+    window=hmain
+    position=MAINDX-BUTTONDX-5,y,BUTTONDX,BUTTONDY
+    name="新"
+    help="按下开始新任务"
+  endc
+  y=y+BUTTONDY+5
+  hload=control BUTTON
+    window=hmain
+    position=MAINDX-BUTTONDX-5,y,BUTTONDX,BUTTONDY
+    name="加载"
+    help="加载现有任务"
+  endc
+  y=y+BUTTONDY+5
+  hsave=control BUTTON
+    window=hmain
+    position=MAINDX-BUTTONDX-5,y,BUTTONDX,BUTTONDY
+    name="保存"
+    help="将任务保存到磁盘"
+  endc
+  y=y+BUTTONDY+15
+  hsteps=control BUTTON
+    window=hmain
+    position=MAINDX-BUTTONDX-5,y,BUTTONDX,BUTTONDY
+    name="步骤"
+    help="设置任务名称和图像计数"
+  endc
+  y=y+BUTTONDY+5
+  hstepsizex=control BUTTON
+    window=hmain
+    position=MAINDX-BUTTONDX-5,y,BUTTONDX,BUTTONDY
+    name="X尺寸"
+    help="设置PCB上排版(最小测试单元)的X尺寸"
+  endc
+  y=y+BUTTONDY+5
+  hstepsizey=control BUTTON
+    window=hmain
+    position=MAINDX-BUTTONDX-5,y,BUTTONDX,BUTTONDY
+    name="Y尺寸"
+    help="设置PCB上排版(最小测试单元)的Y尺寸"
+  endc
+  y=y+BUTTONDY+5
+  hdefpads=control BUTTON
+    window=hmain
+    position=MAINDX-BUTTONDX-5,y,BUTTONDX,BUTTONDY
+    name="定义测点"
+    help="为将在测试中使用的焊盘指定名称"
+  endc
+  y=y+BUTTONDY+5
+  hfiducials=control BUTTON
+    window=hmain
+    position=MAINDX-BUTTONDX-5,y,BUTTONDX,BUTTONDY
+    name="基准"
+    help="为光学PCB校准选择基准点"
+  endc
+  y=y+BUTTONDY+15
+  hcomp=control BUTTON
+    window=hmain
+    position=MAINDX-BUTTONDX-5,y,BUTTONDX,BUTTONDY
+    name="元件"
+    help="添加、编辑或删除组件"
+  endc
+  y=y+BUTTONDY+5
+  hopt=control BUTTON
+    window=hmain
+    position=MAINDX-BUTTONDX-5,y,BUTTONDX,BUTTONDY
+    name="选项"
+    help="设置测试选项"
+  endc
+  y=y+BUTTONDY+5
+  href=control BUTTON
+    window=hmain
+    position=MAINDX-BUTTONDX-5,y,BUTTONDX,BUTTONDY
+    name="参考"
+    help="添加或编辑参考点"
+  endc
+  y=y+BUTTONDY+5
+  hstroke=control BUTTON
+    window=hmain
+    position=MAINDX-BUTTONDX-5,y,BUTTONDX,BUTTONDY
+    name="针扎"
+    help="设置击测和压力"
+  endc
+  y=y+BUTTONDY+50
+  hoffset=control BUTTON
+    window=hmain
+    position=MAINDX-BUTTONDX-5,y,BUTTONDX,BUTTONDY
+    name="偏移"
+    help="设置测试板偏移量"
+  endc
+  y=y+BUTTONDY+5
+  htest=control BUTTON
+    window=hmain
+    position=MAINDX-BUTTONDX-5,y,BUTTONDX,2*BUTTONDY
+    name="测试"
+    help="测试板"
+  endc
+  y=y+2*BUTTONDY+10
+  hunlock=control BUTTON
+    window=hmain
+    position=MAINDX-BUTTONDX-5,y,BUTTONDX,2*BUTTONDY
+    name="解锁"
+    help="打开架板框"
+  endc
+  hexit=control BUTTON
+    window=hmain
+    position=MAINDX-BUTTONDX-5,MAINDY-29,BUTTONDX,BUTTONDY
+    name="关闭"
+    help="双击可关闭任务生成器"
+    mode=M_DBLCLICK
+  endc
+  Managebuttons()
+  stepindex=2
+  selcomp=0
+  jobpath[0]='\0'
+  lespath[0]='\0'
+  getini("Compprep","Settings","%g,%g,%i,%i",&offsetx,&offsety,focus+0,focus+1)
+  getini("Compprep","Job","%s",jobpath)
+  getini("Compprep","LES","%s",lespath)
+  changefocus=1
+  // Set default options.
+  hvvolt=100
+  hvtime=5
+  hvfix=1
+  hvinit=0
+  nloop=1
+  // Set default stroke parameters, should minimize print marks.
+  acc=5
+  v=10.0
+  h=5.0
+  p=10
+  // Open log file.
+  htxt=Fopen("compprep.txt","a+t")
+  // Main loop.
+  while 1 do
+    // Right side buttons.
+    if Pressed(hnew) then
+      Emptywizard()
+      Resetall()
+      Preview(0)
+      Managebuttons()
+    else if Pressed(hload) then
+      Emptywizard()
+      Load()
+      Preview(0)
+      Managebuttons()
+    else if Pressed(hsave) then
+      Save()
+    else if Pressed(hsteps) then
+      Stepswizard()
+      Preview(0)
+      Disablebuttons()
+    else if Pressed(hstepsizex) then
+      Stepsizexwizard()
+      Preview(P_STEPX)
+      Disablebuttons()
+    else if Pressed(hstepsizey) then
+      Stepsizeywizard()
+      Preview(P_STEPY)
+      Disablebuttons()
+    else if Pressed(hdefpads) then
+      Defpadwizard()
+      Preview(0)
+    else if Pressed(hfiducials) then
+      Fiducialswizard()
+      Preview(0)
+      Disablebuttons()
+    else if Pressed(hcomp) then
+      if ncomp<NCOMP selcomp=ncomp
+      Listcomponents(1,1)
+      Componentswizard()
+    else if Pressed(hopt) then
+      Optionswizard()
+      Preview(0)
+    else if Pressed(href) then
+      Referencewizard()
+      Preview(P_PANEL1)
+      Disablebuttons()
+    else if Pressed(hstroke) then
+      Strokewizard()
+      Preview(0)
+    else if Pressed(hoffset) then
+      Offsetwizard()
+    else if Pressed(htest) then
+      Listcomponents(0,0)
+      Stopvideo()
+      Prewizard()
+    else if Pressed(hunlock) then
+      buf[0]=S_LOCKDOOR; buf[1]=0
+      SYS.Send(2,buf,0)
+    else if Pressed(hexit) then
+      goto finish
+    endif
+    // Video controls.
+    if Pressed(hbrightness) || Pressed(hcontrast) || Pressed(hzoom) then
+      Cameraxy(camerax,cameray,cameraside)
+    endif
+    if hfocus!=NULL then
+      k=Min(Pressed(hfocusdn),3)
+      k=k-Min(Pressed(hfocusup),3)
+      if k!=0 || changefocus then
+        focus[cameraside]=Max(-8000,Min(focus[cameraside]+k*20,8000))
+        change hfocus text=format("%i",focus[cameraside])
+        sprintf(s,"OUTPORT32 HEAD(%i) 0x10010008,%i",                          \
+          $LAY.nfing*2+search[searchpad].side,focus[cameraside])
+        SERV.Cmdimm(2,s)
+        changefocus=0
+      endif
+    endif
+    // Wizard controls.
+    if Checkwizard()<0 then
+      goto finish
+    endif
+    // Process movements of video camera. Note that postponemove is cleared
+    // by Movecamera().
+    if movepending && $A[CAMMOVE].length!=0 then
+      movepending=0
+    endif
+    if movepending==0 && postponemove!=0 then
+      Movecamera(camerax,cameray,cameraside)
+    endif
+    // Track errors in preview.
+    if trackerrors!=0 && Mousexy(hpreview,&mousex,&mousey,&buttons)==1 then
+      for j=0,j<nstepy,j++ do
+        for i=0,i<nstepx,i++ do
+          if mousex<test[j][i].x0 || mousex>=test[j][i].x1 continue
+          if mousey<test[j][i].y0 || mousey>=test[j][i].y1 continue
+          if i!=trackx || j!=tracky then
+            trackx=i
+            tracky=j
+            if hpreerr!=NULL then
+              clear hpreerr
+              change hpreerr color=BLACK
+              if test[j][i].excluded then
+                add hpreerr text=format("-- PANEL (%i,%i) : EXCLUDED",j+1,i+1)
+              else if test[j][i].nerr>0 then
+                add hpreerr text=format("-- ERRORS ON PANEL (%i,%i)",j+1,i+1)
+              else if test[j][i].nmeas<ncomp then
+                add hpreerr text=format("-- PANEL (%i,%i) : %i of %i",         \
+                j+1,i+1,test[j][i].nmeas,ncomp)
+              else
+                add hpreerr text=format("-- PANEL (%i,%i) : GOOD",j+1,i+1)
+              endif
+              add hpreerr text=""
+              for k=0,k<MAXERR,k++ do
+                if k<test[j][i].nerr then
+                  index=test[j][i].index[k]
+                  Geterrorbycode(cmd[index].result,s)
+                  change hpreerr color=LIGHTRED
+                  if nloop>1 then
+                    add hpreerr text=format("%.8s, loop %i: %s",               \
+                    comp[cmd[index].index].name,test[j][i].loop[k],s)
+                  else
+                    add hpreerr text=format("%.8s: %s",                        \
+                    comp[cmd[index].index].name,s)
+                  endif
+                  if comp[cmd[index].index].type==CT_D ||                      \
+                    comp[cmd[index].index].type==CT_V                          \
+                  then
+                    Convertunits2(comp[cmd[index].index].type,                 \
+                    cmd[index].value1,cmd[index].value2,s)
+                  else
+                    Convertunits(comp[cmd[index].index].type,                  \
+                    cmd[index].value1,0,s)
+                  endif
+                  change hpreerr color=BLACK
+                  add hpreerr text=format("    %s",s);
+                else
+                  add hpreerr text=""
+                  add hpreerr text=""
+                endif
+              enddo
+            endif
+          endif
+        enddo
+      enddo
+    endif
+    wait
+  enddo
+finish:
+  setini("Compprep","Settings","%g,%g,%i,%i",offsetx,offsety,focus[0],focus[1])
+  setini("Compprep","Job","%s",jobpath)
+  setini("Compprep","LES","%s",lespath)
+  if htxt!=NULL Fclose(htxt)
+  SYS.Softreset(0)
+end
+

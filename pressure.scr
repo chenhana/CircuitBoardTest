@@ -1,0 +1,979 @@
+#include "ls.icl"                  // Standard functions
+#include "or.icl"                // A2 command names
+#cmdbuff 5                             // 3 answer buffers
+
+#define VERSION        "1.02"
+
+// 1.01: Support for head cameras.
+// 1.02: Support for A7 and A8.
+
+#define FACTOR         110.0           // ADC bits in gramm
+
+#define PLOTDX         410             // Width of graph
+#define PLOTDY         370             // height of graph
+
+// Layout configuration bits in $LAY.config.
+#define LC_SMASK2      0x20000000      // Extention of LC_SMASK
+#define LC_AUTOPROBE   0x10000000      // Autodetect probes (Kelvin or standard)
+#define LC_TYPEMASK    0x0B000000      // General type of machine
+#define   LC_STD       0x00000000      // LC_TYPEMASK: standard A5/A6 tester
+#define   LC_NEWA1     0x01000000      // LC_TYPEMASK: new A1 (slow A5) tester
+#define   LC_S1        0x02000000      // LC_TYPEMASK: S1/S2
+#define   LC_A8        0x03000000      // LC_TYPEMASK: A7/A8
+#define LC_VACUUMBOX   0x04000000      // Disable movements on bottom side
+#define LC_MOREMASK    0x00C00000      // Mask for more space bits
+#define   LC_MOREBOT   0x00800000      // Give more space on bottom
+#define   LC_MORETOP   0x00400000      // Give more space on the top
+#define LC_DEADLOCKS   0x00200000      // Autoresolve deadlocks
+#define LC_ILLUM       0x00100000      // Auto switch video illumination on/off
+#define LC_HARDZ       0x00040000      // Hard Z contacting (A2/A4/A5 only)
+#define LC_QUAKE       0x00020000      // Earthquake protection on (M2 only)
+#define LC_SMASK1      0x0001C000      // Mask for type of loading system
+#define LC_RELAYS      0x00002000      // Slow (LATEST-compatible) relays
+#define LC_OHTYPE      0x00001C00      // Mask to extract on-head type
+#define   LC_NOFIELD   0x00001000      // On-heads without field amplifier
+#define   LC_PHADJ     0x00000C00      // On-heads with adjustable field phase
+#define   LC_ACTIVE    0x00000400      // Active on-heads (with Dallas/R1-R4)
+#define   LC_PASSIVE   0x00000000      // Passive on-heads (manual C adjust)
+#define LC_TRAFFICS    0x00000200      // Hitachi-style traffic lights
+#define LC_ZSENSORS    0x00000100      // A series: Z pressure sensors active
+#define LC_LOWBAUD     0x00000100      // M2: low AFMCU I/O baud rate
+#define LC_ISM2        0x00000080      // M2 tester
+#define LC_A2LOADER    0x00000040      // A2-style loader, enables LC_SMASK
+#define LC_ENCODERS    0x00000020      // Tester with encoders
+#define LC_COVER       0x00000010      // I have forgotten what it means
+#define LC_HIGHZ       0x00000008      // Z always moves with full hub (B1)
+#define LC_LDELAY      0x00000004      // Wait after light off (obsolete)
+#define LC_AMASK       0x00000003      // Mask for type of antennae
+#define   LC_EXTANT    0x00000000      // LC_AMASK: external (A1) antennae
+#define   LC_INTANT    0x00000001      // LC_AMASK: internal antennae (void)
+#define   LC_FINGANT   0x00000002      // LC_AMASK: finger antennae
+// Alternative (old) interpretation of LC_OHTYPE bits.
+#define LC_PHASEADJ    0x00000800      // On-heads with adjustable field phase
+#define LC_ACTIVEONHD  0x00000400      // Active on-heads (with Dallas/R1-R4)
+// Tester types in LC_SMASK=(LC_SMASK2|LC_SMASK1).
+#define LC_LMMAN       0x0001C000      // L&M manual tester
+#define LC_LMS2        0x00018000      // L&M for S2a
+#define LC_EPCOS       0x00014000      // L&M for EPCOS tester
+#define LC_LM          0x00010000      // L&M for A5a
+#define LC_A5WIDE      0x0000C000      // A5 wide shuttle
+#define LC_AUTOMATE    0x00008000      // Automatical shuttle
+#define LC_A2XSHUT     0x00004000      // A2X shuttle
+#define LC_A2SHUT      0x00000000      // A2 standard shuttle
+// Useful shortcuts and substitutions.
+#define LC_SMASK       (LC_SMASK2|LC_SMASK1)
+#define LC_LDMASK      (LC_SMASK2|LC_SMASK1|LC_A2LOADER)
+#define LC_LMAUTO      (LC_LM|LC_A2LOADER)
+#define LC_LMS2AUTO    (LC_LMS2|LC_A2LOADER)
+#define LC_EPCOSAUTO   (LC_EPCOS|LC_A2LOADER)
+
+// Z options in extended layout.
+#define HCZ_VALID      0x80000000      // Z axis type in layout valid
+#define HCZ_TYPEMAJOR  0x0F000000      // Major part of type (algorithms)
+#define   HCZ_TMAJORA  0x00000000      // Parallelogramm with magnetoresistor
+#define   HCZ_TMAJORC  0x01000000      // Ceramic stepper with Hall sensors
+#define HCZ_TYPEMINOR  0x00F00000      // Minor part of type (parameters)
+#define HCZ_TYPEMASK   0x0FF00000      // Mask to extract type of finger
+#define   HCZ_TYPEA2G  0x00000000      // A2 gray parallelogramm
+#define   HCZ_TYPEA2W  0x00100000      // A2 white parallelogramm
+#define   HCZ_TYPEA3   0x00200000      // A3 gray parallelogramm
+#define   HCZ_TYPECER  0x01000000      // Ceramic stepper with air bearings
+#define HCZ_PWRMASK    0x000C0000      // Mask to extract Z motor power
+#define   HCZ_PWRSTD   0x00000000      // Standard motor
+#define HCZ_SUBCMASK   0x00030000      // Mask to extract needle subtype
+#define   HCZ_SPLK4    0x00010000      // HCZ_CONTSPL is very soft K4 needle
+#define HCZ_CONTMASK   0x0000FF00      // Mask to extract type of needle
+#define   HCZ_CONTDEF  0x00000000      // Default needle, no contact sensor
+#define   HCZ_CONTSPL  0x00000100      // Soft splinogramm with opto sensor
+#define   HCZ_CONTHSPL 0x00000200      // Hard splinogramm with opto sensor
+#define   HCZ_CONTEMU  0x00000400      // Standard needle on soft touch adapter
+#define   HCZ_CONTSTD  0x00000800      // Standard needle, developed by IBM
+#define   HCZ_CONTSKP  0x00001000      // Soft Kelvin with two parallelogramms
+#define HCZ_STRMASK    0x000000F0      // Mask to extract Z stroke type
+#define   HCZ_STRNORM  0x00000000      // Normal stroke
+#define   HCZ_STRSOFT  0x00000010      // Soft stroke
+#define   HCZ_STRHARD  0x00000020      // Hard stroke
+#define   HCZ_LEARNZ   0x00000030      // Learned Z coordinate
+#define   HCZ_HIPRESS  0x00000040      // High pressure with splinogramms
+#define HCZ_DMSMASK    0x0000000C      // Mask for type of pressure sensor
+#define   HCZ_DMSSTD   0x00000000      // Standard or no pressure sensor
+#define   HCZ_DMSREV   0x00000004      // Pressure sensor with reverse signal
+#define   HCZ_DMSAUTO  0x0000000C      // Autodetect type of pressure sensor
+#define HCZ_OPTMASK    0x00000003      // Mask to extract Z options
+#define   HCZ_PARKZ    0x00000001      // Park top Z axes in home position
+
+// Constants determining tester type.
+#define TT_WRONG       (-1)
+#define TT_UNDEF       0
+#define TT_A1          1
+#define TT_A2          2
+#define TT_A2L         3
+#define TT_A2H         4
+#define TT_A3          5
+#define TT_A3L         6
+#define TT_A4          7
+#define TT_A5          8               // A5 or new A1
+#define TT_A5L         9
+#define TT_A6          10
+#define TT_S1          11
+#define TT_S2          12
+#define TT_A7          13
+#define TT_A8          14
+#define TT_M2          15
+
+#define T_IDLE         0               // No activity
+#define T_INSTALL      1               // Install board
+#define T_POSITION     2               // Find pressure sensor
+#define T_WAIT         3               // Wait for commands
+#define T_RUN          4               // Test pressure
+
+handle           hmain                 // Main window
+handle           hstatus               // Status of test
+handle           hplot                 // Graph plot
+handle           hvideo                // Live video
+handle           hbrit                 // Video brightness
+handle           hcontr                // Video contrast
+handle           hstroke               // Stroke selection
+handle           hpressure             // Pressure selection
+handle           hheight               // Height selection
+handle           hrail[2][3]           // Select rails
+handle           hhead[4]              // Select head
+handle           hu,hl,hr,hd           // Camera positioning
+handle           hunlock               // Unlock shuttle
+handle           hdone                 // Camera positioned
+handle           hstart                // Start pressure test
+handle           hquit                 // Finish test
+
+int              testertype            // Type of tester (TT_xxx)
+int              testersides           // Bit 0x1: top, 0x2: bottom rails
+float            headcamradius         // Radius of head camera
+
+int              softtouch             // 0: std, 1: soft, 2: hard
+int              testing               // One of T_xxx
+int              headbase              // Selected base head
+int              head                  // Selected head
+int              videohead             // Selected video head
+int              side                  // Side of sensor
+int              channel               // Video channel
+float            angle                 // Angle of video camera
+int              bright                // Video brightnes
+int              contr                 // Video contrast
+float            basex                 // Expected X sensor coordinate
+float            basey                 // Expected Y sensor coordinate
+float            sensorx               // X sensor offset
+float            sensory               // Y sensor offset
+
+int              fgnd                  // Ground supply finger
+int              f5v                   // +5 V finger
+int              fagnd                 // Reference ground finger
+int              fout                  // Signal finger
+int              stroke                // Stroke, mm/s
+int              pressure              // Pressure, gramm
+float            height                // Height, mm
+
+// Checks layout and sets global variables testertype, testersides and
+// headcamradius. Returns 0 on success and -1 if tester is not recognized or
+// not supported.
+function int Recognizetester()
+  int i,w,h,ret
+  float ymin,ymax
+  w=($LAY.rightlimit-$LAY.leftlimit)/1000
+  h=Min($LAY.top[0]-$LAY.yoffset[0],$LAY.yoffset[0]-$LAY.bottom[0])/500
+  testersides=0
+  ymin=9.9e99
+  ymax=-9.9e99
+  for i=0,i<$LAY.nfing,i++
+    if $LAY.side[i]==0 then
+      testersides=testersides|1
+    else
+      testersides=testersides|2
+    endif
+    ymin=Min(ymin,$LAY.top[i]/1000.0)
+    ymax=Max(ymax,$LAY.bottom[i]/1000.0)
+  enddo
+  if ($LAY.config & LC_VACUUMBOX) testersides=testersides & 0x01
+  ret=0
+  if $LAY.nfing<=0 || $LAY.nfing>=16 then
+    testertype=TT_WRONG                // Wrong layout
+    ret=-1
+  else if w<=0 || h<=0 then
+    testertype=TT_WRONG                // Wrong layout
+    ret=-1
+  else if $LAY.cameras==0 && $LAY.headcameras==0 then
+    testertype=TT_WRONG                // At least one camera must be present
+    ret=-1
+  else if ($LAY.config & 0x80)!=0 then
+    testertype=TT_WRONG;               // M2 tester or contradictory layout
+    ret=-1
+  else if testersides==2 then
+    testertype=TT_WRONG                // Single-sided tester
+    ret=-1
+  else if $LAY.nfing<2 then
+    testertype=TT_WRONG                // Too few rails
+    ret=-1
+  else if h==155 && ($LAY.config & 3)==2 then
+    if w==600 && $LAY.software==0x84 then
+      testertype=TT_A2;                // A1 or A2 with linear motors
+    else if w==600 && $LAY.software==0x86 then
+      testertype=TT_A2;                // A1 or A2 with belts
+    else if w==600 && $LAY.software==0x8A then
+      testertype=TT_A2H;               // A2 (MCM modification)
+    else if w==600 && $LAY.software==0x8E then
+      testertype=TT_A4;                // A4
+    else if w==600 && testersides==0x01 &&                                     \
+      ($LAY.software==0xA7 || ($LAY.config & LC_TYPEMASK)==LC_S1) then
+      testertype=TT_S1;                // S1 (A7) tester
+    else if w>=310 && w<=600 && testersides==0x03 &&                           \
+      ($LAY.software==0xA7 || $LAY.software==0xA8 ||                           \
+      ($LAY.config & LC_TYPEMASK)==LC_S1) then
+      testertype=TT_S2;                // S2 tester
+    else if $LAY.software==0xB8 || ($LAY.config & LC_TYPEMASK)==LC_A8 then
+      testertype=TT_A8;                // A8 tester
+    else if w==600 && ($LAY.software==0xA5 || $LAY.software==0xA6) then
+      testertype=TT_A6;                // A6 tester
+    else if w==800 && $LAY.software==0x84 then
+      testertype=TT_A2L;               // A1L or A2L with linear motors
+    else if w==800 && $LAY.software==0x86 then
+      testertype=TT_A2L;               // A1L or A2L with belts
+    else
+      testertype=TT_WRONG;             // Unknown tester
+      ret=-1
+    endif;
+  else if h==200 then
+    if w==520 && $LAY.software==0xA5 then
+      testertype=TT_A5;                // A5
+    else if w==450 then
+      testertype=TT_A3;                // A3
+    else if w==520 then
+      testertype=TT_A3L;               // A3L
+    else
+      testertype=TT_WRONG;             // Unknown tester
+      ret=-1
+    endif
+  else if h==225 || h==230 || h==240 then
+    if w==610 && $LAY.software==0xA5 then
+      testertype=TT_A5L;               // A5L
+    else if w>=610 && w<=625 && $LAY.software==0xA5 &&                         \
+      ($LAY.config & LC_LDMASK)==LC_LMAUTO then
+      testertype=TT_A5L;               // A5A (L&M automate)
+    else
+      testertype=TT_WRONG;             // Unknown tester
+      ret=-1
+    endif
+  else if h>=250 && h<=260 then
+    if $LAY.software==0xB7 || ($LAY.config & LC_TYPEMASK)==LC_A8 then
+      testertype=TT_A7;                // A7
+    else
+      testertype=TT_WRONG              // Unknown tester
+      ret=-1
+    endif
+  else
+    testertype=TT_WRONG;               // Tester not recognized
+    ret=-1
+  endif
+  if testertype==TT_A1 || testertype==TT_A2 || testertype==TT_A2L ||           \
+    testertype==TT_A2H || testertype==TT_A4 || testertype==TT_A6 ||            \
+    testertype==TT_S1 || (testertype==TT_S2 && $LAY.nfing>4) ||                \
+    (testertype==TT_A8 && $LAY.nfing>4) then
+    if $EXTLAY.headcamradius!=0 then
+      headcamradius=$EXTLAY.headcamradius/1000.0
+    else
+      headcamradius=118.0
+    endif
+  else if testertype==TT_S2 || testertype==TT_A8 then
+    if $EXTLAY.headcamradius!=0 then
+      headcamradius=$EXTLAY.headcamradius/1000.0
+    else
+      headcamradius=118.0
+    endif
+  else                                 // A3/A5/A7 modifications
+    if $EXTLAY.headcamradius!=0 then
+      headcamradius=$EXTLAY.headcamradius/1000.0
+    else if testertype==TT_A7 then
+      headcamradius=183.0
+    else
+      headcamradius=153.0
+    endif
+  endif
+  return ret
+end
+
+// Makes single pressure test.
+function int Test()
+  int i,n,t
+  char s[1024]
+  float zero,pend,pmax,u[128],scale
+  if softtouch==1 then
+    scale=10.0
+  else if softtouch==2 then
+    scale=5.0
+  else
+    scale=1.0
+  endif
+  Text(hstroke,s); stroke=50; sscanf(s,"%i",&stroke);
+  Text(hpressure,s); pressure=50/scale
+  sscanf(s,"%i",&pressure); pressure=pressure*scale
+  Text(hheight,s); height=5.0; sscanf(s,"%f",&height);
+  for i=0,i<4,i++ do
+    if headbase+i==head continue
+    sprintf(s,"M %i(%f,%f) NOP",headbase+i,                                    \
+      ((i & 1)==0?basex-25.0:basex+25.0),                                      \
+      (i<2?basey-25.0:basey+25.0))
+    SERV.Cmdimm(3,s)
+  enddo
+  if side==0 then
+    fgnd=headbase+$LAY.nfing+1
+    f5v=headbase+$LAY.nfing+3
+    fagnd=headbase+$LAY.nfing+0
+    fout=headbase+$LAY.nfing+2
+    n=sprintf(s,"M %i[%f,%fH25] %i[%f,%fH25] %i[%f,%fH25] %i[%f,%fH25] ",      \
+      fgnd,basex+sensorx+20.0,basey+sensory-0.5,   \ // Ground supply finger
+      f5v,basex+sensorx+35.0,basey+sensory+0.5,    \ // +5 V finger
+      fagnd,basex+sensorx-20.0,basey+sensory-0.5,  \ // Reference ground finger
+      fout,basex+sensorx-35.0,basey+sensory+0.5)     // Signal finger
+    ;
+  else
+    fgnd=headbase-$LAY.nfing+0
+    f5v=headbase-$LAY.nfing+2
+    fagnd=headbase-$LAY.nfing+1
+    fout=headbase-$LAY.nfing+3
+    n=sprintf(s,"M %i[%f,%fH25] %i[%f,%fH25] %i[%f,%fH25] %i[%f,%fH25] ",      \
+      fgnd,basex+sensorx-20.0,basey+sensory-0.5,   \ // Ground supply finger
+      f5v,basex+sensorx-35.0,basey+sensory+0.5,    \ // +5 V finger
+      fagnd,basex+sensorx+20.0,basey+sensory-0.5,  \ // Reference ground finger
+      fout,basex+sensorx+35.0,basey+sensory+0.5)     // Signal finger
+    ;
+  endif
+  sprintf(s+n,"%i[%f,%fV%iP%iH%f] D(0x33,%i,%i,%i,%i,%i,0)",                   \
+    head,basex+sensorx,basey+sensory,              \ // Test head
+    stroke,pressure,height,                        \ // Stroke parameters
+    head,fgnd,f5v,fagnd,fout)          // Measurement
+  $A[0].length=0
+  SERV.Cmdimm(0,s)
+  t=Time()+10000                       // Wait 10 s for answer
+  while $A[0].length==0 do
+    if Pressed(hquit) return -1        // Operator interrupted test
+    if Time()>t break                  // No answer within timeout
+    wait
+  enddo
+  // Move test head away to allow for different pressure parameters.
+  sprintf(s,"M %i[%f,%f] NOP",head,basex+sensorx-0.1,basey+sensory);
+  SERV.Cmdimm(1,s)
+  if $A[0].length==261 && $A[0].answer==S_DEBUG then
+    // Answer is here, display.
+    for i=0,i<128,i++ do
+      u[i]=$uint2($A[0]+5+i*2)
+    enddo
+    zero=0.0; pend=0.0
+    // First data point is approximate time when contact was detected.
+    for i=0,i<10,i++ do
+      zero=zero+u[i+1]
+      pend=pend+u[i+118]
+    enddo
+    zero=zero/10.0
+    pend=pend/10.0-zero
+    draw window=hplot color=LIGHTGRAY bkcolor=WHITE clear
+    // Draw grid.
+    for i=-1,i<=15,i++ do
+      draw at 10,PLOTDY-30-i*20 to PLOTDX-10,PLOTDY-30-i*20
+    enddo
+    for i=1,i<=13,i++ do
+      draw at i*30+10,10 to i*30+10,PLOTDY-10
+    enddo
+    // Draw axii.
+    draw color=BLACK at 10,10 to 10,PLOTDY-10
+    draw at 10,PLOTDY-30 to PLOTDX-10,PLOTDY-30
+    // Draw moment of contact.
+    if u[0]!=0 then
+      draw color=LIGHTRED
+      draw at u[0]*3+10,20 to u[0]*3+10,PLOTDY-30
+    endif
+    draw color=BLACK
+    for i=0,i<127,i++ do
+      if i==0 then
+        draw at i*3+10,PLOTDY-30-(u[i+1]-zero)/FACTOR*scale
+        pmax=u[i+1]-zero
+      else
+        draw to i*3+10,PLOTDY-30-(u[i+1]-zero)/FACTOR*scale
+        pmax=Max(pmax,u[i+1]-zero)
+      endif
+    enddo
+    draw show
+    change hstatus text=format(" Pfin=%.1f, Pmax=%.1f g",                      \
+      pend/FACTOR,pmax/FACTOR)
+    ;
+  endif
+end
+
+function int Hiliterails(int side,int rail)
+  int i,j
+  for j=0,j<2,j++ do
+    for i=$LAY.nfing/2-2,i>=0,i-- do
+      change hrail[j,i] color=(i==rail && j==side?LIGHTRED:BLACK)
+    enddo
+  enddo
+end
+
+function int Hidepos()
+  change hu position=-1000,190,40,40
+  change hl position=-1000,230,40,40
+  change hr position=-1000,230,40,40
+  change hd position=-1000,270,40,40
+  disable hu
+  disable hl
+  disable hr
+  disable hd
+end
+
+function int Showpos()
+  enable hu
+  enable hl
+  enable hr
+  enable hd
+  change hu position=PLOTDX+68,190,40,40
+  change hl position=PLOTDX+28,230,40,40
+  change hr position=PLOTDX+108,230,40,40
+  change hd position=PLOTDX+68,270,40,40
+end
+
+function int Hideunlock()
+  change hunlock position=-1000,270,153,40
+  disable hunlock
+end
+
+function int Showunlock()
+  enable hunlock
+  change hunlock position=PLOTDX+12,270,153,40
+end
+
+function int Hidedone()
+  change hdone position=-1000,320,153,40
+  disable hdone
+end
+
+function int Showdone()
+  enable hdone
+  change hdone position=PLOTDX+12,320,153,40
+end
+
+function int Hidehead()
+  int i
+  for i=0,i<4,i++ do
+    change hhead[i] position=-1000,250-(i/2)*40,73,35
+    disable hhead[i]
+  enddo
+end
+
+function int Showhead(int hilited)
+  int i
+  for i=0,i<4,i++ do
+    enable hhead[i]
+    change hhead[i] color=(hilited==i?LIGHTRED:BLACK)
+    change hhead[i] text=format("%i%c",(i+headbase)/2,(i & 1?'R':'L'))
+    change hhead[i] bkcolor=(hilited==i?YELLOW:WHITE)
+    change hhead[i] position=PLOTDX+12+(i & 1)*80,250-(i/2)*40,73,35
+  enddo
+end
+
+function int Hidestart()
+  change hstart position=-1000,320,153,40
+  disable hstart
+end
+
+function int Showstart(int running)
+  enable hstart
+  change hstart text=(running?"Stop":"Test")
+  change hstart color=(running?LIGHTRED:BLACK)
+  change hstart bkcolor=(running?YELLOW:LIGHTYELLOW)
+  change hstart position=PLOTDX+12,320,153,40
+end
+
+function int Installtext(int side,int rail)
+  int i,p[8]
+  draw window=hplot bkcolor=WHITE clear
+  draw at 12,25 wrap=PLOTDX-10 font=MEDIUMFONT color=BLUE
+  draw text="Position board with pressure sensor in shuttle so that sensor "
+  draw text=format("looks %s and is placed on the ",side?"down":"upstairs")
+  draw text=format("border between rails %i and ",$LAY.nfing/2*side+rail)
+  draw text=format("%i. Press ",$LAY.nfing/2*side+rail+1)
+  draw color=RED text="Done " color=BLUE text="when ready."
+  draw color=BLACK bkcolor=LIGHTYELLOW
+  draw color=DARKGRAY at 35,140 to PLOTDX-35,140 font=INFOFONT
+  draw at 45,138 text=format("Rail %i",$LAY.nfing/2*side+rail+1)
+  draw at 45,157 text=format("Rail %i",$LAY.nfing/2*side+rail)
+  draw color=BLACK at PLOTDX/2-80,120 fillrect PLOTDX/2+80,PLOTDY-30
+  draw bkcolor=STRANGE
+  for i=0,i<8,i++ do
+    if i==3 || i==4 continue
+    p[0]=PLOTDX/2+i*18-58; p[1]=140
+    p[2]=PLOTDX/2+i*18-63; p[3]=135
+    p[4]=PLOTDX/2+i*18-68; p[5]=140
+    p[6]=PLOTDX/2+i*18-63; p[7]=145
+    draw polygon=p,4
+  enddo
+  if side==0 then
+    draw at PLOTDX/2,140 fillellipse 16,16
+    draw at PLOTDX/2,140 ellipse 6,6
+    draw bkcolor=LIGHTGRAY at PLOTDX/2-60,160 fillrect PLOTDX/2+60,PLOTDY-35
+  else
+    draw color=GRAY at PLOTDX/2,140 ellipse 16,16
+    draw at PLOTDX/2,140 ellipse 6,6
+    draw at PLOTDX/2-60,160 rect PLOTDX/2+60,PLOTDY-35
+  endif
+  draw show
+end
+
+// Given head, returns associated video channel, or -1 if head is invalid or
+// carries no camera.
+function int Channelfromhead(int head)
+  int i,channel
+  if $LAY.cameras!=0 then
+    if head==$LAY.nfing*2 return 0
+    if head==$LAY.nfing*2+1 return 1
+  else if ($LAY.headcameras & (1<<head))!=0 then
+    channel=0
+    for i=0,i<head,i++ do
+      if ($LAY.headcameras & (1<<i))!=0 channel++
+    enddo
+    return channel
+  endif
+  return -1
+end
+
+// Given Y coordinate in millimeters and side, selects camera controller and
+// corresponding video channel. Returns head on success, and -1 on any error.
+function int Camerafromyside(float y,int side,int *channel,float *angle)
+  int head
+  float h
+  if $LAY.cameras!=0 then
+    if side==0 && ($LAY.cameras & 0x01)!=0 then
+      channel[0]=0
+    else if side==1 && ($LAY.cameras & 0x02)!=0 then
+      channel[0]=1
+    else
+      return -1
+    endif
+    angle[0]=0.0
+    return $LAY.nfing*2+channel[0]
+  else if $LAY.headcameras!=0 then
+    for head=0,head<$LAY.nfing*2,head++ do
+      if ($LAY.headcameras & (1<<head))==0 continue
+      if ($LAY.excludedrails & (1<<(head/2)))!=0 continue
+      if $LAY.side[head/2]!=side continue
+      if $LAY.top[head/2]/1000.0<=y continue
+      if $LAY.bottom[head/2]/1000.0>y continue
+      break
+    enddo
+    if head>=$LAY.nfing*2 return -1
+    channel[0]=Channelfromhead(head)
+    h=y-$LAY.yoffset[head/2]/1000.0
+    angle[0]=(Abs(h)>0.9*headcamradius?0.0:Asin(h/headcamradius))
+    if side!=0 angle[0]=-angle[0]
+    if (head & 1)!=0 angle[0]=-angle[0]
+    return head
+  else
+    return -1                          // No cameras
+  endif
+end
+
+function int Livevideo()
+  draw window=hplot bkcolor=WHITE clear color=BLACK font=INFOFONT
+  draw at 15,323 text="Brightness"
+  draw at 15,353 text="Contrast"
+  draw show
+  hvideo=control GRAPH
+    window=hplot
+    position=14,5,384,288
+    help="实时视频"
+    bkcolor=VIDEOFILL
+  endc
+  draw window=hvideo color=LIGHTRED
+  draw at 384/2,288/2 ellipse 80,80
+  draw show
+  hbrit=control HSCROLL
+    window=hplot
+    position=90,305,150,24
+    name="浜搴"
+    help="滚动更改视频图像的亮度"
+    limits=-100,100
+  endc
+  hcontr=control HSCROLL
+    window=hplot
+    position=90,335,150,24
+    name="瀵规搴"
+    help="滚动更改视频图像的对比度"
+    limits=-100,100
+  endc
+  bright=Status(hbrit)
+  contr=Status(hcontr)
+  videohead=Camerafromyside(basey+sensory,side,&channel,&angle)
+  if videohead<0 return
+  SYS.Videoangle(hvideo,channel,side,0.5,bright,contr,2,angle)
+end
+
+function int Setlivevideo()
+  bright=Status(hbrit)
+  contr=Status(hcontr)
+  videohead=Camerafromyside(basey+sensory,side,&channel,&angle)
+  if videohead<0 return
+  SYS.Videoangle(hvideo,channel,side,0.5,bright,contr,2,angle)
+end
+
+function int Destroyvideo()
+  if hvideo!=NULL then
+    destroy hvideo
+    destroy hbrit
+    destroy hcontr
+    hvideo=NULL
+    draw window=hplot bkcolor=WHITE clear show
+  endif
+end
+
+function int main()
+  int i,j,movecamera
+  char s[256]
+  if Recognizetester()!=0 then
+    lprintf(RED,"Pressure.scr: unrecognized or unsupported tester")
+    return
+  endif
+  if ($EXTLAY.zheadtype & HCZ_CONTMASK)==HCZ_CONTSPL ||                        \
+    ($EXTLAY.zheadtype & HCZ_CONTMASK)==HCZ_CONTSKP then
+    softtouch=1                        // Soft splinogramm
+  else if ($EXTLAY.zheadtype & HCZ_CONTMASK)==HCZ_CONTHSPL then
+    softtouch=2                        // Hard splinogramm
+  else
+    softtouch=0                        // Ordinary needle
+  endif
+  hmain=control WINDOW
+    window=NULL
+    position=10,10,PLOTDX+170,PLOTDY+40
+    name=format("娴 v%s",VERSION)
+    help=" "
+    bkcolor=LIGHTGRAY
+    size=256
+  endc
+  hstatus=control TEXT
+    window=hmain
+    position=5,5,PLOTDX+2,24
+    name=format(" 娴 v%s",VERSION)
+    help="压力测量状态"
+    font=MEDIUMFONT
+    mode=M_BORDER
+  endc
+  hplot=control GRAPH
+    window=hmain
+    position=6,34,PLOTDX,PLOTDY
+    help="压力数据"
+    bkcolor=WHITE
+  endc
+  draw window=hmain font=INFOFONT
+  draw at PLOTDX+13,24 text="Stroke"
+  draw at PLOTDX+130,24 text="mm/s"
+  hstroke=control COMBOLIST
+    window=hmain
+    position=PLOTDX+72,5,54,240
+    help="选择行程, mm/s"
+    font=MAINFONT
+    mode=M_VSCROLL
+  endc
+  add hstroke text="10"
+  add hstroke text="20"
+  add hstroke text="30"
+  add hstroke text="40"
+  add hstroke text="50"
+  add hstroke text="60"
+  add hstroke text="70"
+  add hstroke text="80"
+  add hstroke text="90"
+  add hstroke text="100"
+  add hstroke text="110"
+  add hstroke text="120"
+  change hstroke select=4
+  draw at PLOTDX+13,52 text="Pressure"
+  draw at PLOTDX+130,52 text="g"
+  hpressure=control COMBOLIST
+    window=hmain
+    position=PLOTDX+72,33,54,240
+    help="选择压力, 克"
+    font=MAINFONT
+    mode=M_VSCROLL
+  endc
+  if softtouch==0 then
+    add hpressure text="10"
+    add hpressure text="20"
+    add hpressure text="30"
+    add hpressure text="40"
+    add hpressure text="50"
+    add hpressure text="60"
+    add hpressure text="70"
+    add hpressure text="80"
+    add hpressure text="90"
+    add hpressure text="100"
+    add hpressure text="110"
+    add hpressure text="120"
+    change hpressure select=4
+  else if softtouch==1 then
+    add hpressure text="3"
+    add hpressure text="4"
+    add hpressure text="5"
+    add hpressure text="6"
+    add hpressure text="7"
+    add hpressure text="8"
+    add hpressure text="9"
+    add hpressure text="10"
+    add hpressure text="11"
+    add hpressure text="12"
+    add hpressure text="13"
+    add hpressure text="14"
+    add hpressure text="15"
+    change hpressure select=2
+  else if softtouch==2 then
+    add hpressure text="6"
+    add hpressure text="8"
+    add hpressure text="10"
+    add hpressure text="12"
+    add hpressure text="14"
+    add hpressure text="16"
+    add hpressure text="18"
+    add hpressure text="20"
+    add hpressure text="22"
+    add hpressure text="24"
+    add hpressure text="26"
+    add hpressure text="28"
+    add hpressure text="30"
+    change hpressure select=2
+  endif
+  draw at PLOTDX+13,80 text="Height"
+  draw at PLOTDX+130,80 text="mm"
+  hheight=control COMBOLIST
+    window=hmain
+    position=PLOTDX+72,61,54,240
+    help="选择高度,  mm"
+    font=MAINFONT
+    mode=M_VSCROLL
+  endc
+  add hheight text="0.5"
+  add hheight text="1.0"
+  add hheight text="1.5"
+  add hheight text="2.0"
+  add hheight text="3.0"
+  add hheight text="5.0"
+  add hheight text="7.0"
+  add hheight text="10.0"
+  add hheight text="15.0"
+  add hheight text="20.0"
+  add hheight text="25.0"
+  change hheight select=5
+  for j=0,j<2,j++ do                   // Side
+    for i=$LAY.nfing/2-2,i>=0,i-- do   // Rails
+      hrail[j][i]=control BUTTON
+        window=hmain
+        position=PLOTDX+12+j*80,152-i*26,73,22
+        text=format("Rails %i, %i",($LAY.nfing/2)*j+i,($LAY.nfing/2)*j+i+1)
+        help="按下可选择指定的轨道"
+      endc
+    enddo
+  enddo
+  // Positioning buttons (out of sight and disabled)
+  hu=control BUTTON
+    window=hmain
+    position=-1000,190,40,40
+    name="涓"
+    help="按住可向上移动相机"
+    mode=M_REPEAT
+    bkcolor=LIGHTYELLOW
+    font=MEDIUMFONT
+  endc
+  hl=control BUTTON
+    window=hmain
+    position=-1000,230,40,40
+    name="宸"
+    help="按住不放，将相机向上移动"
+    mode=M_REPEAT
+    bkcolor=LIGHTYELLOW
+    font=MEDIUMFONT
+  endc
+  hr=control BUTTON
+    window=hmain
+    position=-1000,230,40,40
+    name=""
+    help="按住不放，将相机向右移动"
+    mode=M_REPEAT
+    bkcolor=LIGHTYELLOW
+    font=MEDIUMFONT
+  endc
+  hd=control BUTTON
+    window=hmain
+    position=-1000,270,40,40
+    name="涓"
+    help="按住可向下移动相机"
+    mode=M_REPEAT
+    bkcolor=LIGHTYELLOW
+    font=MEDIUMFONT
+  endc
+  Hidepos()
+  hunlock=control BUTTON
+    window=hmain
+    position=PLOTDX+12,270,153,40
+    name="瑙ｉ"
+    font=MEDIUMFONT
+    bkcolor=LIGHTYELLOW
+    help="按下松开架板框"
+  endc
+  Hideunlock()
+  hdone=control BUTTON
+    window=hmain
+    position=PLOTDX+12,320,153,40
+    name="瀹"
+    font=MEDIUMFONT
+    color=BLACK
+    bkcolor=LIGHTYELLOW
+    help="完成就按下"
+  endc
+  Hidedone()
+  // Head selection buttons (out of sight and disabled)
+  for i=0,i<4,i++ do
+    hhead[i]=control BUTTON
+      window=hmain
+      position=-1000,250-(i/2)*40,73,35
+      help="按下测试指定的测试头"
+      bkcolor=WHITE
+      font=MEDIUMFONT
+    endc
+  enddo
+  Hidehead()
+  hstart=control BUTTON
+    window=hmain
+    position=PLOTDX+12,320,153,40
+    name="娴璇"
+    font=MEDIUMFONT
+    color=BLACK
+    bkcolor=LIGHTYELLOW
+    help="开始或停止压力测量"
+  endc
+  Hidestart()
+  hquit=control BUTTON
+    window=hmain
+    position=PLOTDX+12,PLOTDY+11,153,24
+    name=""
+    help="按下完成压力测试"
+  endc
+  testing=T_IDLE
+  while 1 do
+    if Pressed(hquit) break
+    for j=0,j<2,j++ do
+      for i=$LAY.nfing/2-2,i>=0,i-- do
+        if Pressed(hrail[j][i]) then
+          SYS.Softreset(0)
+          side=j
+          Hiliterails(j,i)
+          change hstatus text=" Please install pressure sensor"
+          testing=T_INSTALL
+          movecamera=0
+          headbase=$LAY.nfing*j+i*2
+          head=headbase
+          Destroyvideo()
+          Hidehead()
+          Hidestart()
+          Hidepos()
+          Showunlock()
+          Showdone()
+          Installtext(j,i)
+        endif
+      enddo
+    enddo
+    // Installation of pressure board.
+    if testing==T_INSTALL then
+      if Pressed(hunlock) then
+        s[0]=S_LOCKDOOR
+        s[1]=0                         // Unlock door
+        SYS.Send(2,s,0)                // Discard the answer
+      else if Pressed(hdone) then
+        change hstatus text=" Please find position of pressure sensor"
+        testing=T_POSITION
+        Hideunlock()
+        Showpos()
+        basex=$LAY.xoffset/1000.0
+        basey=$LAY.top[headbase/2]/1000.0
+        Livevideo()
+        $A[2].length=1
+        movecamera=1
+      endif
+    endif
+    // Location of pressure sensor.
+    if testing==T_POSITION then
+      if Pressed(hu) then
+        sensory=Min(5.0,Max(-5.0,sensory+0.1))
+        movecamera=1
+      else if Pressed(hd) then
+        sensory=Min(5.0,Max(-5.0,sensory-0.1))
+        movecamera=1
+      else if Pressed(hl) then
+        sensorx=Min(25.0,Max(-25.0,sensorx-0.1))
+        movecamera=1
+      else if Pressed(hr) then
+        sensorx=Min(25.0,Max(-25.0,sensorx+0.1))
+        movecamera=1
+      else if Pressed(hbrit) || Pressed(hcontr) then
+        bright=Status(hbrit)
+        contr=Status(hcontr)
+        SYS.Video(hvideo,side,side,0.5,bright,contr)
+      else if Pressed(hdone) then
+        change hstatus text=" Please select head and press Start"
+        testing=T_WAIT
+        movecamera=0
+        Destroyvideo()
+        Hidepos()
+        Hidedone()
+        Showhead(headbase-head)
+        Showstart(0)
+      else if movecamera && $A[2].length>0 then
+        Setlivevideo()
+        for i=0,i<$LAY.nfing*2,i++ do
+          if i==videohead then
+            sprintf(s,"M @%i[%f,%f] NOP",i,basex+sensorx,basey+sensory)
+            SERV.Cmdimm(2,s)           // Move camera
+          else
+            sprintf(s,"M %i(Z) NOP",i)
+            SERV.Cmdimm(4,s)           // Move head in home position
+          endif
+        enddo
+        if videohead>=$LAY.nfing*2 then
+          sprintf(s,"M %i(%f,%f) NOP",videohead,basex+sensorx,basey+sensory)
+          SERV.Cmdimm(2,s)             // Move camera
+        endif
+        movecamera=0
+      endif
+    endif
+    if testing==T_WAIT then
+      if Pressed(hstart) then
+        testing=T_RUN
+        Showstart(1)
+      endif
+    endif
+    if testing==T_WAIT || testing==T_RUN then
+      for i=0,i<4,i++ do
+        if Pressed(hhead[i]) then
+          testing=T_RUN
+          head=headbase+i
+          Showhead(i)
+          Showstart(1)
+        endif
+      enddo
+    endif
+    if testing==T_RUN then
+      if Pressed(hstart) then
+        testing=T_WAIT
+        Showstart(0)
+      else
+        if Test()<0 goto finish
+      endif
+    endif
+    wait
+  enddo
+finish:
+  clear hmain
+  wait
+  SYS.Softreset(0)
+end
+
